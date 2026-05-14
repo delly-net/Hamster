@@ -1,9 +1,10 @@
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
-using Hamster.Constant;
-using Hamster.Service;
+using Hamster.Modules.Todo;
+using Hamster.Modules.Todo.Constant;
+using Hamster.Modules.Todo.Service;
 
-namespace Hamster.Controller;
+namespace Hamster.Modules.Todo.Controller;
 
 /// <summary>
 /// Todo 控制器
@@ -43,11 +44,11 @@ public static class TodoController
     /// <param name="app">Web 应用</param>
     public static void RegisterRoutes(IEndpointRouteBuilder app)
     {
-        var todosApi = app.MapGroup(ApiPathConst.TODOS);
+        var todosApi = app.MapGroup(TodoApiPathConst.TODOS);
         todosApi.MapGet("/", GetAll)
-                .WithName(ApiNameConst.GET_TODOS);
+                .WithName(TodoApiNameConst.GET_TODOS);
 
-        todosApi.MapGet(ApiPathConst.TODO_BY_ID, GetById)
-                .WithName(ApiNameConst.GET_TODO_BY_ID);
+        todosApi.MapGet(TodoApiPathConst.TODO_BY_ID, GetById)
+                .WithName(TodoApiNameConst.GET_TODO_BY_ID);
     }
 }

@@ -7,9 +7,16 @@ A personal accounting assistant built with ASP.NET Core backend and Vue 3 fronte
 ```
 Hamster/
 ├── Hamster/              # ASP.NET Core backend (C#)
-│   ├── Program.cs        # Main application entry point with API endpoints
+│   ├── Program.cs        # Main application entry point
 │   ├── Hamster.csproj    # Project configuration (.NET 10.0)
-│   └── Properties/       # Launch settings and configuration
+│   ├── Properties/       # Launch settings and configuration
+│   ├── Config/           # Application configuration
+│   ├── Modules/          # Feature modules
+│   │   └── Todo/         # Todo module
+│   │       ├── Constant/ # Todo constants
+│   │       ├── Service/  # Todo services
+│   │       └── Controller/ # Todo controllers
+│   └── logs/             # Log files directory
 ├── Vue/                  # Vue 3 frontend (TypeScript)
 │   ├── src/
 │   │   ├── components/   # Vue components
@@ -94,8 +101,15 @@ pnpm preview
 ### Backend
 - **Database**: Use Sqlite with SqlSugar ORM, support environment variable for connection string
 - **Logging**: Use Serilog with environment variable for log directory
+- **Architecture**:
+  - Use modular code structure in Modules directory
+  - Organize by feature module/feature category hierarchy
+  - Constants stored in corresponding Constant directory by scope
+  - Each feature category maintains Service/Controller subdirectories
+  - Each feature category maintains its own AppJsonSerializerContext with Entity definitions
+  - Use MVC architecture for Controllers
 - **Naming**:
-  - Constants: UPPER_SNAKE_CASE, placed in Constant/ directory with classes ending in Const
+  - Constants: UPPER_SNAKE_CASE, classes end with `Const`
   - Service classes: Must end with `Service`
   - Controller classes: Must end with `Controller`
   - Namespaces must match directory structure

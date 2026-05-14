@@ -1,15 +1,10 @@
-namespace Hamster.Constant;
+namespace Hamster.Modules.Todo.Constant;
 
 /// <summary>
-/// API 路径常量
+/// Todo API 路径常量
 /// </summary>
-public static class ApiPathConst
+public static class TodoApiPathConst
 {
-    /// <summary>
-    /// API 前缀
-    /// </summary>
-    public const string API_PREFIX = "/api";
-
     /// <summary>
     /// Todos 路径
     /// </summary>

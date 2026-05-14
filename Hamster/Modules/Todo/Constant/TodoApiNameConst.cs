@@ -1,9 +1,9 @@
-namespace Hamster.Constant;
+namespace Hamster.Modules.Todo.Constant;
 
 /// <summary>
-/// API 名称常量
+/// Todo API 名称常量
 /// </summary>
-public static class ApiNameConst
+public static class TodoApiNameConst
 {
     /// <summary>
     /// 获取所有 Todos

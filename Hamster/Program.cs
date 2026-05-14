@@ -1,10 +1,10 @@
 using Serilog;
 using SqlSugar;
-using System.Text.Json.Serialization;
 using Hamster.Constant;
 using Hamster.Config;
-using Hamster.Service;
-using Hamster.Controller;
+using Hamster.Modules.Todo;
+using Hamster.Modules.Todo.Service;
+using Hamster.Modules.Todo.Controller;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -44,7 +44,7 @@ try
     builder.Services.AddScoped<ITodoService, TodoService>();
     builder.Services.ConfigureHttpJsonOptions(options =>
     {
-        options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
+        options.SerializerOptions.TypeInfoResolverChain.Insert(0, TodoJsonSerializerContext.Default);
     });
     builder.Services.AddOpenApi();
 
@@ -67,20 +67,4 @@ catch (Exception ex)
 finally
 {
     Log.CloseAndFlush();
-}
-
-/// <summary>
-/// Todo 实体
-/// </summary>
-/// <param name="Id">ID</param>
-/// <param name="Title">标题</param>
-/// <param name="DueBy">截止日期</param>
-/// <param name="IsComplete">是否完成</param>
-[SugarTable("todos")]
-public record Todo(int Id, string? Title, DateOnly? DueBy = null, bool IsComplete = false);
-
-[JsonSerializable(typeof(Todo[]))]
-internal partial class AppJsonSerializerContext : JsonSerializerContext
-{
-
 }

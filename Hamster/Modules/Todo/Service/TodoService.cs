@@ -1,7 +1,8 @@
 using SqlSugar;
-using Hamster.Constant;
+using Hamster.Modules.Todo;
+using Hamster.Modules.Todo.Constant;
 
-namespace Hamster.Service;
+namespace Hamster.Modules.Todo.Service;
 
 /// <summary>
 /// Todo 服务
@@ -25,7 +26,7 @@ public interface ITodoService
 /// <summary>
 /// Todo 服务实现
 /// </summary>
-public class TodoService : ITodoService
+public sealed class TodoService : ITodoService
 {
     private readonly ISqlSugarClient _db;
 
