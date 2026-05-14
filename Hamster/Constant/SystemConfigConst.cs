@@ -3,7 +3,7 @@ namespace Hamster.Constant;
 /// <summary>
 /// 配置相关常量
 /// </summary>
-public static class ConfigConst
+public static class SystemConfigConst
 {
     /// <summary>
     /// 数据库连接字符串环境变量名

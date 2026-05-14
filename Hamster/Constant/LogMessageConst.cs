@@ -1,9 +1,9 @@
 namespace Hamster.Constant;
 
 /// <summary>
-/// 示例数据常量
+/// 日志消息相关常量
 /// </summary>
-public static class SampleDataConst
+public static class LogMessageConst
 {
     /// <summary>
     /// 启动应用日志消息

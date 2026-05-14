@@ -7,11 +7,30 @@ A personal accounting assistant built with ASP.NET Core backend and Vue 3 fronte
 ```
 Hamster/
 ├── Hamster/                      # ASP.NET Core backend (C#)
-│   ├── Config/                   # Application configuration
-│   │   ├── AppSettings.cs        # Configuration classes (Database, Log)
-│   │   └── Constant/             # Constants
-│   │       ├── ConfigConst.cs    # Configuration constants (env vars, defaults)
-│   │       └── SampleDataConst.cs # Log message constants
+│   ├── Constant/                 # Global constants
+│   │   ├── SystemConfigConst.cs  # System configuration constants
+│   │   └── LogMessageConst.cs    # Log message constants
+│   ├── Modules/                  # Business modules (所有业务代码)
+│   │   ├── <功能模块>/           # Feature module directory
+│   │   │   ├── <功能模块>Router.cs    # Module router
+│   │   │   └── <功能分类>/       # Feature category directory
+│   │   │       ├── <功能分类>Router.cs    # Category router
+│   │   │       ├── <功能分类>Entity.cs    # Category entities
+│   │   │       ├── Constant/     # Category constants
+│   │   │       ├── Service/      # Service implementations
+│   │   │       └── Controller/   # API controllers
+│   │   └── Example/              # Example module
+│   │       ├── ExampleRouter.cs
+│   │       └── Simple/           # Example category
+│   │           ├── SimpleRouter.cs
+│   │           ├── SimpleEntity.cs
+│   │           ├── Constant/
+│   │           │   ├── SimpleApiNameConst.cs
+│   │           │   └── SimpleApiPathConst.cs
+│   │           ├── Service/
+│   │           │   └── TodoService.cs
+│   │           └── Controller/
+│   │               └── TodoController.cs
 │   ├── Program.cs                # Main application entry point
 │   ├── appsettings.json          # Application configuration
 │   └── Hamster.csproj            # Project configuration (.NET 10.0)
@@ -111,14 +130,30 @@ pnpm preview
 
 ## Backend Architecture
 
-### Namespaces
-- `Hamster.Config` - Configuration classes
-- `Hamster.Constant` - Application constants
+### Module Structure
+所有业务代码存储在 `Modules/` 目录下，按照**功能模块**/**功能分类**两级目录组织。
 
-### Configuration Classes
-- `AppSettings` - Root configuration with Database and Logging properties
-- `DatabaseConfig` - Database connection settings
-- `LogConfig` - Logging directory settings
+### Module Component Structure
+每个**功能分类**目录包含：
+- `<功能分类>Router.cs` - 分类路由注册类
+- `<功能分类>Entity.cs` - 分类实体定义
+- `Constant/` - 分类常量目录
+- `Service/` - 服务实现目录
+- `Controller/` - 控制器目录
+
+### Router Registration Flow
+```
+Program.cs -> <功能模块>Router.Register -> <功能分类>Router.Register
+```
+
+### API Route Naming
+- **规则**: `/<功能模块>/<功能分类>/<功能>/<接口>`
+- **格式**: 小写字母加横杠（kebab-case）
+- **示例**: `/example/simple/todo/get-by-id`
+
+### Global Constants
+- `SystemConfigConst` - 系统配置常量（数据库、日志相关）
+- `LogMessageConst` - 日志消息常量
 
 ### Dependencies
 - SqlSugarClient registered as singleton
@@ -152,11 +187,29 @@ pnpm preview
 
 ## Code Style
 
-### C#
-- Nullable reference types enabled
-- Implicit usings enabled
-- XML documentation comments for public APIs
-- Namespace-based organization (Config, Constant)
+### C# Naming Conventions
+- 所有常量遵循大写下划线格式命名（UPPER_SNAKE_CASE）
+- 所有常量定义类命名以 `Const` 结尾
+- 所有Service类命名以 `Service` 结尾
+- 所有Controller类命名以 `Controller` 结尾
+- Router类命名以 `Router` 结尾
+- Entity类命名以 `Entity` 结尾
+
+### C# Code Standards
+- 使用 `Service` 类进行实际逻辑实现
+- 使用 `Controller` 类进行接口定义，并调用 `Service` 实现功能
+- 使用 `record` 关键字定义实体对象
+- 字符串要进行常量定义（路径、名称定义、特性定义除外）
+- `if` 语句判断后的语句必须用大括号包裹，只有一行代码也不能省略
+- 命名空间要与目录结构完全吻合
+- 除非对话中明确要求，其他情况不允许额外添加依赖包
+- 项目需要进行AOT编译
+
+### C# Comment Standards
+- 所有 `public` 对象都需要使用 `///` 进行XML文档化注释
+- XML文档化注释中的 `param` 信息要匹配实际参数
+- 所有 `private` 对象只需要使用 `//` 进行注释，减少代码篇幅
+- 注释/符号与注释内容之间留有一个空格
 
 ### TypeScript/Vue
 - Single File Components with `<script setup>` syntax

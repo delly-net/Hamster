@@ -1,7 +1,7 @@
 using Serilog;
 using SqlSugar;
 using Hamster.Constant;
-using Hamster.Config;
+using Hamster.Modules.Example;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -10,22 +10,22 @@ Log.Logger = new LoggerConfiguration()
 
 try
 {
-    Log.Information(SampleDataConst.LOG_STARTING_APP);
+    Log.Information(LogMessageConst.LOG_STARTING_APP);
 
     var builder = WebApplication.CreateSlimBuilder(args);
 
     // 配置日志
-    var logPath = Environment.GetEnvironmentVariable(ConfigConst.LOG_PATH_ENV) ?? ConfigConst.DEFAULT_LOG_PATH;
+    var logPath = Environment.GetEnvironmentVariable(SystemConfigConst.LOG_PATH_ENV) ?? SystemConfigConst.DEFAULT_LOG_PATH;
     builder.Host.UseSerilog((_, configuration) => configuration
         .MinimumLevel.Information()
         .WriteTo.Console()
         .WriteTo.File(
-            Path.Combine(logPath, ConfigConst.LOG_FILE_TEMPLATE),
+            Path.Combine(logPath, SystemConfigConst.LOG_FILE_TEMPLATE),
             rollingInterval: RollingInterval.Day));
 
     // 配置数据库
-    var connectionString = Environment.GetEnvironmentVariable(ConfigConst.DB_CONNECTION_ENV)
-        ?? ConfigConst.DEFAULT_CONNECTION;
+    var connectionString = Environment.GetEnvironmentVariable(SystemConfigConst.DB_CONNECTION_ENV)
+        ?? SystemConfigConst.DEFAULT_CONNECTION;
     builder.Services.AddSingleton<ISqlSugarClient>(_ =>
     {
         var db = new SqlSugarClient(new ConnectionConfig
@@ -46,11 +46,14 @@ try
         app.MapOpenApi();
     }
 
+    // 注册路由
+    ExampleRouter.Register(app);
+
     app.Run();
 }
 catch (Exception ex)
 {
-    Log.Fatal(ex, SampleDataConst.LOG_APP_TERMINATED_UNEXPECTEDLY);
+    Log.Fatal(ex, LogMessageConst.LOG_APP_TERMINATED_UNEXPECTEDLY);
 }
 finally
 {
