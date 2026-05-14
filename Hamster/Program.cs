@@ -1,9 +1,10 @@
-using Microsoft.AspNetCore.Http.HttpResults;
 using Serilog;
 using SqlSugar;
 using System.Text.Json.Serialization;
 using Hamster.Constant;
 using Hamster.Config;
+using Hamster.Service;
+using Hamster.Controller;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -40,11 +41,11 @@ try
         return db;
     });
 
+    builder.Services.AddScoped<ITodoService, TodoService>();
     builder.Services.ConfigureHttpJsonOptions(options =>
     {
         options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
     });
-
     builder.Services.AddOpenApi();
 
     var app = builder.Build();
@@ -54,24 +55,8 @@ try
         app.MapOpenApi();
     }
 
-    Todo[] sampleTodos =
-    [
-        new(1, SampleDataConst.TODO_WALK_DOG),
-        new(2, SampleDataConst.TODO_DO_DISHES, DateOnly.FromDateTime(DateTime.Now)),
-        new(3, SampleDataConst.TODO_DO_LAUNDRY, DateOnly.FromDateTime(DateTime.Now.AddDays(1))),
-        new(4, SampleDataConst.TODO_CLEAN_BATHROOM),
-        new(5, SampleDataConst.TODO_CLEAN_CAR, DateOnly.FromDateTime(DateTime.Now.AddDays(2)))
-    ];
-
-    var todosApi = app.MapGroup(ApiPathConst.TODOS);
-    todosApi.MapGet("/", () => sampleTodos)
-            .WithName(ApiNameConst.GET_TODOS);
-
-    todosApi.MapGet(ApiPathConst.TODO_BY_ID, Results<Ok<Todo>, NotFound> (int id) =>
-        sampleTodos.FirstOrDefault(a => a.Id == id) is { } todo
-            ? TypedResults.Ok(todo)
-            : TypedResults.NotFound())
-        .WithName(ApiNameConst.GET_TODO_BY_ID);
+    // 注册 Controller 路由
+    TodoController.RegisterRoutes(app);
 
     app.Run();
 }

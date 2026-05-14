@@ -92,13 +92,17 @@ pnpm preview
 ## Code Style
 
 ### Backend
-- **Database**: Use Sqlite with SqlSugar ORM
+- **Database**: Use Sqlite with SqlSugar ORM, support environment variable for connection string
 - **Logging**: Use Serilog with environment variable for log directory
 - **Naming**:
   - Constants: UPPER_SNAKE_CASE, placed in Constant/ directory with classes ending in Const
+  - Service classes: Must end with `Service`
+  - Controller classes: Must end with `Controller`
   - Namespaces must match directory structure
 - **Code Style**:
-  - All string literals must be defined as constants
+  - Use Service classes for business logic implementation
+  - Use Controller classes for API definition, calling Service for functionality
+  - String literals must be defined as constants (paths, names, attribute definitions excluded)
   - All if statements must use braces, even for single-line blocks
   - No extra dependencies unless explicitly requested
   - AOT compilation required
