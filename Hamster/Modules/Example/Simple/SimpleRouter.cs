@@ -14,7 +14,9 @@ public static class SimpleRouter
     public static void Register(WebApplication app)
     {
         var group = app.MapGroup("/example/simple/todo");
-        TodoController.MapGetAllTodos(group);
+        var todoController = new TodoController();
+        todoController.RouteRegister(group);
+        // TodoController.MapGetAllTodos(group);
         TodoController.MapGetTodoById(group);
         TodoController.MapCreateTodo(group);
         TodoController.MapUpdateTodo(group);

@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="Hamster.Core/Hamster.Core.csproj" Id="2cd6ba29-d95e-4bf4-9054-90cf1135cd54" />
   <Project Path="Hamster/Hamster.csproj" />
 </Solution>

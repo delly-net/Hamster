@@ -1,7 +1,8 @@
 using Serilog;
-using SqlSugar;
 using Hamster.Constant;
 using Hamster.Modules.Example;
+using Hamster.Modules.Example.Simple;
+using Hamster.Modules.Example.Simple.Service;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -26,18 +27,13 @@ try
     // 配置数据库
     var connectionString = Environment.GetEnvironmentVariable(SystemConfigConst.DB_CONNECTION_ENV)
         ?? SystemConfigConst.DEFAULT_CONNECTION;
-    builder.Services.AddSingleton<ISqlSugarClient>(_ =>
-    {
-        var db = new SqlSugarClient(new ConnectionConfig
-        {
-            ConnectionString = connectionString,
-            DbType = DbType.Sqlite,
-            IsAutoCloseConnection = true
-        });
-        return db;
-    });
+    builder.Services.AddSingleton<IDatabaseService>(_ => new DatabaseService(connectionString));
 
     builder.Services.AddOpenApi();
+    builder.Services.ConfigureHttpJsonOptions(options =>
+    {
+        options.SerializerOptions.TypeInfoResolver = SimpleJsonSerializerContext.Default;
+    });
 
     var app = builder.Build();
 

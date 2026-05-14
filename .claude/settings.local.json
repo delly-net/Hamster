@@ -7,7 +7,16 @@
       "Bash(rm Todo.cs)",
       "Bash(rm Todo/Todo.cs)",
       "Bash(cd x:/Project.Github/delly-net/amster && cat Hamster/Program.cs)",
-      "Read(//x/Project.Github/delly-net/**)"
+      "Read(//x/Project.Github/delly-net/**)",
+      "Bash(timeout 3 dotnet run)",
+      "Bash(curl -s http://localhost:5004/example/simple/todo/get-all)",
+      "Bash(dotnet run *)",
+      "Bash(curl -s http://localhost:5004/example/simple/todo/get-all-todos)",
+      "Bash(taskkill //F //IM Hamster.exe)",
+      "Bash(curl -s -X POST http://localhost:5004/example/simple/todo/create -H \"Content-Type: application/json\" -d '{\"title\":\"Test Todo\",\"isComplete\":false}')",
+      "Bash(sqlite3 hamster.db \".schema todos\")",
+      "Bash(dotnet publish *)",
+      "Bash(dotnet clean *)"
     ]
   }
 }

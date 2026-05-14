@@ -1,24 +1,35 @@
 namespace Hamster.Modules.Example.Simple.Controller;
 
-using SqlSugar;
 using Hamster.Modules.Example.Simple;
 using Hamster.Modules.Example.Simple.Service;
 using Hamster.Modules.Example.Simple.Constant;
+using Hamster.Core;
 
 /// <summary>
 /// Todo 控制器
 /// </summary>
-public static class TodoController
+[AotController]
+public sealed partial class TodoController
 {
+    /// <summary>
+    /// 获取所有Todo
+    /// </summary>
+    /// <param name="routeBuilder">路由构建器</param>
+    public IResult GetAllTodos(IDatabaseService databaseService)
+    {
+        var todos = TodoService.GetAllTodos(databaseService);
+        return Results.Ok(todos);
+    }
+
     /// <summary>
     /// 获取所有Todo
     /// </summary>
     /// <param name="routeBuilder">路由构建器</param>
     public static void MapGetAllTodos(IEndpointRouteBuilder routeBuilder)
     {
-        routeBuilder.MapGet(SimpleApiPathConst.GET_ALL_TODOS, (ISqlSugarClient db) =>
+        routeBuilder.MapGet(SimpleApiPathConst.GET_ALL_TODOS, (IDatabaseService databaseService) =>
         {
-            var todos = TodoService.GetAllTodos(db);
+            var todos = TodoService.GetAllTodos(databaseService);
             return Results.Ok(todos);
         });
     }
@@ -29,9 +40,9 @@ public static class TodoController
     /// <param name="routeBuilder">路由构建器</param>
     public static void MapGetTodoById(IEndpointRouteBuilder routeBuilder)
     {
-        routeBuilder.MapGet(SimpleApiPathConst.GET_TODO_BY_ID, (ISqlSugarClient db, int id) =>
+        routeBuilder.MapGet(SimpleApiPathConst.GET_TODO_BY_ID, (IDatabaseService databaseService, int id) =>
         {
-            var todo = TodoService.GetTodoById(db, id);
+            var todo = TodoService.GetTodoById(databaseService, id);
             if (todo is null)
             {
                 return Results.NotFound();
@@ -46,16 +57,10 @@ public static class TodoController
     /// <param name="routeBuilder">路由构建器</param>
     public static void MapCreateTodo(IEndpointRouteBuilder routeBuilder)
     {
-        routeBuilder.MapPost(SimpleApiPathConst.CREATE_TODO, (ISqlSugarClient db, Todo todo) =>
+        routeBuilder.MapPost(SimpleApiPathConst.CREATE_TODO, (IDatabaseService databaseService, Todo todo) =>
         {
-            var id = TodoService.CreateTodo(db, todo);
-            var createdTodo = new Todo
-            {
-                Id = id,
-                Title = todo.Title,
-                DueBy = todo.DueBy,
-                IsComplete = todo.IsComplete
-            };
+            var id = TodoService.CreateTodo(databaseService, todo);
+            var createdTodo = new Todo(id, todo.Title, todo.DueBy, todo.IsComplete);
             return Results.Created($"/todo/{id}", createdTodo);
         });
     }
@@ -66,9 +71,9 @@ public static class TodoController
     /// <param name="routeBuilder">路由构建器</param>
     public static void MapUpdateTodo(IEndpointRouteBuilder routeBuilder)
     {
-        routeBuilder.MapPut(SimpleApiPathConst.UPDATE_TODO, (ISqlSugarClient db, Todo todo) =>
+        routeBuilder.MapPut(SimpleApiPathConst.UPDATE_TODO, (IDatabaseService databaseService, Todo todo) =>
         {
-            TodoService.UpdateTodo(db, todo);
+            TodoService.UpdateTodo(databaseService, todo);
             return Results.NoContent();
         });
     }
@@ -79,9 +84,9 @@ public static class TodoController
     /// <param name="routeBuilder">路由构建器</param>
     public static void MapDeleteTodo(IEndpointRouteBuilder routeBuilder)
     {
-        routeBuilder.MapDelete(SimpleApiPathConst.DELETE_TODO, (ISqlSugarClient db, int id) =>
+        routeBuilder.MapDelete(SimpleApiPathConst.DELETE_TODO, (IDatabaseService databaseService, int id) =>
         {
-            TodoService.DeleteTodo(db, id);
+            TodoService.DeleteTodo(databaseService, id);
             return Results.NoContent();
         });
     }
