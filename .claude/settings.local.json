@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(dotnet add *)",
-      "Bash(dotnet build *)"
+      "Bash(dotnet build *)",
+      "Bash(dotnet remove *)",
+      "Bash(rm Todo.cs)",
+      "Bash(rm Todo/Todo.cs)",
+      "Bash(cd x:/Project.Github/delly-net/amster && cat Hamster/Program.cs)",
+      "Read(//x/Project.Github/delly-net/**)"
     ]
   }
 }

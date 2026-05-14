@@ -13,17 +13,17 @@ public static class ConfigConst
     /// <summary>
     /// 日志存储目录环境变量名
     /// </summary>
-    public const string LOG_DIR_ENV = "LOG_DIR";
+    public const string LOG_PATH_ENV = "LOG_PATH";
 
     /// <summary>
     /// 默认数据库连接字符串
     /// </summary>
-    public const string DEFAULT_DB_CONNECTION = "Data Source=hamster.db";
+    public const string DEFAULT_CONNECTION = "Data Source=hamster.db";
 
     /// <summary>
     /// 默认日志目录
     /// </summary>
-    public const string DEFAULT_LOG_DIR = "logs";
+    public const string DEFAULT_LOG_PATH = "logs";
 
     /// <summary>
     /// 日志文件模板

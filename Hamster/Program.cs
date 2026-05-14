@@ -2,9 +2,9 @@ using Serilog;
 using SqlSugar;
 using Hamster.Constant;
 using Hamster.Config;
-using Hamster.Modules.Todo;
-using Hamster.Modules.Todo.Service;
-using Hamster.Modules.Todo.Controller;
+using Hamster.Modules.Example.Simple;
+using Hamster.Modules.Example.Simple.Service;
+using Hamster.Modules;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -18,22 +18,22 @@ try
     var builder = WebApplication.CreateSlimBuilder(args);
 
     // 配置日志
-    var logDir = Environment.GetEnvironmentVariable(ConfigConst.LOG_DIR_ENV) ?? ConfigConst.DEFAULT_LOG_DIR;
+    var logPath = Environment.GetEnvironmentVariable(ConfigConst.LOG_PATH_ENV) ?? ConfigConst.DEFAULT_LOG_PATH;
     builder.Host.UseSerilog((_, configuration) => configuration
         .MinimumLevel.Information()
         .WriteTo.Console()
         .WriteTo.File(
-            Path.Combine(logDir, ConfigConst.LOG_FILE_TEMPLATE),
+            Path.Combine(logPath, ConfigConst.LOG_FILE_TEMPLATE),
             rollingInterval: RollingInterval.Day));
 
     // 配置数据库
-    var dbConnectionString = Environment.GetEnvironmentVariable(ConfigConst.DB_CONNECTION_ENV)
-        ?? ConfigConst.DEFAULT_DB_CONNECTION;
+    var connectionString = Environment.GetEnvironmentVariable(ConfigConst.DB_CONNECTION_ENV)
+        ?? ConfigConst.DEFAULT_CONNECTION;
     builder.Services.AddSingleton<ISqlSugarClient>(_ =>
     {
         var db = new SqlSugarClient(new ConnectionConfig
         {
-            ConnectionString = dbConnectionString,
+            ConnectionString = connectionString,
             DbType = DbType.Sqlite,
             IsAutoCloseConnection = true
         });
@@ -56,7 +56,7 @@ try
     }
 
     // 注册 Controller 路由
-    TodoController.RegisterRoutes(app);
+    app.Register();
 
     app.Run();
 }
