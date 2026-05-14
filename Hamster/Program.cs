@@ -2,9 +2,6 @@ using Serilog;
 using SqlSugar;
 using Hamster.Constant;
 using Hamster.Config;
-using Hamster.Modules.Example.Simple;
-using Hamster.Modules.Example.Simple.Service;
-using Hamster.Modules;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -37,15 +34,9 @@ try
             DbType = DbType.Sqlite,
             IsAutoCloseConnection = true
         });
-        db.CodeFirst.InitTables(typeof(Todo));
         return db;
     });
 
-    builder.Services.AddScoped<ITodoService, TodoService>();
-    builder.Services.ConfigureHttpJsonOptions(options =>
-    {
-        options.SerializerOptions.TypeInfoResolverChain.Insert(0, TodoJsonSerializerContext.Default);
-    });
     builder.Services.AddOpenApi();
 
     var app = builder.Build();
@@ -54,9 +45,6 @@ try
     {
         app.MapOpenApi();
     }
-
-    // 注册 Controller 路由
-    app.Register();
 
     app.Run();
 }
