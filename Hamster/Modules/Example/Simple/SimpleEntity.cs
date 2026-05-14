@@ -1,13 +1,4 @@
-using System.Text.Json.Serialization;
-
 namespace Hamster.Modules.Example.Simple;
-
-/// <summary>
-/// Simple分类Json序列化上下文
-/// </summary>
-[JsonSerializable(typeof(Todo))]
-[JsonSerializable(typeof(List<Todo>))]
-public sealed partial class SimpleJsonSerializerContext : JsonSerializerContext;
 
 /// <summary>
 /// Todo 实体

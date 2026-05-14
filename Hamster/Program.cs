@@ -1,7 +1,7 @@
 using Serilog;
+using Hamster;
 using Hamster.Constant;
 using Hamster.Modules.Example;
-using Hamster.Modules.Example.Simple;
 using Hamster.Modules.Example.Simple.Service;
 
 Log.Logger = new LoggerConfiguration()
@@ -32,7 +32,7 @@ try
     builder.Services.AddOpenApi();
     builder.Services.ConfigureHttpJsonOptions(options =>
     {
-        options.SerializerOptions.TypeInfoResolver = SimpleJsonSerializerContext.Default;
+        options.SerializerOptions.TypeInfoResolver = AppJsonSerializerContext.Default;
     });
 
     var app = builder.Build();
