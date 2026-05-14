@@ -91,6 +91,25 @@ pnpm preview
 
 ## Code Style
 
+### Backend
+- **Database**: Use Sqlite with SqlSugar ORM
+- **Logging**: Use Serilog with environment variable for log directory
+- **Naming**:
+  - Constants: UPPER_SNAKE_CASE, placed in Constant/ directory with classes ending in Const
+  - Namespaces must match directory structure
+- **Code Style**:
+  - All string literals must be defined as constants
+  - All if statements must use braces, even for single-line blocks
+  - No extra dependencies unless explicitly requested
+  - AOT compilation required
+  - Report issues with unreasonable requirements before proceeding
+- **Comments**:
+  - Public objects: Use `///` XML documentation comments
+  - XML param comments must match actual parameters
+  - Private objects: Use `//` single-line comments only
+  - Space between comment symbol and content
+
+### Frontend
 - **C#**: Nullable reference types enabled, implicit usings enabled
 - **TypeScript**: Strict type checking via `tsconfig.json`
 - **Linting**: ESLint + oxlint with Prettier formatting
