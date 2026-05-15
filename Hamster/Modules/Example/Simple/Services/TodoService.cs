@@ -14,9 +14,15 @@ public static class TodoService
     /// <returns>Todo列表</returns>
     public static List<Todo> GetAllTodos(IDatabaseService databaseService)
     {
-        var todo = new Todo.Named();
+        var todo = Todo.Named.Instance;
+        var v = Todo.Defined.Instance;
         var t = new Todo.Named("t");
-        var sql = $"SELECT {t.Id},{t.Title} FROM {todo} {t}";
+        var sql = @$"SELECT 
+                        {t.Id} AS {v.Id},
+                        {t.Title} AS {v.Title},
+                        {t.DueBy} AS {v.DueBy},
+                        {t.IsComplete} AS {v.IsComplete}
+                     FROM {todo} {t}";
 
         using var connection = databaseService.GetConnection();
         connection.Open();
