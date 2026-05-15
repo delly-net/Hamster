@@ -1,4 +1,5 @@
 using Hamster.Modules.Example.Simple.Entities;
+using Hamster.Modules.Kernel.Data.Services;
 
 namespace Hamster.Modules.Example.Simple.Services;
 

@@ -6,6 +6,7 @@ using Hamster.Modules.Example.Simple;
 using Hamster.Modules.Example.Simple.Constant;
 using Hamster.Modules.Example.Simple.Entities;
 using Hamster.Modules.Example.Simple.Services;
+using Hamster.Modules.Kernel.Data.Services;
 using Microsoft.AspNetCore.Mvc;
 
 /// <summary>

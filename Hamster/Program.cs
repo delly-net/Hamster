@@ -2,7 +2,7 @@ using Hamster;
 using Hamster.Constant;
 using Hamster.Core;
 using Hamster.Modules.Example;
-using Hamster.Modules.Example.Simple.Services;
+using Hamster.Modules.Kernel.Data.Services;
 using Serilog;
 using System.Text.Json.Serialization.Metadata;
 
