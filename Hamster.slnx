@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="Hamster.Attributing/Hamster.Attributing.csproj" Id="56026b63-f407-4e08-8ec6-b8a1f1370e8a" />
   <Project Path="Hamster.Core/Hamster.Core.csproj" Id="2cd6ba29-d95e-4bf4-9054-90cf1135cd54" />
+  <Project Path="Hamster.Generator/Hamster.Generator.csproj" />
   <Project Path="Hamster/Hamster.csproj" />
 </Solution>

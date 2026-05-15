@@ -16,7 +16,12 @@
       "Bash(curl -s -X POST http://localhost:5004/example/simple/todo/create -H \"Content-Type: application/json\" -d '{\"title\":\"Test Todo\",\"isComplete\":false}')",
       "Bash(sqlite3 hamster.db \".schema todos\")",
       "Bash(dotnet publish *)",
-      "Bash(dotnet clean *)"
+      "Bash(dotnet clean *)",
+      "Bash(curl -s http://localhost:5000/simple/todo/get-all-todos)",
+      "Bash(curl -s http://localhost:5000/example/simple/todo/get-all-todos)",
+      "Bash(curl -s http://localhost:5000/example/simple/todo/get-todo-by-id/1)",
+      "Bash(curl -v http://localhost:5000/example/simple/todo/get-todo-by-id/1)",
+      "Bash(taskkill /F /IM Hamster.exe)"
     ]
   }
 }

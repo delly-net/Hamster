@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Hamster.Core\Hamster.Core.csproj" />
+    <ProjectReference Include="..\Hamster.Generator\Hamster.Generator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>
