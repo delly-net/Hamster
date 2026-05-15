@@ -5,6 +5,7 @@ using Hamster.Modules.Example.Simple.Service;
 using Hamster.Modules.Example.Simple.Constant;
 using Hamster.Core;
 using Hamster.Modules.Example.Simple.Services;
+using Hamster.Attributing;
 
 /// <summary>
 /// Todo 应用

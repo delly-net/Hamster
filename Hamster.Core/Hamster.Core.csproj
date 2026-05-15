@@ -7,4 +7,8 @@
     <OutputType>Library</OutputType>
   </PropertyGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\Hamster.Attributing\Hamster.Attributing.csproj" />
+  </ItemGroup>
+
 </Project>
