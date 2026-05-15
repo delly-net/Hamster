@@ -7,7 +7,7 @@ namespace Hamster.Attributing
     /// <summary>
     /// 可Json序列化
     /// </summary>
-    public class MiniJsonSerializeAttribute : Attribute
+    public class MiniJsonSerializerAttribute : Attribute
     {
     }
 }

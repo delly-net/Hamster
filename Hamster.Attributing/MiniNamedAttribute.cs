@@ -7,7 +7,7 @@ namespace Hamster.Attributing
     /// <summary>
     /// 可命名对象
     /// </summary>
-    public class MiniNamedAttribute : MiniJsonSerializeAttribute
+    public class MiniNamedAttribute : Attribute
     {
     }
 }
