@@ -3,16 +3,16 @@
 namespace Hamster.Attributing
 {
     /// <summary>
-    /// 支持Aot编译的Minimal API应用组
+    /// 支持Aot编译的Minimal API应用模块
     /// </summary>
     [AttributeUsage(AttributeTargets.Class)]
-    public class MiniGroupAttribute : Attribute
+    public class MiniModuleAttribute : Attribute
     {
         /// <summary>
         /// 支持Aot编译的Minimal API应用
         /// </summary>
         /// <param name="template"></param>
-        public MiniGroupAttribute(string rule, string template = null)
+        public MiniModuleAttribute(string rule, string template = null)
         {
             Rule = rule;
             Template = template;
