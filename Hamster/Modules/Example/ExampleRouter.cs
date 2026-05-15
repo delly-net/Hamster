@@ -1,3 +1,6 @@
+using Hamster.Core;
+using Hamster.Modules.Example.Simple;
+
 namespace Hamster.Modules.Example;
 
 /// <summary>
@@ -12,6 +15,6 @@ public static class ExampleRouter
     public static void Register(IEndpointRouteBuilder routeBuilder)
     {
         var group = routeBuilder.MapGroup("/example");
-        Simple.SimpleRouter.Register(group);
+        group.MapMiniGroup<SimpleGroup>();
     }
 }

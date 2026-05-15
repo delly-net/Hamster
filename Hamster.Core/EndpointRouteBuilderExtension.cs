@@ -5,25 +5,26 @@
 /// </summary>
 public static class EndpointRouteBuilderExtension
 {
+
     /// <summary>
-    /// 映射 Api Endpoint
+    /// 映射 Api 应用
     /// </summary>
-    /// <typeparam name="TEndpoint"></typeparam>
-    public static void MapApiEndpoints<TEndpoint>(this IEndpointRouteBuilder routeBuilder)
-        where TEndpoint : IApiEndpoint, new()
+    /// <typeparam name="TMiniApp"></typeparam>
+    public static void MapMiniApp<TMiniApp>(this IEndpointRouteBuilder routeBuilder)
+        where TMiniApp : IMiniApp, new()
     {
-        var endpoint = new TEndpoint();
-        endpoint.Map(routeBuilder);
+        var app = new TMiniApp();
+        app.Map(routeBuilder);
     }
 
     /// <summary>
-    /// 映射 Api Endpoint
+    /// 映射 Api 应用组
     /// </summary>
     /// <typeparam name="TEndpoint"></typeparam>
-    public static void MapApiApp<TEndpoint>(this IEndpointRouteBuilder routeBuilder)
-        where TEndpoint : IMiniApp, new()
+    public static void MapMiniGroup<TMiniGroup>(this IEndpointRouteBuilder routeBuilder)
+        where TMiniGroup : IMiniGroup, new()
     {
-        var endpoint = new TEndpoint();
-        endpoint.Map(routeBuilder);
+        var group = new TMiniGroup();
+        group.Map(routeBuilder);
     }
 }

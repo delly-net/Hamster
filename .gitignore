@@ -358,3 +358,4 @@ dist-ssr
 coverage
 *.local
 .vscode/*
+Generated/

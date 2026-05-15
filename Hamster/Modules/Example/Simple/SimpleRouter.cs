@@ -16,6 +16,6 @@ public static class SimpleRouter
     public static void Register(IEndpointRouteBuilder routeBuilder)
     {
         var group = routeBuilder.MapGroup("/simple");
-        group.MapApiApp<TodoApp>();
+        group.MapMiniApp<TodoApp>();
     }
 }
