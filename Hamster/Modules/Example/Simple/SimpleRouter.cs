@@ -1,6 +1,8 @@
 namespace Hamster.Modules.Example.Simple;
 
+using Hamster.Core;
 using Hamster.Modules.Example.Simple.Controller;
+using Hamster.Modules.Example.Simple.Endpoints;
 
 /// <summary>
 /// Simple 分类路由器
@@ -11,15 +13,17 @@ public static class SimpleRouter
     /// 注册Simple分类的所有路由
     /// </summary>
     /// <param name="app">Web应用</param>
-    public static void Register(WebApplication app)
+    public static void Register(IEndpointRouteBuilder routeBuilder)
     {
-        var group = app.MapGroup("/example/simple/todo");
-        var todoController = new TodoController();
-        todoController.RouteRegister(group);
+        var group = routeBuilder.MapGroup("/simple");
+        //group.MapApiEndpoints<ToDoEndpoint>();
+        group.MapApiApp<TodoApp>();
+        //var todoController = new TodoController();
+        //todoController.RouteRegister(group);
         // TodoController.MapGetAllTodos(group);
-        TodoController.MapGetTodoById(group);
-        TodoController.MapCreateTodo(group);
-        TodoController.MapUpdateTodo(group);
-        TodoController.MapDeleteTodo(group);
+        TodoApp.MapGetTodoById(group);
+        TodoApp.MapCreateTodo(group);
+        TodoApp.MapUpdateTodo(group);
+        TodoApp.MapDeleteTodo(group);
     }
 }

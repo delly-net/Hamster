@@ -1,6 +1,6 @@
 using Microsoft.Data.Sqlite;
 
-namespace Hamster.Modules.Example.Simple.Service;
+namespace Hamster.Modules.Example.Simple.Services;
 
 /// <summary>
 /// 数据库服务

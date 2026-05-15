@@ -1,4 +1,4 @@
-using Hamster.Modules.Example.Simple.Service;
+using Hamster.Modules.Example.Simple.Services;
 
 namespace Hamster.Modules.Example.Simple.Service;
 

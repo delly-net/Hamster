@@ -4,12 +4,13 @@ using Hamster.Modules.Example.Simple;
 using Hamster.Modules.Example.Simple.Service;
 using Hamster.Modules.Example.Simple.Constant;
 using Hamster.Core;
+using Hamster.Modules.Example.Simple.Services;
 
 /// <summary>
-/// Todo 控制器
+/// Todo 应用
 /// </summary>
-[AotController]
-public sealed partial class TodoController
+[MiniApp("/todo")]
+public sealed partial class TodoApp
 {
     /// <summary>
     /// 获取所有Todo

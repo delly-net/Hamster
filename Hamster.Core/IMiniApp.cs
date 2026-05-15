@@ -5,13 +5,13 @@ using System.Text;
 namespace Hamster.Core;
 
 /// <summary>
-/// 控制器
+/// Minimal API 应用
 /// </summary>
-public interface IAotController
+public interface IMiniApp
 {
     /// <summary>
     /// 路由注册
     /// </summary>
     /// <param name="routeBuilder"></param>
-    void RouteRegister(IEndpointRouteBuilder routeBuilder);
+    void Map(IEndpointRouteBuilder routeBuilder);
 }

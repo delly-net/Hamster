@@ -9,8 +9,9 @@ public static class ExampleRouter
     /// 注册Example模块的所有路由
     /// </summary>
     /// <param name="app">Web应用</param>
-    public static void Register(WebApplication app)
+    public static void Register(IEndpointRouteBuilder routeBuilder)
     {
-        Simple.SimpleRouter.Register(app);
+        var group = routeBuilder.MapGroup("/example");
+        Simple.SimpleRouter.Register(group);
     }
 }

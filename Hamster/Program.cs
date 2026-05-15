@@ -2,7 +2,7 @@ using Serilog;
 using Hamster;
 using Hamster.Constant;
 using Hamster.Modules.Example;
-using Hamster.Modules.Example.Simple.Service;
+using Hamster.Modules.Example.Simple.Services;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
