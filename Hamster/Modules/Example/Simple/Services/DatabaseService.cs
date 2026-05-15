@@ -40,11 +40,11 @@ public class DatabaseService : IDatabaseService
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-            CREATE TABLE IF NOT EXISTS todos (
-                Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                Title TEXT,
-                DueBy TEXT,
-                IsComplete INTEGER NOT NULL DEFAULT 0
+            CREATE TABLE IF NOT EXISTS todo (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                due_by TEXT,
+                is_complete INTEGER NOT NULL DEFAULT 0
             )";
         command.ExecuteNonQuery();
     }

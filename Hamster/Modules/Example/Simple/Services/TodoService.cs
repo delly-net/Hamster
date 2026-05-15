@@ -1,6 +1,6 @@
-using Hamster.Modules.Example.Simple.Services;
+using Hamster.Modules.Example.Simple.Entities;
 
-namespace Hamster.Modules.Example.Simple.Service;
+namespace Hamster.Modules.Example.Simple.Services;
 
 /// <summary>
 /// Todo服务
@@ -14,10 +14,15 @@ public static class TodoService
     /// <returns>Todo列表</returns>
     public static List<Todo> GetAllTodos(IDatabaseService databaseService)
     {
+        var todo = new Todo.Named();
+        var t = new Todo.Named("t");
+        var sql = $"SELECT {t.Id},{t.Title} FROM {todo} {t}";
+
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Id, Title, DueBy, IsComplete FROM todos";
+        //command.CommandText = "SELECT Id, Title, DueBy, IsComplete FROM todos";
+        command.CommandText = sql;
 
         var todos = new List<Todo>();
         using var reader = command.ExecuteReader();
@@ -163,6 +168,12 @@ public static class TodoService
             dueBy = DateOnly.Parse(dateString);
         }
 
-        return new Todo(id, title, dueBy, isComplete);
+        return new Todo()
+        {
+            Id = id,
+            Title = title,
+            DueBy = dueBy,
+            IsComplete = isComplete
+        };
     }
 }

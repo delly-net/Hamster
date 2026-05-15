@@ -4,7 +4,7 @@ using Hamster.Attributing;
 using Hamster.Core;
 using Hamster.Modules.Example.Simple;
 using Hamster.Modules.Example.Simple.Constant;
-using Hamster.Modules.Example.Simple.Service;
+using Hamster.Modules.Example.Simple.Entities;
 using Hamster.Modules.Example.Simple.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -50,7 +50,13 @@ public sealed partial class TodoApp
     public IResult CreateTodo(IDatabaseService databaseService, Todo todo)
     {
         var id = TodoService.CreateTodo(databaseService, todo);
-        var createdTodo = new Todo(id, todo.Title, todo.DueBy, todo.IsComplete);
+        var createdTodo = new Todo()
+        {
+            Id = id,
+            Title = todo.Title,
+            DueBy = todo.DueBy,
+            IsComplete = todo.IsComplete
+        };
         return Results.Created($"/todo/{id}", createdTodo);
     }
 

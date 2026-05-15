@@ -1,11 +1,12 @@
 using System.Text.Json.Serialization;
+using Hamster.Attributing;
 using Hamster.Modules.Example.Simple;
+using Hamster.Modules.Example.Simple.Entities;
 
 namespace Hamster;
 
 /// <summary>
 /// Json序列化上下文
 /// </summary>
-[JsonSerializable(typeof(Todo))]
-[JsonSerializable(typeof(List<Todo>))]
-public sealed partial class AppJsonSerializerContext : JsonSerializerContext;
+[MiniJsonResolver]
+public sealed partial class JsonResolver;
