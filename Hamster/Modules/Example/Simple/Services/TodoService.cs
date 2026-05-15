@@ -19,7 +19,7 @@ public static class TodoService
         var r = Todo.Defined.Instance;
         var t = new Todo.Named("t");
         var sql = @$"
-            SELECT 
+            SELECT
                 {t.Id} AS {r.Id},
                 {t.Title} AS {r.Title},
                 {t.DueBy} AS {r.DueBy},
@@ -30,7 +30,6 @@ public static class TodoService
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        //command.CommandText = "SELECT Id, Title, DueBy, IsComplete FROM todos";
         command.CommandText = sql;
 
         var todos = new List<Todo>();
@@ -50,10 +49,23 @@ public static class TodoService
     /// <returns>Todo对象，如果不存在则返回null</returns>
     public static Todo? GetTodoById(IDatabaseService databaseService, int id)
     {
+        var todo = Todo.Named.Instance;
+        var r = Todo.Defined.Instance;
+        var t = new Todo.Named("t");
+        var sql = @$"
+            SELECT
+                {t.Id} AS {r.Id},
+                {t.Title} AS {r.Title},
+                {t.DueBy} AS {r.DueBy},
+                {t.IsComplete} AS {r.IsComplete}
+            FROM {todo} {t}
+            WHERE {t.Id} = @Id
+        ";
+
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Id, Title, DueBy, IsComplete FROM todos WHERE Id = @Id";
+        command.CommandText = sql;
         var parameter = command.CreateParameter();
         parameter.ParameterName = "@Id";
         parameter.Value = id;
@@ -75,26 +87,30 @@ public static class TodoService
     /// <returns>创建的Todo ID</returns>
     public static int CreateTodo(IDatabaseService databaseService, Todo todo)
     {
+        var tn = Todo.Named.Instance;
+        var td = Todo.Defined.Instance;
+        var sql = @$"
+            INSERT INTO {tn} ({tn.Title}, {tn.DueBy}, {tn.IsComplete})
+            VALUES (@{td.Title}, @{td.DueBy}, @{td.IsComplete});
+            SELECT last_insert_rowid();";
+
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
-            INSERT INTO todos (Title, DueBy, IsComplete)
-            VALUES (@Title, @DueBy, @IsComplete);
-            SELECT last_insert_rowid();";
+        command.CommandText = sql;
 
         var titleParam = command.CreateParameter();
-        titleParam.ParameterName = "@Title";
+        titleParam.ParameterName = $"@{td.Title}";
         titleParam.Value = (object?)todo.Title ?? DBNull.Value;
         command.Parameters.Add(titleParam);
 
         var dueByParam = command.CreateParameter();
-        dueByParam.ParameterName = "@DueBy";
+        dueByParam.ParameterName = $"@{td.DueBy}";
         dueByParam.Value = todo.DueBy.HasValue ? (object)todo.DueBy.Value.ToString("O") : DBNull.Value;
         command.Parameters.Add(dueByParam);
 
         var isCompleteParam = command.CreateParameter();
-        isCompleteParam.ParameterName = "@IsComplete";
+        isCompleteParam.ParameterName = $"@{td.IsComplete}";
         isCompleteParam.Value = todo.IsComplete ? 1 : 0;
         command.Parameters.Add(isCompleteParam);
 
@@ -110,30 +126,34 @@ public static class TodoService
     /// <returns>影响的行数</returns>
     public static int UpdateTodo(IDatabaseService databaseService, Todo todo)
     {
+        var tn = Todo.Named.Instance;
+        var td = Todo.Defined.Instance;
+        var sql = @$"
+            UPDATE {tn} SET {tn.Title} = @{td.Title}, {tn.DueBy} = @{td.DueBy}, {tn.IsComplete} = @{td.IsComplete}
+            WHERE {tn.Id} = @{td.Id}";
+
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = @"
-            UPDATE todos SET Title = @Title, DueBy = @DueBy, IsComplete = @IsComplete
-            WHERE Id = @Id";
+        command.CommandText = sql;
 
         var idParam = command.CreateParameter();
-        idParam.ParameterName = "@Id";
+        idParam.ParameterName = $"@{td.Id}";
         idParam.Value = todo.Id;
         command.Parameters.Add(idParam);
 
         var titleParam = command.CreateParameter();
-        titleParam.ParameterName = "@Title";
+        titleParam.ParameterName = $"@{td.Title}";
         titleParam.Value = (object?)todo.Title ?? DBNull.Value;
         command.Parameters.Add(titleParam);
 
         var dueByParam = command.CreateParameter();
-        dueByParam.ParameterName = "@DueBy";
+        dueByParam.ParameterName = $"@{td.DueBy}";
         dueByParam.Value = todo.DueBy.HasValue ? (object)todo.DueBy.Value.ToString("O") : DBNull.Value;
         command.Parameters.Add(dueByParam);
 
         var isCompleteParam = command.CreateParameter();
-        isCompleteParam.ParameterName = "@IsComplete";
+        isCompleteParam.ParameterName = $"@{td.IsComplete}";
         isCompleteParam.Value = todo.IsComplete ? 1 : 0;
         command.Parameters.Add(isCompleteParam);
 
@@ -148,13 +168,17 @@ public static class TodoService
     /// <returns>影响的行数</returns>
     public static int DeleteTodo(IDatabaseService databaseService, int id)
     {
+        var tn = Todo.Named.Instance;
+        var td = Todo.Defined.Instance;
+        var sql = @$"DELETE FROM {tn} WHERE {tn.Id} = @{td.Id}";
+
         using var connection = databaseService.GetConnection();
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "DELETE FROM todos WHERE Id = @Id";
+        command.CommandText = sql;
 
         var parameter = command.CreateParameter();
-        parameter.ParameterName = "@Id";
+        parameter.ParameterName = $"@{td.Id}";
         parameter.Value = id;
         command.Parameters.Add(parameter);
 

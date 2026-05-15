@@ -1,9 +1,7 @@
-namespace Hamster.Modules.Example.Simple.Controller;
+namespace Hamster.Modules.Example.Simple.Apps;
 
 using Hamster.Attributing;
 using Hamster.Core;
-using Hamster.Modules.Example.Simple;
-using Hamster.Modules.Example.Simple.Constant;
 using Hamster.Modules.Example.Simple.Entities;
 using Hamster.Modules.Example.Simple.Services;
 using Hamster.Modules.Kernel.Data.Services;

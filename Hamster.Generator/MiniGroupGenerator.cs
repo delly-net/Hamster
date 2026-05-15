@@ -165,7 +165,7 @@ internal sealed class MiniGroupGenerator : IIncrementalGenerator
 
         foreach (var usingNamespace in usingNamespaces)
         {
-            if (usingNamespace.EndsWith(".Controller"))
+            if (usingNamespace.EndsWith(".Controller") || usingNamespace.EndsWith(".Apps"))
             {
                 sb.AppendLine($"using {usingNamespace};");
             }
