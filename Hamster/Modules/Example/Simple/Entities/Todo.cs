@@ -1,6 +1,7 @@
 ﻿using Hamster.Attributing;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations.Schema;
+using System.Text.Json.Serialization;
 
 namespace Hamster.Modules.Example.Simple.Entities;
 
@@ -37,4 +38,12 @@ public partial class Todo
     [Column("is_complete")]
     [Description("是否完成")]
     public bool IsComplete { get; set; }
+
+    /// <summary>
+    /// Json序列化
+    /// </summary>
+    [MiniJsonSerializer]
+    [JsonSerializable(typeof(Todo))]
+    [JsonSerializable(typeof(List<Todo>))]
+    public partial class JsonSerializer : JsonSerializerContext;
 }

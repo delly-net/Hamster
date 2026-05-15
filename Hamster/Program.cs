@@ -35,7 +35,7 @@ try
     builder.Services.ConfigureHttpJsonOptions(options =>
     {
         //options.SerializerOptions.TypeInfoResolver = AppJsonSerializerContext.Default;
-        options.SerializerOptions.TypeInfoResolver = JsonTypeInfoResolver.Combine();
+        options.SerializerOptions.TypeInfoResolver = JsonTypeInfoResolver.Combine(JsonResolver.GetResolvers().ToArray());
     });
 
     var app = builder.Build();
