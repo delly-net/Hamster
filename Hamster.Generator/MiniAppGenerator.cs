@@ -13,6 +13,8 @@ namespace Hamster.Generator;
 [Generator(LanguageNames.CSharp)]
 internal sealed class MiniAppGenerator : IIncrementalGenerator
 {
+    private const string HTTP_METHOD_ATTRIBUTE = "Microsoft.AspNetCore.Mvc.Routing.HttpMethodAttribute";
+
     /// <summary>
     /// 初始化生成器
     /// </summary>
@@ -47,7 +49,7 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
         var template = context.Attributes.First().NamedArguments
             .FirstOrDefault(x => x.Key == "Template").Value.Value as string;
 
-        var methods = classSymbol.GetMembers()
+        var methodInfos = classSymbol.GetMembers()
             .OfType<IMethodSymbol>()
             .Where(m =>
                 m.MethodKind == MethodKind.Ordinary &&
@@ -55,9 +57,10 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
                 !m.IsAbstract &&
                 !m.Name.StartsWith("Map") &&
                 m.ReturnType.ToString() == "Microsoft.AspNetCore.Http.IResult")
+            .SelectMany(m => GetMethodInfos(m, classSymbol))
             .ToList();
 
-        if (methods.Count == 0)
+        if (methodInfos.Count == 0)
         {
             return null;
         }
@@ -66,15 +69,143 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
             classSymbol.Name,
             classSymbol.ContainingNamespace.ToString(),
             template ?? string.Empty,
-            methods.Select(m => new MethodInfo(
-                m.Name,
-                ToKebabCase(m.Name),
-                m.Parameters.Select(p => new ParameterInfo(
-                    p.Type.ToString(),
-                    p.Name
-                )).ToList()
-            )).ToList()
+            methodInfos
         );
+    }
+
+    /// <summary>
+    /// 获取方法信息列表（支持一个方法多个 HTTP 特性）
+    /// </summary>
+    private static List<MethodInfo> GetMethodInfos(IMethodSymbol method, INamedTypeSymbol containingType)
+    {
+        var httpMethodAttributes = method.GetAttributes()
+            .Where(a => IsHttpMethodAttribute(a.AttributeClass))
+            .ToList();
+
+        if (httpMethodAttributes.Count == 0)
+        {
+            return new List<MethodInfo>();
+        }
+
+        var result = new List<MethodInfo>();
+
+        foreach (var attribute in httpMethodAttributes)
+        {
+            var httpMethod = GetHttpMethodFromAttribute(attribute);
+            var path = GetPathFromAttribute(attribute);
+
+            var parameters = method.Parameters.Select(p => new ParameterInfo(
+                p.Type.ToString(),
+                p.Name
+            )).ToList();
+
+            result.Add(new MethodInfo(method.Name, path, httpMethod, parameters));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 判断是否为 HTTP 方法特性
+    /// </summary>
+    private static bool IsHttpMethodAttribute(INamedTypeSymbol? attributeClass)
+    {
+        if (attributeClass is null)
+        {
+            return false;
+        }
+
+        var current = attributeClass.BaseType;
+
+        while (current is not null)
+        {
+            if (current.ToDisplayString() == HTTP_METHOD_ATTRIBUTE)
+            {
+                return true;
+            }
+
+            current = current.BaseType;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 从特性获取 HTTP 方法
+    /// </summary>
+    private static string GetHttpMethodFromAttribute(AttributeData attribute)
+    {
+        var constructorArgs = attribute.ConstructorArguments;
+
+        if (constructorArgs.Length > 0)
+        {
+            var firstArg = constructorArgs[0];
+
+            if (firstArg.Type?.Name == "HttpMethods" && firstArg.Value is not null)
+            {
+                return GetHttpMethodFromEnum(firstArg.Value!.ToString()!);
+            }
+        }
+
+        var namedArg = attribute.NamedArguments.FirstOrDefault(x => x.Key == "HttpMethods");
+        if (namedArg.Value.Value is not null)
+        {
+            return GetHttpMethodFromEnum(namedArg.Value.Value!.ToString()!);
+        }
+
+        return GetHttpMethodFromTypeName(attribute.AttributeClass?.ToDisplayString() ?? string.Empty);
+    }
+
+    /// <summary>
+    /// 从枚举值获取 HTTP 方法
+    /// </summary>
+    private static string GetHttpMethodFromEnum(string enumValue)
+    {
+        return enumValue switch
+        {
+            "Get" => "MapGet",
+            "Post" => "MapPost",
+            "Put" => "MapPut",
+            "Delete" => "MapDelete",
+            "Patch" => "MapPatch",
+            _ => "MapGet"
+        };
+    }
+
+    /// <summary>
+    /// 从特性类型名称获取 HTTP 方法（备用方案）
+    /// </summary>
+    private static string GetHttpMethodFromTypeName(string typeName)
+    {
+        return typeName switch
+        {
+            string t when t.EndsWith("HttpGetAttribute") => "MapGet",
+            string t when t.EndsWith("HttpPostAttribute") => "MapPost",
+            string t when t.EndsWith("HttpPutAttribute") => "MapPut",
+            string t when t.EndsWith("HttpDeleteAttribute") => "MapDelete",
+            string t when t.EndsWith("HttpPatchAttribute") => "MapPatch",
+            _ => "MapGet"
+        };
+    }
+
+    /// <summary>
+    /// 从特性获取路径
+    /// </summary>
+    private static string GetPathFromAttribute(AttributeData attribute)
+    {
+        var constructorArgs = attribute.ConstructorArguments;
+        if (constructorArgs.Length > 0 && constructorArgs[0].Value is string path)
+        {
+            return path;
+        }
+
+        var namedArg = attribute.NamedArguments.FirstOrDefault(x => x.Key == "Route");
+        if (namedArg.Value.Value is string namedPath)
+        {
+            return namedPath;
+        }
+
+        return string.Empty;
     }
 
     /// <summary>
@@ -125,20 +256,11 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
 
         foreach (var method in classInfo.Methods)
         {
-            var httpMethod = GetHttpMethod(method.OriginalName);
             var path = method.Path;
-            var pathParameters = method.Parameters.Where(p => IsPathParameter(p.Type)).ToList();
-            var queryParameters = method.Parameters.Where(p => !IsPathParameter(p.Type)).ToList();
-
-            foreach (var param in pathParameters)
-            {
-                path += $"/{{{param.Name}}}";
-            }
-
             var allParameters = string.Join(", ", method.Parameters.Select(p => $"{p.Type} {p.Name}"));
             var args = string.Join(", ", method.Parameters.Select(p => p.Name));
 
-            sb.AppendLine($"        group.{httpMethod}(\"{path}\", ({allParameters}) =>");
+            sb.AppendLine($"        group.{method.HttpMethod}(\"{path}\", ({allParameters}) =>");
             sb.AppendLine("        {");
             sb.AppendLine($"            var controller = new {className}();");
             sb.AppendLine($"            return controller.{method.OriginalName}({args});");
@@ -172,42 +294,6 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
     }
 
     /// <summary>
-    /// 根据方法名获取 HTTP 方法
-    /// </summary>
-    private static string GetHttpMethod(string methodName)
-    {
-        if (methodName.StartsWith("Get"))
-        {
-            return "MapGet";
-        }
-
-        if (methodName.StartsWith("Create") || methodName.StartsWith("Add"))
-        {
-            return "MapPost";
-        }
-
-        if (methodName.StartsWith("Update") || methodName.StartsWith("Modify"))
-        {
-            return "MapPut";
-        }
-
-        if (methodName.StartsWith("Delete") || methodName.StartsWith("Remove"))
-        {
-            return "MapDelete";
-        }
-
-        return "MapGet";
-    }
-
-    /// <summary>
-    /// 判断是否为路径参数
-    /// </summary>
-    private static bool IsPathParameter(string type)
-    {
-        return type is "int" or "long" or "string" or "System.Guid" or "Guid";
-    }
-
-    /// <summary>
     /// 类信息
     /// </summary>
     private sealed class ClassInfo
@@ -233,12 +319,14 @@ internal sealed class MiniAppGenerator : IIncrementalGenerator
     {
         public string OriginalName { get; }
         public string Path { get; }
+        public string HttpMethod { get; }
         public List<ParameterInfo> Parameters { get; }
 
-        public MethodInfo(string originalName, string path, List<ParameterInfo> parameters)
+        public MethodInfo(string originalName, string path, string httpMethod, List<ParameterInfo> parameters)
         {
             OriginalName = originalName;
             Path = path;
+            HttpMethod = httpMethod;
             Parameters = parameters;
         }
     }

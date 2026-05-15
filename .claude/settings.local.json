@@ -21,7 +21,13 @@
       "Bash(curl -s http://localhost:5000/example/simple/todo/get-all-todos)",
       "Bash(curl -s http://localhost:5000/example/simple/todo/get-todo-by-id/1)",
       "Bash(curl -v http://localhost:5000/example/simple/todo/get-todo-by-id/1)",
-      "Bash(taskkill /F /IM Hamster.exe)"
+      "Bash(taskkill /F /IM Hamster.exe)",
+      "Bash(taskkill /F /IM dotnet.exe)",
+      "Bash(curl -s -X POST http://localhost:5000/example/simple/todo/create-todo -H \"Content-Type: application/json\" -d \"{\\\\\"title\\\\\":\\\\\"New Todo\\\\\"}\")",
+      "Bash(curl -s -X DELETE http://localhost:5000/example/simple/todo/delete-todo/2 -w \"\\\\nHTTP Status: %{http_code}\\\\n\")",
+      "Bash(taskkill /F /PID 22236)",
+      "Bash(wmic process *)",
+      "Bash(curl -s -X POST http://localhost:5000/example/simple/todo/create-todo -H \"Content-Type: application/json\" -d \"{\\\\\"title\\\\\":\\\\\"Generated Test\\\\\"}\")"
     ]
   }
 }

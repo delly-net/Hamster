@@ -1,0 +1,13 @@
+{
+  "profiles": {
+    "Hamster.Generator": {
+      "commandName": "Project",
+      "commandLineArgs": "build $(SolutionDir)InjectDemo\\InjectDemo.csproj"
+    },
+    "原生成调试": {
+      "commandName": "Executable",
+      "executablePath": "C:\\Program Files\\dotnet\\dotnet.exe",
+      "commandLineArgs": "build $(SolutionDir)Hamster\\Hamster.csproj"
+    }
+  }
+}

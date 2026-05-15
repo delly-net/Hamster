@@ -1,10 +1,12 @@
 namespace Hamster.Modules.Example.Simple.Controller;
 
-using Hamster.Modules.Example.Simple;
-using Hamster.Modules.Example.Simple.Service;
-using Hamster.Modules.Example.Simple.Constant;
-using Hamster.Modules.Example.Simple.Services;
 using Hamster.Attributing;
+using Hamster.Core;
+using Hamster.Modules.Example.Simple;
+using Hamster.Modules.Example.Simple.Constant;
+using Hamster.Modules.Example.Simple.Service;
+using Hamster.Modules.Example.Simple.Services;
+using Microsoft.AspNetCore.Mvc;
 
 /// <summary>
 /// Todo 应用
@@ -16,6 +18,7 @@ public sealed partial class TodoApp
     /// 获取所有Todo
     /// </summary>
     /// <param name="databaseService">数据库服务</param>
+    [HttpGet("/get-all-todos")]
     public IResult GetAllTodos(IDatabaseService databaseService)
     {
         var todos = TodoService.GetAllTodos(databaseService);
@@ -27,6 +30,7 @@ public sealed partial class TodoApp
     /// </summary>
     /// <param name="databaseService">数据库服务</param>
     /// <param name="id">Todo ID</param>
+    [HttpGet("/get-todo-by-id/{id}")]
     public IResult GetTodoById(IDatabaseService databaseService, int id)
     {
         var todo = TodoService.GetTodoById(databaseService, id);
@@ -42,6 +46,7 @@ public sealed partial class TodoApp
     /// </summary>
     /// <param name="databaseService">数据库服务</param>
     /// <param name="todo">Todo实体</param>
+    [HttpPost("/create-todo")]
     public IResult CreateTodo(IDatabaseService databaseService, Todo todo)
     {
         var id = TodoService.CreateTodo(databaseService, todo);
@@ -54,6 +59,7 @@ public sealed partial class TodoApp
     /// </summary>
     /// <param name="databaseService">数据库服务</param>
     /// <param name="todo">Todo实体</param>
+    [HttpPut("/update-todo")]
     public IResult UpdateTodo(IDatabaseService databaseService, Todo todo)
     {
         TodoService.UpdateTodo(databaseService, todo);
@@ -65,6 +71,7 @@ public sealed partial class TodoApp
     /// </summary>
     /// <param name="databaseService">数据库服务</param>
     /// <param name="id">Todo ID</param>
+    [HttpDelete("/delete-todo/{id}")]
     public IResult DeleteTodo(IDatabaseService databaseService, int id)
     {
         TodoService.DeleteTodo(databaseService, id);
