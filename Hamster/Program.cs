@@ -3,6 +3,7 @@ using Hamster;
 using Hamster.Constant;
 using Hamster.Modules.Example;
 using Hamster.Modules.Example.Simple.Services;
+using Hamster.Core;
 
 Log.Logger = new LoggerConfiguration()
     .MinimumLevel.Information()
@@ -42,8 +43,8 @@ try
         app.MapOpenApi();
     }
 
-    // 注册路由
-    ExampleRouter.Register(app);
+    // 注册模块
+    app.MapMiniModule<ExampleModule>();
 
     app.Run();
 }
