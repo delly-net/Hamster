@@ -21,11 +21,16 @@ public static class TodoService
         var sql = @$"
             SELECT
                 {t.Id} AS {r.Id},
-                {t.Title} AS {r.Title},
+                {t.T} AS {r.Title},
                 {t.DueBy} AS {r.DueBy},
                 {t.IsComplete} AS {r.IsComplete}
             FROM {todo} {t}
         ";
+
+        var sql = SELECT(t.Id, t.DueBy, r.Title)
+                    .FROM(t)
+                    .LEFTJOIN(r, t.Id == r.Id)
+                    .WHERE(r.IsComplete > 0);
 
         using var connection = databaseService.GetConnection();
         connection.Open();
