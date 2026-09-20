@@ -17,39 +17,49 @@ A personal accounting assistant built with modern web technologies.
 
 Hamster is a full-stack personal accounting assistant designed to help you manage your finances with ease. The project features a modern, responsive frontend built with Vue 3 and TypeScript, backed by a high-performance ASP.NET Core API.
 
+## Project Structure
+
+```
+Hamster/
+├── api/     # ASP.NET Core backend (.NET 10 + Minimal API)
+├── ui/      # Vue 3 frontend (TypeScript + Vite)
+└── doc/     # Logo and icon assets
+```
+
 ## Tech Stack
 
-### Backend ([Hamster/](Hamster/))
-- **Framework**: ASP.NET Core 10.0
-- **Language**: C# 12+
-- **API Style**: Minimal APIs with OpenAPI/Swagger support
-- **Features**:
-  - AOT (Ahead-of-Time) compilation for optimal performance
-  - OpenAPI documentation in development
-  - Built-in JSON serialization with source generation
+### Backend ([api/](api/))
+- **Framework**: ASP.NET Core 10.0 (.NET 10)
+- **API Style**: Minimal APIs, with endpoints auto-registered via the `IEndpoint` convention
+- **OpenAPI**: `AddOpenApi()` / `MapOpenApi()` in development (`/openapi/v1.json`)
+- **Data Access**: SqlSugar ORM over PostgreSQL (via Npgsql)
+- **Layered as**: `Config/` · `Data/` · `Services/` · `Endpoints/`
 
-### Frontend ([Vue/](Vue/))
+### Frontend ([ui/](ui/))
 - **Framework**: Vue 3.5 with Composition API
 - **Language**: TypeScript 6.0
-- **Build Tool**: Vite 8.0
-- **State Management**: Pinia 3.0
-- **Routing**: Vue Router 5.0
+- **Build Tool**: Vite 8
+- **State Management**: Pinia 4
+- **Routing**: Vue Router 5
+- **Linting / Formatting**: ESLint + oxlint + Prettier
 - **Package Manager**: pnpm
 
 ## Prerequisites
 
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- [Node.js](https://nodejs.org/) ^20.19.0 || >=22.12.0
+- [Node.js](https://nodejs.org/) ^22.18.0 || >=24.12.0
 - [pnpm](https://pnpm.io/) (recommended package manager)
+- [PostgreSQL](https://www.postgresql.org/) (optional for scaffolding work, required for data-backed endpoints)
 
 ## Getting Started
 
 ### Backend Setup
 
-Navigate to the backend directory and run the development server:
-
 ```bash
-cd Hamster
+cd api
+
+# Configure the database connection (or edit api/appsettings.json)
+export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username=postgres;Password=postgres"
 
 # Run the development server
 dotnet run
@@ -61,14 +71,17 @@ dotnet build
 dotnet publish -c Release
 ```
 
-The backend API will be available at `http://localhost:5004` by default.
+The API listens on `http://localhost:5004` by default.
+
+Database behaviour:
+
+- Tables are **not** created automatically by default. Set `Database:AutoMigrate=true` (or the `HAMSTER_DB_AUTOMIGRATE=true` environment variable) to run SqlSugar CodeFirst table creation at startup.
+- Health probes: `GET /health` (liveness, no database access) and `GET /health/db` (PostgreSQL connectivity, returns `503` when unavailable).
 
 ### Frontend Setup
 
-Navigate to the frontend directory and install dependencies:
-
 ```bash
-cd Vue
+cd ui
 
 # Install dependencies
 pnpm install
@@ -92,7 +105,7 @@ pnpm format
 pnpm preview
 ```
 
-The frontend development server will run at `http://localhost:5173`.
+The frontend development server runs at `http://localhost:5173`; the backend's development CORS policy already allows it.
 
 ---
 

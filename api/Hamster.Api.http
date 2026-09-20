@@ -1,0 +1,26 @@
+@Hamster_Api_HostAddress = http://localhost:5004
+
+### 存活探针（不检测数据库）
+GET {{Hamster_Api_HostAddress}}/health
+Accept: application/json
+
+### 数据库探针（PostgreSQL 不可用时返回 503）
+GET {{Hamster_Api_HostAddress}}/health/db
+Accept: application/json
+
+### 【示例】查询账户列表
+GET {{Hamster_Api_HostAddress}}/api/sample/accounts
+Accept: application/json
+
+### 【示例】创建账户
+POST {{Hamster_Api_HostAddress}}/api/sample/accounts
+Content-Type: application/json
+
+{
+  "name": "现金钱包",
+  "balance": 1000
+}
+
+### OpenAPI 文档（仅开发环境）
+GET {{Hamster_Api_HostAddress}}/openapi/v1.json
+Accept: application/json

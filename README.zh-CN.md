@@ -17,39 +17,49 @@
 
 Hamster 是一个全栈个人记账助手，旨在帮助您轻松管理财务。该项目采用 Vue 3 和 TypeScript 构建现代化、响应式的前端界面，后端使用高性能的 ASP.NET Core API。
 
+## 项目结构
+
+```
+Hamster/
+├── api/     # ASP.NET Core 后端（.NET 10 + Minimal API）
+├── ui/      # Vue 3 前端（TypeScript + Vite）
+└── doc/     # Logo 与图标资源
+```
+
 ## 技术栈
 
-### 后端 ([Hamster/](Hamster/))
-- **框架**: ASP.NET Core 10.0
-- **语言**: C# 12+
-- **API 风格**: Minimal APIs，支持 OpenAPI/Swagger
-- **特性**:
-  - AOT（Ahead-of-Time）编译以获得最佳性能
-  - 开发环境支持 OpenAPI 文档
-  - 内置源生成的 JSON 序列化
+### 后端 ([api/](api/))
+- **框架**: ASP.NET Core 10.0（.NET 10）
+- **API 风格**: Minimal APIs，端点模块通过 `IEndpoint` 约定自动注册
+- **OpenAPI**: 开发环境通过 `AddOpenApi()` / `MapOpenApi()` 暴露文档（`/openapi/v1.json`）
+- **数据访问**: SqlSugar ORM，经 Npgsql 连接 PostgreSQL
+- **分层**: `Config/` · `Data/` · `Services/` · `Endpoints/`
 
-### 前端 ([Vue/](Vue/))
+### 前端 ([ui/](ui/))
 - **框架**: Vue 3.5 使用组合式 API（Composition API）
 - **语言**: TypeScript 6.0
-- **构建工具**: Vite 8.0
-- **状态管理**: Pinia 3.0
-- **路由**: Vue Router 5.0
+- **构建工具**: Vite 8
+- **状态管理**: Pinia 4
+- **路由**: Vue Router 5
+- **代码检查 / 格式化**: ESLint + oxlint + Prettier
 - **包管理器**: pnpm
 
 ## 前置要求
 
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- [Node.js](https://nodejs.org/) ^20.19.0 || >=22.12.0
+- [Node.js](https://nodejs.org/) ^22.18.0 || >=24.12.0
 - [pnpm](https://pnpm.io/)（推荐）
+- [PostgreSQL](https://www.postgresql.org/)（仅搭框架时可暂不准备，数据相关接口需要）
 
 ## 快速开始
 
 ### 后端设置
 
-进入后端目录并运行开发服务器：
-
 ```bash
-cd Hamster
+cd api
+
+# 配置数据库连接串（也可直接修改 api/appsettings.json）
+export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username=postgres;Password=postgres"
 
 # 运行开发服务器
 dotnet run
@@ -63,12 +73,15 @@ dotnet publish -c Release
 
 后端 API 默认运行在 `http://localhost:5004`。
 
+数据库行为说明：
+
+- 默认**不会**自动建表。将 `Database:AutoMigrate` 置为 `true`（或设置环境变量 `HAMSTER_DB_AUTOMIGRATE=true`），启动时才会执行 SqlSugar CodeFirst 建表。
+- 健康探针：`GET /health`（存活探针，不访问数据库）与 `GET /health/db`（PostgreSQL 连通性，不可用时返回 `503`）。
+
 ### 前端设置
 
-进入前端目录并安装依赖：
-
 ```bash
-cd Vue
+cd ui
 
 # 安装依赖
 pnpm install
@@ -92,7 +105,7 @@ pnpm format
 pnpm preview
 ```
 
-前端开发服务器将运行在 `http://localhost:5173`。
+前端开发服务器将运行在 `http://localhost:5173`，后端开发环境的 CORS 策略已放行该地址。
 
 ---
 
