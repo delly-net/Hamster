@@ -359,3 +359,5 @@ coverage
 *.local
 .vscode/*
 Generated/
+
+.mcp.json
