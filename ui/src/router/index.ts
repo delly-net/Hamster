@@ -17,6 +17,12 @@ const router = createRouter({
       // which is lazy-loaded when the route is visited.
       component: () => import('../views/AboutView.vue'),
     },
+    {
+      path: '/openapi',
+      name: 'openapi',
+      // 接口调试面板，仅在需要时载入
+      component: () => import('../views/OpenApiView.vue'),
+    },
   ],
 })
 

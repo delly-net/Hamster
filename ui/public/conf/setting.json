@@ -1,0 +1,7 @@
+{
+  "api": {
+    "baseUrl": "http://localhost:5004",
+    "openApiDocPath": "/openapi/v1.json",
+    "timeoutMs": 15000
+  }
+}
