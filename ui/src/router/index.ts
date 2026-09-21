@@ -46,7 +46,9 @@ const router = createRouter({
     {
       path: '/openapi',
       name: 'openapi',
-      // 接口调试面板，仅在需要时载入；不依赖登录态，保持公开
+      // 接口调试面板，仅在需要时载入。
+      // 菜单入口仅对系统管理员展示（见 `config/menu.ts` 的 adminOnly），
+      // 但本路由**未加守卫、仍保持公开**：直达地址对任何访客可用。
       component: () => import('../views/OpenApiView.vue'),
     },
     {

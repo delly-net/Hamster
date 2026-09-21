@@ -103,7 +103,7 @@ ui/
 | 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
 | header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
 | header 右侧 | 已登录时显示用户名 +「退出登录」；未登录时显示「登录 / 注册」入口 |
-| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（用户管理）仅管理员渲染 |
+| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染 |
 | 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
 | 内容区宽度 | 页面**铺满** `.app-main` 的可用宽度，内边距统一由 `.app-main` 提供，页面自身不再限宽居中 |
 | 窄屏（<1024px） | 侧栏收起为抽屉，由 header 内汉堡按钮开合；路由跳转 / `Esc` / 点击遮罩均可关闭 |
@@ -135,13 +135,14 @@ ui/
 
 ## 接口调试页 `/openapi`
 
-开发时访问 `http://localhost:5173/openapi`（左侧功能菜单「接口调试」入口），页面会读取上述配置中的 OpenAPI 文档并渲染：
+开发时访问 `http://localhost:5173/openapi`，页面会读取上述配置中的 OpenAPI 文档并渲染：
 
 - **左侧**：按 Tag 分组的接口清单，支持按路径 / 摘要 / operationId 搜索；
 - **右侧**：选中接口的详情与调试面板——按位置（path / query / header）填写参数、编辑 JSON 请求体（默认按 schema 推导出示例骨架）、点击「发送请求」查看响应状态码、耗时、响应头与响应体（JSON 自动美化，可一键复制）。
 
 注意事项：
 
+- **入口仅系统管理员可见**：左侧功能菜单的「接口调试」项标了 `adminOnly: true`，普通用户与未登录访客看不到它。但该页是开发调试工具，**路由本身未加守卫、依然公开**——直达 `/openapi` 对任何访客可用，别把它当成受保护页面；
 - 该文档**仅在 Development 环境由后端暴露**，后端以其他环境启动时 `/openapi/v1.json` 返回 404，页面会给出对应提示而不是白屏；
 - 调试请求直接发往 `api.baseUrl`，本地联调依赖后端已放行的 CORS（见下节）；
 - 请求体编辑目前仅支持 `application/json`。
@@ -214,6 +215,8 @@ ui/
 - 已登录访问 `/login` → 直接跳回首页。
 
 `/openapi` 与 `/reset-password` 不依赖登录态，保持公开。
+
+注意 `/openapi` 的两层是分开的：**菜单入口**由 `menu.ts` 的 `adminOnly: true` 收敛为仅管理员可见，**路由**未加守卫、直达地址仍对任何访客开放。若日后要真正限制访问，应给该路由补 `meta: { requiresAuth: true, requiresAdmin: true }`（与 `/admin/*` 一致）。
 
 ## 开发命令
 
