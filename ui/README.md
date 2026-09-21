@@ -30,24 +30,25 @@ ui/
 │   └── conf/setting.json    # 运行时配置（后端地址等，部署后可改）
 └── src/
     ├── main.ts              # 应用入口（挂载前载入运行时配置并恢复登录态）
-    ├── App.vue              # 根组件（按路由 meta 切换布局，导航与登录态入口）
-    ├── assets/              # 样式与图片（base.css 配色令牌 / main.css 全局版式 / logo.png 产品 Logo）
+    ├── App.vue              # 根组件（header + body 骨架、功能菜单、抽屉与登录态入口）
+    ├── assets/              # 样式与图片（base.css 配色令牌 / main.css 全局骨架 / logo.png 产品 Logo）
     ├── api/
     │   ├── http.ts          # 统一请求层（附加令牌、错误文案、401 处理）
     │   └── openapi/         # OpenAPI 文档拉取与调试请求（types / schema / client）
     ├── auth/token.ts        # 登录令牌的本地读写（localStorage + 内存兜底）
-    ├── config/appConfig.ts  # 运行时配置加载
+    ├── config/
+    │   ├── appConfig.ts     # 运行时配置加载
+    │   └── menu.ts          # 左侧功能菜单配置（新增菜单项只改这里）
     ├── components/          # 通用组件（含 openapi/ 调试面板组件）
     ├── views/               # 页面组件（HomeView / AboutView / LoginView / OpenApiView
     │                        #          / UserAdminView / ResetPasswordView）
     ├── router/index.ts      # 路由表、布局 meta 与登录 / 管理员守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
-        ├── users.ts         # 用户管理状态（列表 / 激活停用 / 重置链接 / 删除）
-        └── counter.ts       # Pinia 示例 store
+        └── users.ts         # 用户管理状态（列表 / 激活停用 / 重置链接 / 删除）
 ```
 
-> `stores/counter.ts` 与 `components/` 中的 `HelloWorld`、`TheWelcome` 等仍是脚手架自带的示例内容，开始业务开发时可直接删除。
+> 脚手架自带的 `HelloWorld`、`TheWelcome`、`WelcomeItem`、`components/icons/` 与 `stores/counter.ts` 已随本次布局重构全部删除。
 
 ## 品牌资源与配色
 
@@ -58,7 +59,7 @@ ui/
 | 源文件 | 目标 | 用途 |
 |---|---|---|
 | `doc/Hamster.ico` | [`public/favicon.ico`](public/favicon.ico) | 站点图标（`index.html` 的 `rel="icon"` 已引用该路径，替换文件即生效） |
-| `doc/Hamster_512.png` | [`src/assets/logo.png`](src/assets/logo.png) | 全站主 Logo（完整头部 125px、登录页卡片内 56px） |
+| `doc/Hamster_512.png` | [`src/assets/logo.png`](src/assets/logo.png) | 全站主 Logo（完整头部 34px、登录页卡片内 56px） |
 
 `logo.png` 是 512×512 的**带透明圆角位图**，可干净地落在渐变页底上，无需再加底板。更换品牌图只需覆盖这两个文件——它们取代了脚手架自带的 Vite 图标与 Vite `logo.svg`（后者已删除）。
 
@@ -84,6 +85,31 @@ ui/
 - **`--color-accent-contrast` 在暗色下翻转**：暗色主色是亮橙，白字对比度不足，须配深棕文字。
 - `/openapi` 页的**HTTP 方法徽标**（GET 蓝 / POST 绿 / PATCH 橙 / DELETE 紫等）刻意保留各自语义色，不并入品牌色，以维持方法间的可辨识度。
 
+## 页面布局
+
+全站为经典的「header + body」后台结构：
+
+```
+┌─────────────────────────────────────────────┐
+│ header：产品 Logo + 产品名  │  用户名 + 退出登录 │
+├──────────────┬──────────────────────────────┤
+│ body 左侧     │ body 右侧                     │
+│ 功能菜单侧栏   │ 内容主体区（路由页面）           │
+└──────────────┴──────────────────────────────┘
+```
+
+| 环节 | 实现 |
+|---|---|
+| 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
+| header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
+| header 右侧 | 已登录时显示用户名 +「退出登录」；未登录时显示「登录 / 注册」入口 |
+| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（用户管理）仅管理员渲染 |
+| 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
+| 窄屏（<1024px） | 侧栏收起为抽屉，由 header 内汉堡按钮开合；路由跳转 / `Esc` / 点击遮罩均可关闭 |
+| 空白布局例外 | 路由标 `meta: { layout: 'blank' }`（登录页、重置密码页）时不渲染 header 与侧栏，仅页面内容 + 一行版权页脚 |
+
+新增功能菜单项只需在 `src/config/menu.ts` 的 `menuItems` 中追加一项（`routeName` 对应路由 `name`），`App.vue` 无需改动。
+
 ## 运行时配置
 
 后端地址不再硬编码在源码中，而是由 [`public/conf/setting.json`](public/conf/setting.json) 提供，应用启动时通过 `fetch` 读取：
@@ -108,7 +134,7 @@ ui/
 
 ## 接口调试页 `/openapi`
 
-开发时访问 `http://localhost:5173/openapi`（导航栏「接口调试」入口），页面会读取上述配置中的 OpenAPI 文档并渲染：
+开发时访问 `http://localhost:5173/openapi`（左侧功能菜单「接口调试」入口），页面会读取上述配置中的 OpenAPI 文档并渲染：
 
 - **左侧**：按 Tag 分组的接口清单，支持按路径 / 摘要 / operationId 搜索；
 - **右侧**：选中接口的详情与调试面板——按位置（path / query / header）填写参数、编辑 JSON 请求体（默认按 schema 推导出示例骨架）、点击「发送请求」查看响应状态码、耗时、响应头与响应体（JSON 自动美化，可一键复制）。
@@ -126,17 +152,17 @@ ui/
 - **注册**：用户名 3–32 位字母、数字或下划线，密码至少 6 位；用户名全局唯一（查重不区分大小写）。注册**不会自动登录**——新账号默认未激活，注册成功后页面**切回登录 Tab** 并提示「注册成功，请等待管理员激活后登录」，同时清空密码框。按钮文案相应为「注册」而非「注册并登录」。
 - **登录**：凭据错误时提示「用户名或密码错误」（后端不区分用户不存在与密码错误，避免枚举用户名）；账号未激活时提示「账号尚未激活，请联系管理员激活」，且**不写入令牌**、不跳转，用户可原地重试。
 
-### 页面布局
+### 空白布局
 
-登录页为**空白布局**——未登录用户不应看到应用内的导航与其他模块入口，故该页不渲染全局头部（欢迎语、导航链接、账号区），卡片外仅保留一行版权页脚，表单卡片在视口内水平垂直居中。品牌 Logo 由登录页自身承载，**位于表单卡片内部顶部并居中**（56px），与标题、Tab、表单构成同一视觉整体。
+登录页为**空白布局**（见「页面布局」）——未登录用户不应看到应用内的功能菜单与其他模块入口，故该页不渲染 header 与侧栏，卡片外仅保留一行版权页脚，表单卡片在视口内水平垂直居中。品牌 Logo 由登录页自身承载，**位于表单卡片内部顶部并居中**（56px），与标题、Tab、表单构成同一视觉整体。
 
 | 环节 | 实现 |
 |---|---|
 | 布局声明 | 路由上标 `meta: { layout: 'blank' }`（见 [`src/router/index.ts`](src/router/index.ts)） |
-| 头部/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 在空白布局下只渲染版权页脚（不再渲染头部与 logo），同时在 `body` 上切换 `layout-blank` 类 |
-| 版式覆盖 | [`src/assets/main.css`](src/assets/main.css) 的 `body.layout-blank` 覆盖块取消宽屏的 `#app` 两列网格，改为整屏纵向排布；卡片的居中由页面自己用 `margin: auto` 完成 |
+| 头部/菜单/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 在空白布局下只渲染页面与版权页脚，同时在 `body` 上切换 `layout-blank` 类 |
+| 版式分支 | [`src/assets/main.css`](src/assets/main.css) 的 `body:not(.layout-blank) #app` 只在完整布局下锁定整屏高度；卡片的居中由页面自己用 `margin: auto` 完成 |
 
-其余路由（`/`、`/about`、`/openapi`）沿用完整头部布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。
+其余路由（`/`、`/about`、`/openapi`）沿用完整 header-body 布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。
 
 ### 登录态的存放与恢复
 
@@ -161,7 +187,7 @@ ui/
 
 设计约定：
 
-- **入口显隐只是体验**：导航栏的「用户管理」入口按 `auth.isAdmin` 显隐，路由守卫也会挡回非管理员，但**真正的防线是后端**——每个管理端点都回查数据库确认调用者仍是启用状态的管理员。篡改前端状态只会看到一个请求全部失败的页面。
+- **入口显隐只是体验**：左侧功能菜单的「用户管理」入口按 `auth.isAdmin` 显隐，路由守卫也会挡回非管理员，但**真正的防线是后端**——每个管理端点都回查数据库确认调用者仍是启用状态的管理员。篡改前端状态只会看到一个请求全部失败的页面。
 - **自锁保护**：当前登录账号所在行标「当前账号」，其「停用」「删除」按钮置灰；后端对同一规则有独立校验，绕过前端只会得到 400。
 - **时间显示**：后端回传的是带 `Z` 的 UTC 时间，页面用 `Intl.DateTimeFormat` 按浏览器本地时区渲染。
 - **成功提示复用主色**而非绿色：全站只有 `--color-danger` 一种语义色，不额外引入绿色以维持暖色视觉体系。

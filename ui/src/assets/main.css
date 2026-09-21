@@ -1,9 +1,13 @@
 @import './base.css';
 
+/*
+ * 全站骨架：整屏纵向排布 —— 上方 header，下方 body（左功能菜单 + 右内容区）。
+ * 实际结构由 App.vue 渲染，这里只负责根容器的高度与滚动策略。
+ */
 #app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
   font-weight: normal;
 }
 
@@ -31,34 +35,24 @@ a,
   outline-offset: 2px;
 }
 
-@media (min-width: 1024px) {
-  body {
-    display: flex;
-    place-items: center;
-  }
-
-  #app {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    padding: 0 2rem;
-  }
+/*
+ * 非空白布局：锁定整屏高度，把滚动交给内容区（App.vue 的 .app-main），
+ * 使 header 与左侧功能菜单在滚动时保持不动。
+ * 作用域必须限定在非空白布局——若一并锁死空白布局，登录卡片的整屏居中会被破坏。
+ * dvh 取动态视口高度，规避移动端地址栏收起/展开导致的高度跳变；vh 作为回退。
+ */
+body:not(.layout-blank) #app {
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
 }
 
 /*
- * 空白布局（登录页等，由 App.vue 依路由 meta 在 body 上切换 `layout-blank` 类）。
- * 取消宽屏的两列网格与居中，改为整屏纵向排布：页脚置底、页面主体居中。
- * 该布局下不渲染全局头部，品牌标识由页面自身承载（如登录页的卡片内 logo）。
+ * 空白布局（登录页等，由 App.vue 依路由 meta 在 body 上切换 `layout-blank` 类）：
+ * 不渲染 header 与功能菜单，由页面自身内容 + 一行版权页脚构成整屏。
  * #app 内各子元素自身的居中由页面自己用 `margin: auto` 完成——若在此直接给子元素加
  * flex 居中，会连带覆盖页面内部的 flex 布局（如登录表单的纵向排列）。
- * 选择器特异性高于上面的媒体查询，且位于其外，窄屏同样生效。
  */
-body.layout-blank {
-  display: block;
-}
-
 body.layout-blank #app {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
   padding: 2rem;
 }

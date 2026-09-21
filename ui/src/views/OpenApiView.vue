@@ -74,14 +74,12 @@ onMounted(load)
 </template>
 
 <style scoped>
-/* 首页/关于页在宽屏下是两列网格（见 main.css），此处横跨整宽以容纳调试面板 */
+/* 内容区的内边距由 App.vue 的 .app-main 提供，页面自身不再叠加外边距 */
 .openapi {
-  grid-column: 1 / -1;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   width: 100%;
-  margin-top: 2rem;
 }
 
 .toolbar {

@@ -232,8 +232,8 @@ onMounted(load)
 .admin {
   width: 100%;
   max-width: 60rem;
+  /* 内边距由 App.vue 的 .app-main 提供，此处只负责限宽居中，避免与内容区叠加 */
   margin: 0 auto;
-  padding: 1rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
