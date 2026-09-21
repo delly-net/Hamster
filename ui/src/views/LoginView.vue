@@ -164,12 +164,12 @@ async function submit(): Promise<void> {
 </template>
 
 <style scoped>
-/* 首页/关于页在宽屏下是两列网格（见 main.css），此处横跨整宽以居中呈现表单 */
+/* 空白布局下 #app 是整屏纵向 flex 容器（见 main.css），
+   `margin: auto` 让表单卡片在 logo 与页脚之间的剩余空间内水平垂直居中 */
 .auth {
-  grid-column: 1 / -1;
   width: 100%;
   max-width: 24rem;
-  margin: 2rem auto 0;
+  margin: auto;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;

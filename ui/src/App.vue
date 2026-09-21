@@ -1,10 +1,25 @@
 <script setup lang="ts">
-import { RouterLink, RouterView, useRouter } from 'vue-router'
+import { computed, watchEffect } from 'vue'
+import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import HelloWorld from './components/HelloWorld.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const route = useRoute()
 const router = useRouter()
+
+/**
+ * 空白布局（由路由 `meta.layout = 'blank'` 指定，如登录页）：只呈现该页面自身的内容，
+ * 隐藏导航、欢迎语与账号区，仅保留品牌 logo 与一行版权页脚。
+ */
+const isBlankLayout = computed(() => route.meta.layout === 'blank')
+const currentYear = new Date().getFullYear()
+
+// 根组件是 Fragment，无法直接给 #app 绑定布局类，故落到 body 上供 main.css 覆盖宽屏的两列网格。
+// 本组件即根组件、不会卸载，无需清理该 class。
+watchEffect(() => {
+  document.body.classList.toggle('layout-blank', isBlankLayout.value)
+})
 
 /** 退出登录并回到登录页。 */
 async function handleLogout(): Promise<void> {
@@ -14,7 +29,7 @@ async function handleLogout(): Promise<void> {
 </script>
 
 <template>
-  <header>
+  <header v-if="!isBlankLayout">
     <img alt="Hamster logo" class="logo" src="@/assets/logo.svg" width="125" height="125" />
 
     <div class="wrapper">
@@ -34,7 +49,13 @@ async function handleLogout(): Promise<void> {
     </div>
   </header>
 
+  <header v-else class="brand">
+    <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.svg" width="72" height="72" />
+  </header>
+
   <RouterView />
+
+  <footer v-if="isBlankLayout" class="site-footer">© {{ currentYear }} 仓鼠理财管家</footer>
 </template>
 
 <style scoped>
@@ -81,6 +102,23 @@ nav a:first-of-type {
   font-size: 12px;
 }
 
+/* 空白布局：仅一个居中的品牌标识，不参与完整头部的宽屏 flex 排布 */
+.brand {
+  display: flex;
+  justify-content: center;
+}
+
+.brand-logo {
+  display: block;
+}
+
+.site-footer {
+  margin-top: 2rem;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.6;
+}
+
 .account-name {
   opacity: 0.75;
 }
@@ -124,6 +162,11 @@ nav a:first-of-type {
 
   .account {
     font-size: 13px;
+  }
+
+  /* 空白布局头部不参与完整头部的偏右留白 */
+  .brand {
+    padding-right: 0;
   }
 }
 </style>

@@ -29,7 +29,7 @@ ui/
 │   └── conf/setting.json    # 运行时配置（后端地址等，部署后可改）
 └── src/
     ├── main.ts              # 应用入口（挂载前载入运行时配置并恢复登录态）
-    ├── App.vue              # 根组件（导航与登录态入口）
+    ├── App.vue              # 根组件（按路由 meta 切换布局，导航与登录态入口）
     ├── assets/              # 样式与图片
     ├── api/
     │   ├── http.ts          # 统一请求层（附加令牌、错误文案、401 处理）
@@ -38,7 +38,7 @@ ui/
     ├── config/appConfig.ts  # 运行时配置加载
     ├── components/          # 通用组件（含 openapi/ 调试面板组件）
     ├── views/               # 页面组件（HomeView / AboutView / LoginView / OpenApiView）
-    ├── router/index.ts      # 路由表与登录守卫
+    ├── router/index.ts      # 路由表、布局 meta 与登录守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
         └── counter.ts       # Pinia 示例 store
@@ -87,6 +87,18 @@ ui/
 
 - **注册**：用户名 3–32 位字母、数字或下划线，密码至少 6 位；用户名全局唯一（查重不区分大小写）；注册成功即登录。
 - **登录**：凭据错误时提示「用户名或密码错误」（后端不区分用户不存在与密码错误，避免枚举用户名）。
+
+### 页面布局
+
+登录页为**空白布局**——未登录用户不应看到应用内的导航与其他模块入口，故该页不渲染全局头部（欢迎语、导航链接、账号区），仅保留居中的品牌 logo 与一行版权页脚，表单卡片在视口内水平垂直居中。
+
+| 环节 | 实现 |
+|---|---|
+| 布局声明 | 路由上标 `meta: { layout: 'blank' }`（见 [`src/router/index.ts`](src/router/index.ts)） |
+| 头部/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 渲染空白头部（仅 logo）与版权页脚，同时在 `body` 上切换 `layout-blank` 类 |
+| 版式覆盖 | [`src/assets/main.css`](src/assets/main.css) 的 `body.layout-blank` 覆盖块取消宽屏的 `#app` 两列网格，改为整屏纵向排布；卡片的居中由页面自己用 `margin: auto` 完成 |
+
+其余路由（`/`、`/about`、`/openapi`）沿用完整头部布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。
 
 ### 登录态的存放与恢复
 

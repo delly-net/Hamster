@@ -2,6 +2,15 @@ import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from '../views/HomeView.vue'
 import { useAuthStore } from '@/stores/auth'
 
+declare module 'vue-router' {
+  interface RouteMeta {
+    /** 需要登录态，未登录时由守卫重定向到登录页。 */
+    requiresAuth?: boolean
+    /** 布局模式：`blank` 为空白布局（仅品牌 logo + 极简页脚），缺省为完整头部布局。 */
+    layout?: 'blank'
+  }
+}
+
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
@@ -26,6 +35,8 @@ const router = createRouter({
       name: 'login',
       // 登录/注册表单，与首页同属首屏路径，按需载入
       component: () => import('../views/LoginView.vue'),
+      // 未登录时不应暴露应用内的导航与其他模块入口，故走空白布局
+      meta: { layout: 'blank' },
     },
     {
       path: '/openapi',
