@@ -158,6 +158,7 @@ onMounted(load)
     <table class="table">
       <thead>
         <tr>
+          <th>序号</th>
           <th>用户名</th>
           <th>角色</th>
           <th>状态</th>
@@ -166,7 +167,12 @@ onMounted(load)
         </tr>
       </thead>
       <tbody>
-        <tr v-for="user in users" :key="user.id" :class="{ 'row-self': user.id === selfId }">
+        <tr
+          v-for="(user, index) in users"
+          :key="user.id"
+          :class="{ 'row-self': user.id === selfId }"
+        >
+          <td class="row-index">{{ index + 1 }}</td>
           <td class="username">
             {{ user.username }}
             <span v-if="user.id === selfId" class="self-tag">当前账号</span>
@@ -221,7 +227,7 @@ onMounted(load)
           </td>
         </tr>
         <tr v-if="!usersStore.loading && users.length === 0">
-          <td class="empty" colspan="5">暂无用户</td>
+          <td class="empty" colspan="6">暂无用户</td>
         </tr>
       </tbody>
     </table>
@@ -230,10 +236,8 @@ onMounted(load)
 
 <style scoped>
 .admin {
+  /* 铺满内容区：限宽与居中的职责归 .app-main，页面自身既不限宽也不叠加外边距 */
   width: 100%;
-  max-width: 60rem;
-  /* 内边距由 App.vue 的 .app-main 提供，此处只负责限宽居中，避免与内容区叠加 */
-  margin: 0 auto;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -355,6 +359,12 @@ onMounted(load)
   background: var(--color-accent-soft);
 }
 
+/* 列表行号：按当前列表顺序连续编号，与用户 Id 无关（删除用户后不会断号） */
+.row-index {
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
 .username {
   font-weight: 600;
 }
@@ -412,7 +422,6 @@ onMounted(load)
 }
 
 .actions-head {
-  width: 1%;
   white-space: nowrap;
 }
 
