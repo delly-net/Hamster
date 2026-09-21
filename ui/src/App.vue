@@ -1,6 +1,16 @@
 <script setup lang="ts">
-import { RouterLink, RouterView } from 'vue-router'
+import { RouterLink, RouterView, useRouter } from 'vue-router'
 import HelloWorld from './components/HelloWorld.vue'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const router = useRouter()
+
+/** 退出登录并回到登录页。 */
+async function handleLogout(): Promise<void> {
+  auth.logout()
+  await router.replace({ name: 'login' })
+}
 </script>
 
 <template>
@@ -14,7 +24,13 @@ import HelloWorld from './components/HelloWorld.vue'
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/about">关于</RouterLink>
         <RouterLink to="/openapi">接口调试</RouterLink>
+        <RouterLink v-if="!auth.isAuthenticated" to="/login">登录 / 注册</RouterLink>
       </nav>
+
+      <p v-if="auth.isAuthenticated" class="account">
+        <span class="account-name">{{ auth.user?.username ?? '已登录' }}</span>
+        <button type="button" class="logout" @click="handleLogout">退出登录</button>
+      </p>
     </div>
   </header>
 
@@ -57,6 +73,29 @@ nav a:first-of-type {
   border: 0;
 }
 
+.account {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  font-size: 12px;
+}
+
+.account-name {
+  opacity: 0.75;
+}
+
+.logout {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--color-border-hover);
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
 @media (min-width: 1024px) {
   header {
     display: flex;
@@ -81,6 +120,10 @@ nav a:first-of-type {
 
     padding: 1rem 0;
     margin-top: 1rem;
+  }
+
+  .account {
+    font-size: 13px;
   }
 }
 </style>

@@ -1,3 +1,4 @@
+using Hamster.Api.Config;
 using Hamster.Api.Constant;
 using SqlSugar;
 
@@ -23,7 +24,7 @@ public sealed class HealthEndpoints : IEndpoint
             .WithSummary("存活探针")
             .WithDescription("仅表示进程可正常响应，不检测数据库连通性。");
 
-        group.MapGet("/db", (ISqlSugarClient db, ILogger<HealthEndpoints> logger) =>
+        group.MapGet("/db", (ISqlSugarClient db, DatabaseOptions options, ILogger<HealthEndpoints> logger) =>
             {
                 try
                 {
@@ -34,30 +35,30 @@ public sealed class HealthEndpoints : IEndpoint
                         return Results.Ok(new
                         {
                             status = "ok",
-                            database = "postgresql",
+                            database = options.DbTypeLabel,
                             connected = true,
                         });
                     }
 
-                    return DatabaseUnavailable("探活查询未返回结果");
+                    return DatabaseUnavailable(options.DbTypeLabel, "探活查询未返回结果");
                 }
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "数据库健康检查失败");
-                    return DatabaseUnavailable(ex.Message);
+                    return DatabaseUnavailable(options.DbTypeLabel, ex.Message);
                 }
             })
             .WithName("GetHealthDatabase")
             .WithSummary("数据库探针")
-            .WithDescription("检测 PostgreSQL 连通性；不可用时返回 503，便于容器编排做就绪判断。");
+            .WithDescription("检测当前数据库（Sqlite 或 PostgreSQL）连通性；不可用时返回 503，便于容器编排做就绪判断。");
     }
 
-    private static IResult DatabaseUnavailable(string? error) =>
+    private static IResult DatabaseUnavailable(string dbTypeLabel, string? error) =>
         Results.Json(
             new
             {
                 status = "unavailable",
-                database = "postgresql",
+                database = dbTypeLabel,
                 connected = false,
                 error,
             },

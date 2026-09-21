@@ -5,7 +5,7 @@ namespace Hamster.Api.Data;
 
 /// <summary>
 /// SqlSugar 数据访问层注册。
-/// 采用 PostgreSQL（DbType.PostgreSQL），底层由 Npgsql 驱动连接。
+/// 支持 Sqlite 与 PostgreSQL 两种数据库，具体类型由 <see cref="DatabaseOptions.DbType"/> 决定。
 /// </summary>
 public static class SqlSugarSetup
 {
@@ -18,18 +18,20 @@ public static class SqlSugarSetup
     /// <returns>服务集合，便于链式调用。</returns>
     public static IServiceCollection AddHamsterDatabase(this IServiceCollection services, IConfiguration configuration)
     {
-        var options = DatabaseOptions.From(configuration);
+        services.AddSingleton(provider => DatabaseOptions.From(
+            configuration,
+            provider.GetRequiredService<ILoggerFactory>().CreateLogger("Hamster.Api.Data")));
 
-        services.AddSingleton(options);
         services.AddSingleton<ISqlSugarClient>(provider =>
         {
             var logger = provider.GetRequiredService<ILoggerFactory>().CreateLogger("Hamster.Api.Data");
+            var options = provider.GetRequiredService<DatabaseOptions>();
 
-            var scope = new SqlSugarScope(
+            return new SqlSugarScope(
                 new ConnectionConfig
                 {
-                    ConnectionString = options.ConnectionString,
-                    DbType = DbType.PostgreSQL,
+                    ConnectionString = options.ResolvedConnectionString,
+                    DbType = ResolveDbType(options.DbType),
                     IsAutoCloseConnection = true,
                     InitKeyType = InitKeyType.Attribute,
                 },
@@ -38,15 +40,14 @@ public static class SqlSugarSetup
                     db.Aop.OnLogExecuting = (sql, _) => logger.LogDebug("执行 SQL：{Sql}", sql);
                     db.Aop.OnError = ex => logger.LogError(ex, "SQL 执行异常");
                 });
-
-            logger.LogInformation(
-                "数据库已注册：{DbType}，连接串（已脱敏）：{ConnectionString}",
-                DbType.PostgreSQL,
-                options.MaskedConnectionString);
-
-            return scope;
         });
 
         return services;
     }
+
+    /// <summary>把项目内的数据库类型映射为 SqlSugar 的 <see cref="DbType"/>。</summary>
+    /// <param name="dbType">数据库类型。</param>
+    /// <returns>SqlSugar 数据库类型。</returns>
+    private static DbType ResolveDbType(HamsterDbType dbType) =>
+        dbType == HamsterDbType.Sqlite ? DbType.Sqlite : DbType.PostgreSQL;
 }

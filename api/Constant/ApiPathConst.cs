@@ -8,6 +8,9 @@ public static class ApiPathConst
     /// <summary>健康检查路由分组前缀。</summary>
     public const string HEALTH_GROUP = "/health";
 
+    /// <summary>认证端点路由分组前缀。</summary>
+    public const string AUTH_GROUP = "/api/auth";
+
     /// <summary>示例账户端点路由分组前缀。</summary>
     public const string SAMPLE_ACCOUNT_GROUP = "/api/sample/accounts";
 }

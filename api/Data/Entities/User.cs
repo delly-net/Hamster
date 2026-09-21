@@ -3,12 +3,12 @@ using SqlSugar;
 namespace Hamster.Api.Data.Entities;
 
 /// <summary>
-/// 【示例实体】资金账户。
-/// 仅用于验证框架接线（建表、查询、写入链路是否打通），不是最终业务模型，
-/// 后续业务建模时请按实际领域模型替换或扩展。
+/// 用户：以「用户名 + 密码」作为登录凭据。
+/// 密码仅以 PBKDF2 哈希形式存储，任何接口响应都不得回传 <see cref="PasswordHash"/>。
 /// </summary>
-[SugarTable("sample_account")]
-public sealed class SampleAccount
+[SugarTable("hamster_user")]
+[SugarIndex("uk_hamster_user_username", nameof(Username), OrderByType.Asc, true)]
+public sealed class User
 {
     /// <summary>
     /// 主键。
@@ -18,16 +18,16 @@ public sealed class SampleAccount
     [SugarColumn(ColumnName = "id", IsPrimaryKey = true, IsIdentity = true)]
     public int Id { get; set; }
 
-    /// <summary>账户名称。</summary>
-    [SugarColumn(ColumnName = "name", Length = 64)]
-    public string Name { get; set; } = string.Empty;
+    /// <summary>用户名，全局唯一（查重时不区分大小写）。</summary>
+    [SugarColumn(ColumnName = "username", Length = 64)]
+    public string Username { get; set; } = string.Empty;
 
-    /// <summary>账户余额。建议业务侧以「分」为单位存储，避免浮点误差。</summary>
-    [SugarColumn(ColumnName = "balance", DecimalDigits = 2)]
-    public decimal Balance { get; set; }
+    /// <summary>密码哈希，格式见 <c>PasswordHasher.Hash</c>。</summary>
+    [SugarColumn(ColumnName = "password_hash", Length = 256)]
+    public string PasswordHash { get; set; } = string.Empty;
 
     /// <summary>
-    /// 创建时间（UTC）。
+    /// 注册时间（UTC）。
     /// 用 <see cref="DateTime"/> 而非 <c>DateTimeOffset</c>：Sqlite 以文本存储时间且不保留偏移量，
     /// DateTimeOffset 读回时会被按本地时区重新解释，导致时刻偏移。
     /// </summary>

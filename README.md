@@ -32,8 +32,9 @@ Hamster/
 - **Framework**: ASP.NET Core 10.0 (.NET 10)
 - **API Style**: Minimal APIs, with endpoints auto-registered via the `IEndpoint` convention
 - **OpenAPI**: `AddOpenApi()` / `MapOpenApi()` in development (`/openapi/v1.json`)
-- **Data Access**: SqlSugar ORM over PostgreSQL (via Npgsql)
-- **Layered as**: `Config/` · `Data/` · `Services/` · `Endpoints/`
+- **Data Access**: SqlSugar ORM over **SQLite** (default) or **PostgreSQL**
+- **Auth**: JWT bearer tokens (1-day lifetime), passwords hashed with PBKDF2
+- **Layered as**: `Config/` · `Data/` · `Security/` · `Services/` · `Endpoints/`
 
 ### Frontend ([ui/](ui/))
 - **Framework**: Vue 3.5 with Composition API
@@ -49,7 +50,7 @@ Hamster/
 - [.NET 10.0 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Node.js](https://nodejs.org/) ^22.18.0 || >=24.12.0
 - [pnpm](https://pnpm.io/) (recommended package manager)
-- [PostgreSQL](https://www.postgresql.org/) (optional for scaffolding work, required for data-backed endpoints)
+- [PostgreSQL](https://www.postgresql.org/) (optional — SQLite is the default and needs no setup)
 
 ## Getting Started
 
@@ -58,10 +59,7 @@ Hamster/
 ```bash
 cd api
 
-# Configure the database connection (or edit api/appsettings.json)
-export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username=postgres;Password=postgres"
-
-# Run the development server
+# Run the development server (SQLite by default, no setup needed)
 dotnet run
 
 # Build the project
@@ -71,12 +69,50 @@ dotnet build
 dotnet publish -c Release
 ```
 
-The API listens on `http://localhost:5004` by default.
+The API listens on `http://localhost:5004` by default. On startup it prints the active database
+type, the (masked) connection string, the SQLite file path, and the JWT signing key.
 
-Database behaviour:
+#### Database
 
-- Tables are **not** created automatically by default. Set `Database:AutoMigrate=true` (or the `HAMSTER_DB_AUTOMIGRATE=true` environment variable) to run SqlSugar CodeFirst table creation at startup.
-- Health probes: `GET /health` (liveness, no database access) and `GET /health/db` (PostgreSQL connectivity, returns `503` when unavailable).
+SQLite is the default and needs no setup — the file `hamster.db` is created in the **current
+working directory** on first start. Tables are created automatically via SqlSugar CodeFirst.
+
+```bash
+# Use PostgreSQL instead (connection string is optional if it matches the default)
+export HAMSTER_DB_TYPE=PostgreSql
+export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username=postgres;Password=postgres"
+```
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `HAMSTER_DB_TYPE` | `Sqlite` | `Sqlite` or `PostgreSql` |
+| `HAMSTER_DB_CONNECTION` | *(empty)* | Connection string; when empty, a default is derived from the DB type |
+| `HAMSTER_DB_AUTOMIGRATE` | `true` | Run CodeFirst table creation at startup |
+
+Environment variables always take precedence over `appsettings.json`. If auto-migration fails
+(e.g. the database is unreachable) the API logs a warning and keeps starting.
+
+Health probes: `GET /health` (liveness, no database access) and `GET /health/db` (database
+connectivity, returns `503` when unavailable).
+
+#### Authentication
+
+Login uses JWT bearer tokens with a **fixed 1-day lifetime**. Passwords are stored as PBKDF2
+(HMAC-SHA256) hashes with a random per-user salt.
+
+```bash
+# Optional: pin the signing key (otherwise a random key is generated at startup)
+export HAMSTER_JWT_KEY="<at least 32 bytes of random data>"
+```
+
+Without `HAMSTER_JWT_KEY`, a random key is generated on every start and printed to the console —
+tokens issued before a restart become invalid. Set the variable in any long-running deployment.
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/auth/register` | Register (201, returns a token); 409 if the username is taken |
+| `POST /api/auth/login` | Log in (200, returns a token); 401 on bad credentials |
+| `GET /api/auth/me` | Current user (requires a bearer token) |
 
 ### Frontend Setup
 

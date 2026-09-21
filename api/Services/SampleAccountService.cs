@@ -28,7 +28,7 @@ public sealed class SampleAccountService(ISqlSugarClient db) : ISampleAccountSer
             Balance = balance,
         };
 
-        account.Id = await db.Insertable(account).ExecuteReturnBigIdentityAsync(cancellationToken);
+        account.Id = await db.Insertable(account).ExecuteReturnIdentityAsync(cancellationToken);
         return account;
     }
 }

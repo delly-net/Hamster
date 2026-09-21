@@ -11,7 +11,7 @@ public static class DatabaseInitializer
 {
     /// <summary>
     /// 执行数据库初始化。
-    /// 默认不建表（AutoMigrate=false）；开启后若连接失败，仅记录告警，不阻断应用启动。
+    /// 建表失败（如连接不可用）时仅记录告警，不阻断应用启动。
     /// </summary>
     /// <param name="app">Web 应用实例。</param>
     public static void InitializeDatabase(this WebApplication app)
@@ -30,12 +30,15 @@ public static class DatabaseInitializer
         try
         {
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
-            db.CodeFirst.InitTables<SampleAccount>();
-            logger.LogInformation("CodeFirst 自动建表完成");
+            db.CodeFirst.InitTables<SampleAccount, User>();
+            logger.LogInformation("CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user", options.DbTypeLabel);
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "CodeFirst 自动建表失败，应用继续启动，请检查 PostgreSQL 连接配置是否可用");
+            logger.LogWarning(
+                ex,
+                "CodeFirst 自动建表失败，应用继续启动，请检查 {DbType} 连接配置是否可用",
+                options.DbTypeLabel);
         }
     }
 }
