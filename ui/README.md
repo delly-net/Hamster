@@ -56,7 +56,7 @@ ui/
 | 源文件 | 目标 | 用途 |
 |---|---|---|
 | `doc/Hamster.ico` | [`public/favicon.ico`](public/favicon.ico) | 站点图标（`index.html` 的 `rel="icon"` 已引用该路径，替换文件即生效） |
-| `doc/Hamster_512.png` | [`src/assets/logo.png`](src/assets/logo.png) | 全站主 Logo（完整头部 125px、登录页空白头部 72px） |
+| `doc/Hamster_512.png` | [`src/assets/logo.png`](src/assets/logo.png) | 全站主 Logo（完整头部 125px、登录页卡片内 56px） |
 
 `logo.png` 是 512×512 的**带透明圆角位图**，可干净地落在渐变页底上，无需再加底板。更换品牌图只需覆盖这两个文件——它们取代了脚手架自带的 Vite 图标与 Vite `logo.svg`（后者已删除）。
 
@@ -126,12 +126,12 @@ ui/
 
 ### 页面布局
 
-登录页为**空白布局**——未登录用户不应看到应用内的导航与其他模块入口，故该页不渲染全局头部（欢迎语、导航链接、账号区），仅保留居中的品牌 logo 与一行版权页脚，表单卡片在视口内水平垂直居中。
+登录页为**空白布局**——未登录用户不应看到应用内的导航与其他模块入口，故该页不渲染全局头部（欢迎语、导航链接、账号区），卡片外仅保留一行版权页脚，表单卡片在视口内水平垂直居中。品牌 Logo 由登录页自身承载，**位于表单卡片内部顶部并居中**（56px），与标题、Tab、表单构成同一视觉整体。
 
 | 环节 | 实现 |
 |---|---|
 | 布局声明 | 路由上标 `meta: { layout: 'blank' }`（见 [`src/router/index.ts`](src/router/index.ts)） |
-| 头部/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 渲染空白头部（仅 logo）与版权页脚，同时在 `body` 上切换 `layout-blank` 类 |
+| 头部/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 在空白布局下只渲染版权页脚（不再渲染头部与 logo），同时在 `body` 上切换 `layout-blank` 类 |
 | 版式覆盖 | [`src/assets/main.css`](src/assets/main.css) 的 `body.layout-blank` 覆盖块取消宽屏的 `#app` 两列网格，改为整屏纵向排布；卡片的居中由页面自己用 `margin: auto` 完成 |
 
 其余路由（`/`、`/about`、`/openapi`）沿用完整头部布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。

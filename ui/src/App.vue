@@ -10,7 +10,8 @@ const router = useRouter()
 
 /**
  * 空白布局（由路由 `meta.layout = 'blank'` 指定，如登录页）：只呈现该页面自身的内容，
- * 隐藏导航、欢迎语与账号区，仅保留品牌 logo 与一行版权页脚。
+ * 隐藏导航、欢迎语与账号区，仅保留一行版权页脚。品牌标识由页面自身承载
+ * （如登录页把 logo 放在表单卡片内部），此处不再渲染。
  */
 const isBlankLayout = computed(() => route.meta.layout === 'blank')
 const currentYear = new Date().getFullYear()
@@ -47,10 +48,6 @@ async function handleLogout(): Promise<void> {
         <button type="button" class="logout" @click="handleLogout">退出登录</button>
       </p>
     </div>
-  </header>
-
-  <header v-else class="brand">
-    <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.png" width="72" height="72" />
   </header>
 
   <RouterView />
@@ -103,17 +100,6 @@ nav a:first-of-type {
   gap: 0.5rem;
   margin-top: 1rem;
   font-size: 12px;
-}
-
-/* 空白布局：仅一个居中的品牌标识，不参与完整头部的宽屏 flex 排布 */
-.brand {
-  display: flex;
-  justify-content: center;
-}
-
-.brand-logo {
-  display: block;
-  filter: drop-shadow(0 8px 14px rgba(90, 58, 34, 0.22));
 }
 
 .site-footer {
@@ -175,11 +161,6 @@ nav a:first-of-type {
 
   .account {
     font-size: 13px;
-  }
-
-  /* 空白布局头部不参与完整头部的偏右留白 */
-  .brand {
-    padding-right: 0;
   }
 }
 </style>

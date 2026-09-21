@@ -2,6 +2,9 @@
 /**
  * /login 页面：登录与注册合一的表单。
  *
+ * 产品 Logo 置于卡片内部顶部，与标题、Tab、表单构成同一视觉整体（空白布局的卡片外头部
+ * 已不再渲染任何品牌标识，见 App.vue）。
+ *
  * 提交成功后跳回来源页（由路由守卫在 `redirect` 查询参数中携带），无来源页时回首页。
  */
 import { computed, ref } from 'vue'
@@ -103,6 +106,8 @@ async function submit(): Promise<void> {
 
 <template>
   <main class="auth">
+    <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.png" width="56" height="56" />
+
     <h1 class="title">{{ isRegister ? '注册仓鼠账号' : '登录仓鼠理财管家' }}</h1>
     <p class="subtitle">
       {{ isRegister ? '创建账号后即可开始记账。' : '登录后即可管理你的账户与账目。' }}
@@ -181,6 +186,14 @@ async function submit(): Promise<void> {
   border-radius: var(--radius-card);
   background: var(--color-background-soft);
   box-shadow: var(--shadow-card);
+}
+
+/* 卡片内品牌标识：顶部居中（卡片是纵向 flex 列，靠 align-self 水平居中） */
+.brand-logo {
+  display: block;
+  align-self: center;
+  /* 位图 logo 已带透明圆角，加一层柔和投影使其从奶油卡片面上浮起（与全站同源） */
+  filter: drop-shadow(0 8px 14px rgba(90, 58, 34, 0.22));
 }
 
 .title {
