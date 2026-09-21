@@ -14,6 +14,12 @@ public static class ApiPathConst
     /// <summary>管理员用户管理端点路由分组前缀（需已激活的管理员身份）。</summary>
     public const string ADMIN_USERS_GROUP = "/api/admin/users";
 
+    /// <summary>管理员账套管理端点路由分组前缀（需已激活的管理员身份）。</summary>
+    public const string ADMIN_ACCOUNT_SETS_GROUP = "/api/admin/account-sets";
+
+    /// <summary>账套端点路由分组前缀（任意已登录用户）。</summary>
+    public const string ACCOUNT_SET_GROUP = "/api/account-sets";
+
     /// <summary>示例账户端点路由分组前缀。</summary>
     public const string SAMPLE_ACCOUNT_GROUP = "/api/sample/accounts";
 }

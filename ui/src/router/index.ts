@@ -57,6 +57,13 @@ const router = createRouter({
       meta: { requiresAuth: true, requiresAdmin: true },
     },
     {
+      path: '/admin/account-sets',
+      name: 'admin-account-sets',
+      // 账套管理（新增/改名/删除、关联用户），仅管理员可见
+      component: () => import('../views/AccountSetAdminView.vue'),
+      meta: { requiresAuth: true, requiresAdmin: true },
+    },
+    {
       path: '/reset-password',
       name: 'reset-password',
       // 密码重置落地页：令牌经查询参数传入，**必须免登录**，

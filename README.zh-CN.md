@@ -147,6 +147,40 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 | `POST /api/admin/users/{id}/reset-link` | 管理员 | 生成 15 分钟一次性重置链接 |
 | `DELETE /api/admin/users/{id}` | 管理员 | 删除用户（204）；删除自己返回 400 |
 
+##### 账套
+
+**账套**是一组业务数据的归属单位（如「家庭」与「公司」）。账套与用户是**多对多**关系：管理员在
+`/admin/account-sets` 把用户关联到账套。管理员自身无需关联——可查看并切换到**全部**账套。
+
+普通用户登录后的行为取决于其可访问的账套数量：
+
+| 可访问账套数 | 登录后 |
+|---|---|
+| 0 个 | header 显示「暂无可用账套」，不显示账套名称与切换按钮 |
+| 1 个 | 自动选中，不打扰用户 |
+| 2 个及以上 | **先弹出选择弹窗**，未选定前无法关闭（弹窗内提供「退出登录」作为逃生入口） |
+
+选定后，header 会在**退出登录之前**显示当前账套名称与【切换】按钮。
+
+当前账套随每个请求以 `X-Account-Set-Id` 请求头携带，并由后端**逐请求**校验用户与该账套的关联关系
+——账套刻意**不写入 JWT**：写进令牌后，管理员调整关联关系须等令牌过期（1 天）才对用户生效，
+逐请求校验则在**下一次请求**即生效。
+
+切换账套目前**不会**隔离业务数据：`sample_account` 等业务表尚无账套字段。接口已预留接入点
+`CurrentAccountSetExtensions.ResolveCurrentAccountSetAsync`（依请求头解析并鉴权账套），
+待真实领域模型落地时即可按账套过滤。
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /api/account-sets/mine` | Bearer | 我可访问的账套（管理员为全部） |
+| `GET /api/account-sets/current` | Bearer | 依 `X-Account-Set-Id` 解析当前账套：不带头返回 `null`，格式非法返回 400，账套不存在或无权访问返回 403 |
+| `GET /api/admin/account-sets` | 管理员 | 账套列表（含关联用户数） |
+| `POST /api/admin/account-sets` | 管理员 | 新建账套（201）；名称重复返回 409 |
+| `PUT /api/admin/account-sets/{id}` | 管理员 | 修改名称与备注（204） |
+| `DELETE /api/admin/account-sets/{id}` | 管理员 | 删除账套并清除其关联（204） |
+| `GET /api/admin/account-sets/{id}/members` | 管理员 | 账套关联用户 Id 列表 |
+| `PUT /api/admin/account-sets/{id}/members` | 管理员 | 以 `{ userIds }` **整体替换**关联用户（204） |
+
 ##### 升级既有数据库
 
 SqlSugar 的增量加列只会把新列补成**可空**，不会为既有行填值。因此启动时会先把历史用户行的

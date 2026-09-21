@@ -6,6 +6,7 @@
  */
 
 import { getAppConfig, joinApiUrl } from '@/config/appConfig'
+import { getAccountSetId } from '@/auth/accountSet'
 import { clearToken, getToken } from '@/auth/token'
 
 /** 带 HTTP 状态码的请求错误，便于调用方按状态码分支处理。 */
@@ -110,9 +111,19 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     headers['Content-Type'] = 'application/json'
   }
 
+  // 登录/注册等匿名请求不带账套头：此时本地账套可能还是上一位登录者留下的
+  const withAuth = options.auth !== false
+
   const token = getToken()
-  if (token !== null && options.auth !== false) {
+  if (token !== null && withAuth) {
     headers.Authorization = `Bearer ${token}`
+  }
+
+  // 当前账套随每个请求一并上报，由后端逐请求校验用户与该账套的关联关系。
+  // 因此这里只需如实上报，不做任何本地放行判断。
+  const accountSetId = getAccountSetId()
+  if (accountSetId !== null && withAuth) {
+    headers['X-Account-Set-Id'] = String(accountSetId)
   }
 
   let response: Response

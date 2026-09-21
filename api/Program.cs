@@ -13,6 +13,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHamsterDatabase(builder.Configuration);
 builder.Services.AddSingleton<ISampleAccountService, SampleAccountService>();
 builder.Services.AddSingleton<IUserService, UserService>();
+builder.Services.AddSingleton<IAccountSetService, AccountSetService>();
 
 // 默认管理员播种与密码重置链接所需配置（均由环境变量优先）
 builder.Services.AddSingleton(AdminSeedOptions.From(builder.Configuration));

@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
+import AccountSetPicker from '@/components/AccountSetPicker.vue'
 import { menuItems } from '@/config/menu'
+import { useAccountSetsStore } from '@/stores/accountSets'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
+const accountSets = useAccountSetsStore()
 const route = useRoute()
 const router = useRouter()
 
@@ -53,6 +56,31 @@ function handleKeydown(event: KeyboardEvent): void {
 onMounted(() => window.addEventListener('keydown', handleKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', handleKeydown))
 
+// 登录态变化时同步账套：登录后拉取可访问账套并据此收敛当前账套（多账套时置为「必须先选择」），
+// 登出时清空——否则下一位登录者会看到上一位的账套名称。
+// `immediate` 覆盖「刷新页面后凭本地令牌恢复登录态」这条路径。
+watch(
+  () => auth.isAuthenticated,
+  async (authenticated) => {
+    if (!authenticated) {
+      accountSets.clear()
+      return
+    }
+
+    try {
+      await accountSets.loadMine()
+    } catch {
+      // 账套拉取失败不阻断页面：header 退化为不展示账套，用户可稍后用【切换】重试
+    }
+  },
+  { immediate: true },
+)
+
+/** 选定账套：本地即时生效，其可访问性由后端在每次请求上校验。 */
+function handleSelectAccountSet(id: number): void {
+  accountSets.select(id)
+}
+
 /** 退出登录并回到登录页。 */
 async function handleLogout(): Promise<void> {
   auth.logout()
@@ -89,6 +117,20 @@ async function handleLogout(): Promise<void> {
 
       <div class="account">
         <template v-if="auth.isAuthenticated">
+          <!-- 当前账套置于【退出登录】之前：名称只读展示，切换走弹窗 -->
+          <span v-if="accountSets.current" class="account-set">
+            <span class="account-set-name" :title="accountSets.current.remark ?? ''">
+              {{ accountSets.current.name }}
+            </span>
+            <button type="button" class="switch-set" @click="accountSets.openPicker()">
+              切换
+            </button>
+          </span>
+          <!-- 一个账套都没关联：仅提示，不显示名称与切换按钮 -->
+          <span v-else-if="accountSets.emptyNotice" class="account-set-empty">
+            {{ accountSets.emptyNotice }}
+          </span>
+
           <span class="account-name">{{ auth.user?.username ?? '已登录' }}</span>
           <button type="button" class="logout" @click="handleLogout">退出登录</button>
         </template>
@@ -117,6 +159,17 @@ async function handleLogout(): Promise<void> {
         <RouterView />
       </main>
     </div>
+
+    <!-- 多账套且尚未选定时由 `selectionRequired` 强制打开，此时弹窗不可取消（仅可退出登录） -->
+    <AccountSetPicker
+      :open="accountSets.pickerOpen || accountSets.selectionRequired"
+      :accounts="accountSets.accountSets"
+      :current-id="accountSets.currentId"
+      :required="accountSets.selectionRequired"
+      @select="handleSelectAccountSet"
+      @close="accountSets.closePicker()"
+      @logout="handleLogout"
+    />
   </template>
 </template>
 
@@ -159,6 +212,51 @@ async function handleLogout(): Promise<void> {
   align-items: center;
   gap: 0.6rem;
   font-size: 13px;
+}
+
+.account-set {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+}
+
+.account-set-name {
+  /* 账套名可能较长：限宽省略，完整名称与备注由 title 悬浮展示 */
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--color-accent-strong);
+}
+
+.account-set-empty {
+  opacity: 0.6;
+}
+
+.switch-set {
+  flex: none;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--color-border-hover);
+  border-radius: var(--radius-control);
+  background: none;
+  color: inherit;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s,
+    color 0.3s;
+}
+
+@media (hover: hover) {
+  .switch-set:hover {
+    border-color: var(--color-accent);
+    background-color: var(--color-accent-soft);
+    color: var(--color-accent-strong);
+  }
 }
 
 .account-name {
@@ -283,6 +381,11 @@ async function handleLogout(): Promise<void> {
 @media (max-width: 1023px) {
   .menu-toggle {
     display: flex;
+  }
+
+  /* 窄屏 header 一行要放下品牌、账套、用户名与两个按钮，账套名进一步让位 */
+  .account-set-name {
+    max-width: 6rem;
   }
 
   .app-sidebar {

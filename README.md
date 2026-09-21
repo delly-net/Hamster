@@ -151,6 +151,45 @@ learn whether a username exists but is merely inactive.
 | `POST /api/admin/users/{id}/reset-link` | Admin | Generate a 15-minute single-use reset link |
 | `DELETE /api/admin/users/{id}` | Admin | Delete a user (204); 400 for your own account |
 
+##### Account sets
+
+An **account set** groups business data (for example "Home" vs "The company"). Account sets and
+users are **many-to-many**: an administrator links users to account sets from
+`/admin/account-sets`. Administrators themselves need no link — they can see and switch between
+**every** account set.
+
+A regular user's login experience follows how many account sets they can reach:
+
+| Reachable account sets | On login |
+|---|---|
+| none | The header shows "no account set available" instead of a name and a switch button |
+| exactly one | Selected automatically, no prompt |
+| two or more | A **selection dialog opens first** and cannot be dismissed until an account set is chosen (it offers "log out" as an escape) |
+
+Once selected, the header shows the current account set plus a **Switch** button, placed just
+before **Log out**.
+
+The current account set travels on every request as the `X-Account-Set-Id` header and is
+validated per request against the user's links — it is deliberately **not** part of the JWT.
+Putting it in the token would mean an administrator's change to a user's links only takes effect
+after the token expires (1 day); validating per request makes it apply to the very next request.
+
+Switching account sets does **not** yet scope business data: `sample_account` and the other
+business tables have no account-set column. The API provides the hook for it —
+`CurrentAccountSetExtensions.ResolveCurrentAccountSetAsync` resolves and authorises the account
+set from the header — so scoping can be added once the real domain model lands.
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/account-sets/mine` | Bearer | Account sets you can reach (all of them for an administrator) |
+| `GET /api/account-sets/current` | Bearer | Resolve `X-Account-Set-Id`: `null` without the header, 400 when malformed, 403 when unknown or not yours |
+| `GET /api/admin/account-sets` | Admin | List account sets with their linked-user counts |
+| `POST /api/admin/account-sets` | Admin | Create (201); 409 on a duplicate name |
+| `PUT /api/admin/account-sets/{id}` | Admin | Rename / re-describe (204) |
+| `DELETE /api/admin/account-sets/{id}` | Admin | Delete, dropping its links (204) |
+| `GET /api/admin/account-sets/{id}/members` | Admin | Linked user ids |
+| `PUT /api/admin/account-sets/{id}/members` | Admin | **Replace** the linked-user set with `{ userIds }` (204) |
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.

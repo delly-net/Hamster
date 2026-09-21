@@ -18,4 +18,5 @@ export const menuItems: MenuItem[] = [
   { label: '关于', routeName: 'about' },
   { label: '接口调试', routeName: 'openapi' },
   { label: '用户管理', routeName: 'admin-users', adminOnly: true },
+  { label: '账套管理', routeName: 'admin-account-sets', adminOnly: true },
 ]

@@ -61,6 +61,13 @@ public static class ConfigConst
     public const string CLAIM_USER_NAME = "name";
 
     /// <summary>
+    /// 承载当前账套主键的请求头名。
+    /// 账套刻意**不写入 JWT**：写进令牌后，管理员在账套管理页调整关联关系须等令牌过期（1 天）才对用户生效；
+    /// 由请求头承载 + 后端逐请求回查，关联调整在下一次请求即生效。
+    /// </summary>
+    public const string ACCOUNT_SET_HEADER = "X-Account-Set-Id";
+
+    /// <summary>
     /// 连接串脱敏：隐藏密码段，避免日志泄漏凭据。
     /// </summary>
     /// <param name="connectionString">原始连接串。</param>

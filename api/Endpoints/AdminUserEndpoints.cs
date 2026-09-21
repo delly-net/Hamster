@@ -11,14 +11,10 @@ namespace Hamster.Api.Endpoints;
 /// 管理员用户管理端点：用户列表、激活 / 取消激活、生成密码重置链接、删除。
 /// </summary>
 /// <remarks>
-/// **管理员身份以数据库为准，不信任令牌中的声明**。这样管理员被停用或删除后，
-/// 其此前签发的令牌（有效期 1 天）会立即失去管理权限，而不用等令牌自然过期。
+/// 管理员身份校验统一走 <see cref="AdminGuard"/>（以数据库为准，不信任令牌声明）。
 /// </remarks>
 public sealed class AdminUserEndpoints : IEndpoint
 {
-    /// <summary>非管理员访问时的提示文案。</summary>
-    private const string FORBIDDEN_MESSAGE = "需要系统管理员权限";
-
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
     {
@@ -31,7 +27,7 @@ public sealed class AdminUserEndpoints : IEndpoint
                 IUserService users,
                 CancellationToken cancellationToken) =>
             {
-                var (_, failure) = await ResolveAdminAsync(principal, users, cancellationToken);
+                var (_, failure) = await AdminGuard.ResolveAdminAsync(principal, users, cancellationToken);
                 if (failure is not null)
                 {
                     return failure;
@@ -50,7 +46,7 @@ public sealed class AdminUserEndpoints : IEndpoint
                 IUserService users,
                 CancellationToken cancellationToken) =>
             {
-                var (_, failure) = await ResolveAdminAsync(principal, users, cancellationToken);
+                var (_, failure) = await AdminGuard.ResolveAdminAsync(principal, users, cancellationToken);
                 if (failure is not null)
                 {
                     return failure;
@@ -70,7 +66,7 @@ public sealed class AdminUserEndpoints : IEndpoint
                 IUserService users,
                 CancellationToken cancellationToken) =>
             {
-                var (admin, failure) = await ResolveAdminAsync(principal, users, cancellationToken);
+                var (admin, failure) = await AdminGuard.ResolveAdminAsync(principal, users, cancellationToken);
                 if (failure is not null)
                 {
                     return failure;
@@ -98,7 +94,7 @@ public sealed class AdminUserEndpoints : IEndpoint
                 PublicUrlOptions publicUrl,
                 CancellationToken cancellationToken) =>
             {
-                var (_, failure) = await ResolveAdminAsync(principal, users, cancellationToken);
+                var (_, failure) = await AdminGuard.ResolveAdminAsync(principal, users, cancellationToken);
                 if (failure is not null)
                 {
                     return failure;
@@ -128,7 +124,7 @@ public sealed class AdminUserEndpoints : IEndpoint
                 IUserService users,
                 CancellationToken cancellationToken) =>
             {
-                var (admin, failure) = await ResolveAdminAsync(principal, users, cancellationToken);
+                var (admin, failure) = await AdminGuard.ResolveAdminAsync(principal, users, cancellationToken);
                 if (failure is not null)
                 {
                     return failure;
@@ -152,41 +148,6 @@ public sealed class AdminUserEndpoints : IEndpoint
     /// <summary>用户不存在时的响应。</summary>
     /// <returns>404 响应。</returns>
     private static IResult NotFound() => Results.NotFound(new { message = "用户不存在" });
-
-    /// <summary>
-    /// 解析并校验调用者的管理员身份。
-    /// </summary>
-    /// <param name="principal">当前请求的用户主体。</param>
-    /// <param name="users">用户服务。</param>
-    /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>通过校验返回管理员实体且失败响应为 <c>null</c>；否则管理员为 <c>null</c> 并给出失败响应。</returns>
-    private static async Task<(User? Admin, IResult? Failure)> ResolveAdminAsync(
-        ClaimsPrincipal principal,
-        IUserService users,
-        CancellationToken cancellationToken)
-    {
-        var userId = principal.GetUserId();
-        if (userId is null)
-        {
-            return (null, Results.Unauthorized());
-        }
-
-        var user = await users.FindByIdAsync(userId.Value, cancellationToken);
-        if (user is null)
-        {
-            // 用户已被删除，令牌随之失效
-            return (null, Results.Unauthorized());
-        }
-
-        if (!user.IsAdmin || !user.IsActive)
-        {
-            return (null, Results.Json(
-                new { message = FORBIDDEN_MESSAGE },
-                statusCode: StatusCodes.Status403Forbidden));
-        }
-
-        return (user, null);
-    }
 }
 
 /// <summary>用户管理页展示用的用户信息，不含任何凭据字段。</summary>
