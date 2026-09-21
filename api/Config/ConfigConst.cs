@@ -17,6 +17,27 @@ public static class ConfigConst
     /// <summary>JWT 签名密钥环境变量名；未配置时启动阶段随机生成。</summary>
     public const string JWT_KEY_ENV = "HAMSTER_JWT_KEY";
 
+    /// <summary>默认管理员用户名环境变量名。</summary>
+    public const string ADMIN_USERNAME_ENV = "HAMSTER_ADMIN_USERNAME";
+
+    /// <summary>默认管理员密码环境变量名（生产部署务必覆盖）。</summary>
+    public const string ADMIN_PASSWORD_ENV = "HAMSTER_ADMIN_PASSWORD";
+
+    /// <summary>默认管理员播种开关环境变量名。</summary>
+    public const string ADMIN_SEED_ENABLED_ENV = "HAMSTER_ADMIN_SEED_ENABLED";
+
+    /// <summary>前端公开访问基址环境变量名，用于拼装密码重置链接。</summary>
+    public const string PUBLIC_BASE_URL_ENV = "HAMSTER_PUBLIC_BASE_URL";
+
+    /// <summary>默认管理员用户名。</summary>
+    public const string DEFAULT_ADMIN_USERNAME = "admin";
+
+    /// <summary>默认管理员密码（仅用于首次创建，生产环境必须覆盖或立即改密）。</summary>
+    public const string DEFAULT_ADMIN_PASSWORD = "admin123";
+
+    /// <summary>前端公开访问基址默认值（开发环境 Vite 开发服务器）。</summary>
+    public const string DEFAULT_PUBLIC_BASE_URL = FRONTEND_DEV_ORIGIN;
+
     /// <summary>前端开发服务器地址，用于开发环境 CORS 放行。</summary>
     public const string FRONTEND_DEV_ORIGIN = "http://localhost:5173";
 

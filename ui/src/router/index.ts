@@ -6,6 +6,11 @@ declare module 'vue-router' {
   interface RouteMeta {
     /** 需要登录态，未登录时由守卫重定向到登录页。 */
     requiresAuth?: boolean
+    /**
+     * 需要系统管理员身份，非管理员由守卫重定向到首页。
+     * 与 {@link requiresAuth} 并列使用，仅在登录态已知时生效。
+     */
+    requiresAdmin?: boolean
     /** 布局模式：`blank` 为空白布局（仅品牌 logo + 极简页脚），缺省为完整头部布局。 */
     layout?: 'blank'
   }
@@ -44,6 +49,21 @@ const router = createRouter({
       // 接口调试面板，仅在需要时载入；不依赖登录态，保持公开
       component: () => import('../views/OpenApiView.vue'),
     },
+    {
+      path: '/admin/users',
+      name: 'admin-users',
+      // 用户管理（激活/停用、重置链接、删除），仅管理员可见
+      component: () => import('../views/UserAdminView.vue'),
+      meta: { requiresAuth: true, requiresAdmin: true },
+    },
+    {
+      path: '/reset-password',
+      name: 'reset-password',
+      // 密码重置落地页：令牌经查询参数传入，**必须免登录**，
+      // 否则被重置的用户（多半处于未登录态）打不开链接
+      component: () => import('../views/ResetPasswordView.vue'),
+      meta: { layout: 'blank' },
+    },
   ],
 })
 
@@ -53,6 +73,11 @@ router.beforeEach((to) => {
   if (to.meta.requiresAuth === true && !auth.isAuthenticated) {
     // 记录来源页，登录成功后跳回
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+
+  // 非管理员直接回首页：这里只是体验层的兜底，真正的防线是后端逐个管理端点的数据库回查
+  if (to.meta.requiresAdmin === true && !auth.isAdmin) {
+    return { name: 'home' }
   }
 
   if (to.name === 'login' && auth.isAuthenticated) {

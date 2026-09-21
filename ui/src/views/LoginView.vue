@@ -29,16 +29,17 @@ const username = ref('')
 const password = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')
+const successMessage = ref('')
 
 const isRegister = computed(() => mode.value === 'register')
 const submitLabel = computed(() => {
   if (submitting.value) {
     return isRegister.value ? '注册中…' : '登录中…'
   }
-  return isRegister.value ? '注册并登录' : '登录'
+  return isRegister.value ? '注册' : '登录'
 })
 
-/** 切换登录/注册，清空上一轮的报错。 */
+/** 切换登录/注册，清空上一轮的结果提示。 */
 function switchMode(next: Mode): void {
   if (mode.value === next || submitting.value) {
     return
@@ -46,6 +47,7 @@ function switchMode(next: Mode): void {
 
   mode.value = next
   errorMessage.value = ''
+  successMessage.value = ''
 }
 
 /** 提交前的前端校验，返回错误文案；通过时返回空串。 */
@@ -85,14 +87,21 @@ async function submit(): Promise<void> {
 
   submitting.value = true
   errorMessage.value = ''
+  successMessage.value = ''
 
   try {
     const name = username.value.trim()
+
     if (isRegister.value) {
-      await auth.register(name, password.value)
-    } else {
-      await auth.login(name, password.value)
+      // 注册不再自动登录：账号需管理员激活，故留在本页并切回登录 Tab，
+      // 让用户看清「注册成功但还不能登录」的原因
+      successMessage.value = await auth.register(name, password.value)
+      mode.value = 'login'
+      password.value = ''
+      return
     }
+
+    await auth.login(name, password.value)
 
     const redirect = route.query.redirect
     await router.replace(typeof redirect === 'string' && redirect.length > 0 ? redirect : '/')
@@ -110,7 +119,7 @@ async function submit(): Promise<void> {
 
     <h1 class="title">{{ isRegister ? '注册仓鼠账号' : '登录仓鼠理财管家' }}</h1>
     <p class="subtitle">
-      {{ isRegister ? '创建账号后即可开始记账。' : '登录后即可管理你的账户与账目。' }}
+      {{ isRegister ? '注册后需管理员激活，方可登录。' : '登录后即可管理你的账户与账目。' }}
     </p>
 
     <div class="tabs" role="tablist">
@@ -158,6 +167,7 @@ async function submit(): Promise<void> {
       </label>
 
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+      <p v-if="successMessage" class="success">{{ successMessage }}</p>
 
       <button type="submit" class="submit" :disabled="submitting">{{ submitLabel }}</button>
     </form>
@@ -279,6 +289,17 @@ async function submit(): Promise<void> {
   background: var(--color-danger-soft);
   color: var(--color-danger);
   font-size: 13px;
+}
+
+/* 成功提示复用主色而非绿色：全站只有 danger 一种语义色，不额外引入绿色 */
+.success {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 /* 实心主色按钮：登录页唯一的强视觉锚点 */

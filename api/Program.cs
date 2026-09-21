@@ -14,6 +14,10 @@ builder.Services.AddHamsterDatabase(builder.Configuration);
 builder.Services.AddSingleton<ISampleAccountService, SampleAccountService>();
 builder.Services.AddSingleton<IUserService, UserService>();
 
+// 默认管理员播种与密码重置链接所需配置（均由环境变量优先）
+builder.Services.AddSingleton(AdminSeedOptions.From(builder.Configuration));
+builder.Services.AddSingleton(PublicUrlOptions.From(builder.Configuration));
+
 // 认证：JWT（签名密钥可由 HAMSTER_JWT_KEY 指定，缺省时随机生成）
 var jwtOptions = JwtOptions.From(builder.Configuration);
 
@@ -64,6 +68,9 @@ if (app.Environment.IsDevelopment())
 
 // 数据库初始化：受 AutoMigrate 开关控制，失败不阻断启动
 app.InitializeDatabase();
+
+// 默认管理员播种：仅在同名账户不存在时创建，失败不阻断启动
+app.SeedDefaultAdmin();
 
 app.UseAuthentication();
 app.UseAuthorization();

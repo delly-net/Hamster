@@ -40,6 +40,8 @@ async function handleLogout(): Promise<void> {
         <RouterLink to="/">首页</RouterLink>
         <RouterLink to="/about">关于</RouterLink>
         <RouterLink to="/openapi">接口调试</RouterLink>
+        <!-- 仅管理员可见；非管理员即使手敲地址也会被守卫挡回首页 -->
+        <RouterLink v-if="auth.isAdmin" to="/admin/users">用户管理</RouterLink>
         <RouterLink v-if="!auth.isAuthenticated" to="/login">登录 / 注册</RouterLink>
       </nav>
 

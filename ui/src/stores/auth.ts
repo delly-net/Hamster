@@ -12,12 +12,22 @@ export interface AuthUser {
   id: number
   username: string
   createdAt: string
+  /** 是否系统管理员，决定是否展示「用户管理」入口。 */
+  isAdmin: boolean
+  /** 是否已激活；未激活账号无法登录，故登录态下的用户恒为 `true`。 */
+  isActive: boolean
 }
 
-/** 注册/登录接口的响应体。 */
+/** 登录接口的响应体。 */
 interface AuthResponse {
   token: string
   expiresAt: string
+  user: AuthUser
+}
+
+/** 注册接口的响应体：注册不再签发令牌，需管理员激活后才能登录。 */
+interface RegisterResponse {
+  message: string
   user: AuthUser
 }
 
@@ -27,6 +37,13 @@ export const useAuthStore = defineStore('auth', () => {
   const restoring = ref(false)
 
   const isAuthenticated = computed(() => token.value !== null)
+
+  /**
+   * 是否系统管理员。
+   * 仅用于控制入口的显隐，**不是**安全边界：管理端接口在后端逐个回查数据库鉴权，
+   * 篡改本地状态只会看到一个请求全部失败的页面。
+   */
+  const isAdmin = computed(() => user.value?.isAdmin === true)
 
   /** 记录令牌并同步本地存储。 */
   function applyToken(next: string): void {
@@ -84,18 +101,34 @@ export const useAuthStore = defineStore('auth', () => {
     return result.user
   }
 
-  /** 注册；成功后即视为登录。 */
-  async function register(username: string, password: string): Promise<AuthUser> {
-    const result = await request<AuthResponse>('/api/auth/register', {
+  /**
+   * 注册。
+   *
+   * 注册**不**签发令牌：新账号默认未激活，须管理员激活后才能登录，
+   * 故这里不改动本地登录态，由调用方提示用户等待激活。
+   *
+   * @returns 后端返回的提示文案。
+   */
+  async function register(username: string, password: string): Promise<string> {
+    const result = await request<RegisterResponse>('/api/auth/register', {
       method: 'POST',
       body: { username, password },
       handleUnauthorized: false,
     })
 
-    applyToken(result.token)
-    user.value = result.user
-    return result.user
+    return result.message
   }
 
-  return { token, user, restoring, isAuthenticated, login, register, logout, fetchMe, restore }
+  return {
+    token,
+    user,
+    restoring,
+    isAuthenticated,
+    isAdmin,
+    login,
+    register,
+    logout,
+    fetchMe,
+    restore,
+  }
 })

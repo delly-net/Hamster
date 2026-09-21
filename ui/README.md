@@ -38,10 +38,12 @@ ui/
     ├── auth/token.ts        # 登录令牌的本地读写（localStorage + 内存兜底）
     ├── config/appConfig.ts  # 运行时配置加载
     ├── components/          # 通用组件（含 openapi/ 调试面板组件）
-    ├── views/               # 页面组件（HomeView / AboutView / LoginView / OpenApiView）
-    ├── router/index.ts      # 路由表、布局 meta 与登录守卫
+    ├── views/               # 页面组件（HomeView / AboutView / LoginView / OpenApiView
+    │                        #          / UserAdminView / ResetPasswordView）
+    ├── router/index.ts      # 路由表、布局 meta 与登录 / 管理员守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
+        ├── users.ts         # 用户管理状态（列表 / 激活停用 / 重置链接 / 删除）
         └── counter.ts       # Pinia 示例 store
 ```
 
@@ -121,8 +123,8 @@ ui/
 
 以「用户名 + 密码」登录，登录态由后端签发的 JWT 承载。页面为登录 / 注册合一的表单（Tab 切换）：
 
-- **注册**：用户名 3–32 位字母、数字或下划线，密码至少 6 位；用户名全局唯一（查重不区分大小写）；注册成功即登录。
-- **登录**：凭据错误时提示「用户名或密码错误」（后端不区分用户不存在与密码错误，避免枚举用户名）。
+- **注册**：用户名 3–32 位字母、数字或下划线，密码至少 6 位；用户名全局唯一（查重不区分大小写）。注册**不会自动登录**——新账号默认未激活，注册成功后页面**切回登录 Tab** 并提示「注册成功，请等待管理员激活后登录」，同时清空密码框。按钮文案相应为「注册」而非「注册并登录」。
+- **登录**：凭据错误时提示「用户名或密码错误」（后端不区分用户不存在与密码错误，避免枚举用户名）；账号未激活时提示「账号尚未激活，请联系管理员激活」，且**不写入令牌**、不跳转，用户可原地重试。
 
 ### 页面布局
 
@@ -147,14 +149,43 @@ ui/
 
 令牌有效期**固定 1 天**，过期或后端更换签名密钥后需重新登录。
 
+## 用户管理 `/admin/users`
+
+系统管理员专用的用户管理台（[`src/views/UserAdminView.vue`](src/views/UserAdminView.vue) + [`src/stores/users.ts`](src/stores/users.ts)），列表展示用户名、角色、激活状态与注册时间，并提供三类操作：
+
+| 操作 | 行为 |
+|---|---|
+| 激活 / 停用 | 双向开关。停用后该用户无法再登录；**已签发的令牌在过期前仍可用**（见下方「已知边界」） |
+| 重置链接 | 生成有效期 15 分钟、一次性的专属链接，页内展示全文并提供一键复制；重新生成会使旧链接立即失效 |
+| 删除 | 需二次确认（按钮就地变为「确认删除 / 取消」，不使用 `window.confirm`，以免阻塞无头渲染与自动化）；删除后该用户令牌立即失效，用户名可被重新注册 |
+
+设计约定：
+
+- **入口显隐只是体验**：导航栏的「用户管理」入口按 `auth.isAdmin` 显隐，路由守卫也会挡回非管理员，但**真正的防线是后端**——每个管理端点都回查数据库确认调用者仍是启用状态的管理员。篡改前端状态只会看到一个请求全部失败的页面。
+- **自锁保护**：当前登录账号所在行标「当前账号」，其「停用」「删除」按钮置灰；后端对同一规则有独立校验，绕过前端只会得到 400。
+- **时间显示**：后端回传的是带 `Z` 的 UTC 时间，页面用 `Intl.DateTimeFormat` 按浏览器本地时区渲染。
+- **成功提示复用主色**而非绿色：全站只有 `--color-danger` 一种语义色，不额外引入绿色以维持暖色视觉体系。
+
+> **已知边界**：停用只阻止**新的登录**，已签发的令牌在其 1 天有效期内仍可访问非管理接口。若需要「停用即踢下线」，需在服务端的令牌校验环节回查用户状态（本项目当前未实现）。
+
+## 密码重置 `/reset-password`
+
+管理员生成的重置链接落地页（[`src/views/ResetPasswordView.vue`](src/views/ResetPasswordView.vue)），**免登录**（路由 `meta: { layout: 'blank' }`，不带 `requiresAuth`）——被重置的用户多半处于未登录态，要求登录会让链接形同虚设。
+
+- 链接形如 `/reset-password?username=xxx&token=yyy`，用户名由查询参数**预填但可修改**：预填只是省事，真正的「用户名 + 令牌」双因子匹配由后端完成，篡改它只会得到统一的失败提示。
+- 缺少 `token` 参数时给出「重置链接不完整」的明确提示，并禁用提交按钮，而不是让用户对着无效表单反复重试。
+- 前端校验两次密码一致与长度下限，后端仍会独立校验一次。
+- 成功后展示后端返回的「密码已重置，请使用新密码登录」并提供前往登录页的链接。
+
 ### 路由守卫
 
-[`src/router/index.ts`](src/router/index.ts) 中的 `beforeEach` 按 `meta.requiresAuth` 拦截：
+[`src/router/index.ts`](src/router/index.ts) 中的 `beforeEach` 按 `meta.requiresAuth` / `meta.requiresAdmin` 拦截：
 
-- 未登录访问受保护路由（`/`、`/about`）→ 重定向到 `/login`，并带上 `redirect` 查询参数，登录成功后跳回来源页；
+- 未登录访问受保护路由（`/`、`/about`、`/admin/users`）→ 重定向到 `/login`，并带上 `redirect` 查询参数，登录成功后跳回来源页；
+- 已登录但非管理员访问 `/admin/users` → 重定向回首页；
 - 已登录访问 `/login` → 直接跳回首页。
 
-`/openapi` 不依赖登录态，保持公开。
+`/openapi` 与 `/reset-password` 不依赖登录态，保持公开。
 
 ## 开发命令
 
@@ -183,7 +214,16 @@ GET  http://localhost:5004/health                  # 存活探针
 GET  http://localhost:5004/health/db               # 数据库连通性探针（返回当前库类型）
 GET  http://localhost:5004/openapi/v1.json         # OpenAPI 文档（仅开发环境）
 
-POST http://localhost:5004/api/auth/register       # 注册（201，返回令牌）
+POST http://localhost:5004/api/auth/register       # 注册（201，不返回令牌，需管理员激活）
 POST http://localhost:5004/api/auth/login          # 登录（200，返回令牌）
 GET  http://localhost:5004/api/auth/me             # 当前用户（需 Bearer 令牌）
+POST http://localhost:5004/api/auth/reset-password # 凭用户名 + 令牌设置新密码（免登录）
+
+GET    http://localhost:5004/api/admin/users                    # 用户列表（需管理员）
+POST   http://localhost:5004/api/admin/users/{id}/activate      # 激活
+POST   http://localhost:5004/api/admin/users/{id}/deactivate    # 停用
+POST   http://localhost:5004/api/admin/users/{id}/reset-link    # 生成 15 分钟一次性重置链接
+DELETE http://localhost:5004/api/admin/users/{id}               # 删除
 ```
+
+首次启动会自动播种默认管理员 `admin` / `admin123`（可用 `HAMSTER_ADMIN_USERNAME` / `HAMSTER_ADMIN_PASSWORD` 覆盖，详见[根 README](../README.zh-CN.md)）。
