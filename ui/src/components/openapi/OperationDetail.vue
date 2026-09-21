@@ -308,7 +308,7 @@ async function copyResponse() {
 }
 
 .required {
-  color: #dc2626;
+  color: var(--color-danger);
 }
 
 .type {
@@ -335,14 +335,14 @@ input,
 
 input:focus,
 .body-editor:focus {
-  outline: 2px solid hsla(160, 100%, 37%, 0.4);
+  outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
 
 .text-button {
   border: none;
   background: none;
-  color: hsla(160, 100%, 37%, 1);
+  color: var(--color-accent-strong);
   font-size: 12.5px;
   cursor: pointer;
   padding: 0;
@@ -361,9 +361,9 @@ input:focus,
 .send {
   padding: 0.5rem 1.25rem;
   border: none;
-  border-radius: 6px;
-  background: hsla(160, 100%, 37%, 1);
-  color: #fff;
+  border-radius: var(--radius-control);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
@@ -381,10 +381,10 @@ input:focus,
 
 .error {
   padding: 0.625rem 0.875rem;
-  border: 1px solid rgba(220, 38, 38, 0.4);
-  border-radius: 6px;
-  background: rgba(220, 38, 38, 0.08);
-  color: #dc2626;
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-control);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
   font-size: 13px;
 }
 

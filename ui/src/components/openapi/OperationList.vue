@@ -81,14 +81,14 @@ const groups = computed(() => {
 .search {
   padding: 0.5rem 0.75rem;
   border: 1px solid var(--color-border);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: var(--color-background);
   color: var(--color-text);
   font-size: 13px;
 }
 
 .search:focus {
-  outline: 2px solid hsla(160, 100%, 37%, 0.4);
+  outline: 2px solid var(--color-accent);
   outline-offset: 1px;
 }
 
@@ -115,13 +115,15 @@ const groups = computed(() => {
   width: 100%;
   padding: 0.5rem;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.2s;
+  transition:
+    background-color 0.2s,
+    border-color 0.2s;
 }
 
 .item:hover {
@@ -129,8 +131,8 @@ const groups = computed(() => {
 }
 
 .item.active {
-  border-color: hsla(160, 100%, 37%, 0.5);
-  background: hsla(160, 100%, 37%, 0.12);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
 .item-body {

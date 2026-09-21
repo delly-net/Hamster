@@ -132,8 +132,8 @@ onMounted(load)
 }
 
 .state-error {
-  border-color: rgba(220, 38, 38, 0.4);
-  background: rgba(220, 38, 38, 0.08);
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-soft);
 }
 
 .state-hint {

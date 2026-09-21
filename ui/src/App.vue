@@ -30,7 +30,7 @@ async function handleLogout(): Promise<void> {
 
 <template>
   <header v-if="!isBlankLayout">
-    <img alt="Hamster logo" class="logo" src="@/assets/logo.svg" width="125" height="125" />
+    <img alt="Hamster logo" class="logo" src="@/assets/logo.png" width="125" height="125" />
 
     <div class="wrapper">
       <HelloWorld msg="仓鼠理财管家" />
@@ -50,7 +50,7 @@ async function handleLogout(): Promise<void> {
   </header>
 
   <header v-else class="brand">
-    <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.svg" width="72" height="72" />
+    <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.png" width="72" height="72" />
   </header>
 
   <RouterView />
@@ -67,6 +67,8 @@ header {
 .logo {
   display: block;
   margin: 0 auto 2rem;
+  /* 位图 logo 已带透明圆角，加一层柔和投影使其从奶油渐变底上浮起 */
+  filter: drop-shadow(0 10px 18px rgba(90, 58, 34, 0.22));
 }
 
 nav {
@@ -77,7 +79,8 @@ nav {
 }
 
 nav a.router-link-exact-active {
-  color: var(--color-text);
+  color: var(--color-accent-strong);
+  font-weight: 600;
 }
 
 nav a.router-link-exact-active:hover {
@@ -110,6 +113,7 @@ nav a:first-of-type {
 
 .brand-logo {
   display: block;
+  filter: drop-shadow(0 8px 14px rgba(90, 58, 34, 0.22));
 }
 
 .site-footer {
@@ -125,13 +129,22 @@ nav a:first-of-type {
 
 .logout {
   padding: 0.3rem 0.7rem;
-  border: 1px solid var(--color-border-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
   background: none;
-  color: inherit;
+  color: var(--color-accent-strong);
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
+  transition:
+    background-color 0.3s,
+    color 0.3s;
+}
+
+@media (hover: hover) {
+  .logout:hover {
+    background-color: var(--color-accent-soft);
+  }
 }
 
 @media (min-width: 1024px) {

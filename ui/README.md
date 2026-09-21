@@ -26,11 +26,12 @@ ui/
 ├── .prettierrc.json         # Prettier 配置
 ├── .oxlintrc.json           # oxlint 配置
 ├── public/                  # 静态资源（原样拷贝）
+│   ├── favicon.ico          # 站点图标（产品 ico，见「品牌资源」）
 │   └── conf/setting.json    # 运行时配置（后端地址等，部署后可改）
 └── src/
     ├── main.ts              # 应用入口（挂载前载入运行时配置并恢复登录态）
     ├── App.vue              # 根组件（按路由 meta 切换布局，导航与登录态入口）
-    ├── assets/              # 样式与图片
+    ├── assets/              # 样式与图片（base.css 配色令牌 / main.css 全局版式 / logo.png 产品 Logo）
     ├── api/
     │   ├── http.ts          # 统一请求层（附加令牌、错误文案、401 处理）
     │   └── openapi/         # OpenAPI 文档拉取与调试请求（types / schema / client）
@@ -45,6 +46,41 @@ ui/
 ```
 
 > `stores/counter.ts` 与 `components/` 中的 `HelloWorld`、`TheWelcome` 等仍是脚手架自带的示例内容，开始业务开发时可直接删除。
+
+## 品牌资源与配色
+
+### 品牌资源
+
+产品视觉资产来自仓库根目录的 [`doc/`](../doc)，落地到本工程的映射：
+
+| 源文件 | 目标 | 用途 |
+|---|---|---|
+| `doc/Hamster.ico` | [`public/favicon.ico`](public/favicon.ico) | 站点图标（`index.html` 的 `rel="icon"` 已引用该路径，替换文件即生效） |
+| `doc/Hamster_512.png` | [`src/assets/logo.png`](src/assets/logo.png) | 全站主 Logo（完整头部 125px、登录页空白头部 72px） |
+
+`logo.png` 是 512×512 的**带透明圆角位图**，可干净地落在渐变页底上，无需再加底板。更换品牌图只需覆盖这两个文件——它们取代了脚手架自带的 Vite 图标与 Vite `logo.svg`（后者已删除）。
+
+### 配色令牌
+
+配色取自 Logo 本身（琥珀橙底、条纹焦糖橙、腹部奶油、深暖棕描边），全部集中在 [`src/assets/base.css`](src/assets/base.css)。**页面样式一律引用语义令牌，不再出现硬编码色值**：
+
+| 令牌 | 亮色 | 暗色 | 用途 |
+|---|---|---|---|
+| `--color-accent` | `#e8934a` | `#f0a85c` | 主色：按钮实底、聚焦环、链接、选中态边框 |
+| `--color-accent-strong` | `#d97b2e` | `#f7bc7c` | 主色加深：hover、小字号彩色文本 |
+| `--color-accent-soft` | `rgba(232,147,74,.14)` | `rgba(240,168,92,.18)` | 主色浅底：hover 填充、选中态背景 |
+| `--color-accent-contrast` | `#ffffff` | `#2a1b0e` | 主色实底上的前景色（**暗色下翻转为深棕**） |
+| `--color-danger` / `-soft` / `-border` | 砖红系 | 暖珊瑚系 | 表单与请求报错 |
+| `--gradient-page` | 奶油三档渐变 | 深棕三档渐变 | `body` 页底（`background-image`，`background-color` 兜底） |
+| `--radius-card` / `--radius-control` | `18px` / `10px` | 同左 | 卡片与控件的圆角 |
+| `--shadow-card` / `--shadow-control` | 暖棕柔和投影 | 纯黑投影 | 卡片浮起与控件层次 |
+
+设计约定：
+
+- **换肤只改 `base.css` 一处**——强调色收敛为上述三件套后，全站再无硬编码品牌色（先前 12 处散落的 Vite 绿已全部替换）。
+- **暗色分支必须重新声明 `--gradient-page`**，否则暗色下会残留亮色奶油渐变（`prefers-color-scheme` 只覆盖显式列出的变量）。
+- **`--color-accent-contrast` 在暗色下翻转**：暗色主色是亮橙，白字对比度不足，须配深棕文字。
+- `/openapi` 页的**HTTP 方法徽标**（GET 蓝 / POST 绿 / PATCH 橙 / DELETE 紫等）刻意保留各自语义色，不并入品牌色，以维持方法间的可辨识度。
 
 ## 运行时配置
 

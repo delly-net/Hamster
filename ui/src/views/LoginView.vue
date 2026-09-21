@@ -165,14 +165,22 @@ async function submit(): Promise<void> {
 
 <style scoped>
 /* 空白布局下 #app 是整屏纵向 flex 容器（见 main.css），
-   `margin: auto` 让表单卡片在 logo 与页脚之间的剩余空间内水平垂直居中 */
+   `margin: auto` 让表单卡片在 logo 与页脚之间的剩余空间内水平垂直居中。
+   切勿改写为在 `body.layout-blank #app > *` 上做 flex 居中——那会覆盖本组件的
+   横向布局并让表单子元素收缩（见 main.css 注释）。 */
 .auth {
   width: 100%;
-  max-width: 24rem;
+  max-width: 25rem;
   margin: auto;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  /* 卡片化：奶油面 + 暖棕细边 + 大圆角 + 柔和投影 */
+  padding: 2rem 1.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
 }
 
 .title {
@@ -196,16 +204,22 @@ async function submit(): Promise<void> {
   flex: 1;
   padding: 0.5rem 1rem;
   border: 1px solid var(--color-border-hover);
-  border-radius: 6px;
+  border-radius: var(--radius-control);
   background: none;
   color: inherit;
   font-size: 13.5px;
   cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s,
+    color 0.3s;
 }
 
 .tabs button.active {
-  border-color: hsla(160, 100%, 37%, 1);
-  color: hsla(160, 100%, 37%, 1);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  font-weight: 600;
 }
 
 .form {
@@ -228,38 +242,61 @@ async function submit(): Promise<void> {
 .field input {
   padding: 0.55rem 0.7rem;
   border: 1px solid var(--color-border-hover);
-  border-radius: 6px;
-  background: var(--color-background-soft);
+  border-radius: var(--radius-control);
+  background: var(--color-background);
   color: inherit;
   font-size: 14px;
   font-family: inherit;
+  box-shadow: var(--shadow-control);
+  transition:
+    border-color 0.3s,
+    outline-color 0.3s;
 }
 
 .field input:focus {
-  outline: 2px solid hsla(160, 100%, 37%, 0.5);
+  outline: 2px solid var(--color-accent-soft);
   outline-offset: 1px;
+  border-color: var(--color-accent);
 }
 
 .error {
   padding: 0.5rem 0.7rem;
-  border: 1px solid rgba(220, 38, 38, 0.4);
-  border-radius: 6px;
-  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid var(--color-danger-border);
+  border-radius: var(--radius-control);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
   font-size: 13px;
 }
 
+/* 实心主色按钮：登录页唯一的强视觉锚点 */
 .submit {
   padding: 0.6rem 1rem;
-  border: 1px solid hsla(160, 100%, 37%, 1);
-  border-radius: 6px;
-  background: hsla(160, 100%, 37%, 0.12);
-  color: inherit;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
   font-size: 14px;
+  font-weight: 600;
   cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s,
+    transform 0.15s;
+}
+
+@media (hover: hover) {
+  .submit:not(:disabled):hover {
+    border-color: var(--color-accent-strong);
+    background: var(--color-accent-strong);
+  }
+}
+
+.submit:not(:disabled):active {
+  transform: translateY(1px);
 }
 
 .submit:disabled {
-  opacity: 0.5;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
