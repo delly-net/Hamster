@@ -2,20 +2,23 @@
 /**
  * /accounts 页面：当前账套内的账户管理。
  *
- * 账户一律挂在账套下，故页面严格跟随「当前账套」：未选择账套时只提示、不渲染弹窗与表格，
+ * 账户一律挂在账套下，故页面严格跟随「当前账套」：未选择账套时只提示、不渲染页签与表格，
  * 账套切换时重新拉取（否则会残留上一账套的账户）。
  *
  * 页面上「个人账户只显示自己的」「公共账户人人可见」等现象都是后端判定的结果，
  * 本页不做任何本地过滤——绕过前端只会拿到 403 / 404。
  *
  * 账本账户（系统在期初入账时自动创建）同样由后端过滤：接口不返回它、也不接受手工新建它，
- * 故本页既看不到它、也无法造出它，前端无需为此写任何过滤或禁用逻辑。
+ * 故本页既看不到它、也无法造出它，前端无需为此写任何过滤或禁用逻辑。页签只有三个，也源于此。
  *
- * 新建走弹窗（【新增】→ 表单 →【保存】落表），编辑则就地行内改——两种形态是本页有意的分工：
- * 新建要一次性填四个字段、且是低频主操作，弹窗能把注意力收拢；编辑只改一个名称，行内更省事。
+ * 列表按账户类型分页签呈现，**页签是纯呈现层的分组**：接口一次就返回当前账套内我可见的全部类型，
+ * 切换页签只是换一个 computed，不重新请求。这与上面「不做本地过滤」并不矛盾——后者针对的是
+ * 可见性/权限（前端过滤只会造出假防线），而按类型分组是展示分组，一行数据都没被丢掉。
  *
- * 账户类型与期初金额一经创建不可修改，故两者在编辑态都只读呈现（不给可编辑控件，
- * 连禁用的下拉也不给——禁用控件仍会暗示「以后能改」）。
+ * 新建与修改统一走弹窗（【新增】/【编辑】→ 表单 →【保存】落表），不再有行内编辑。
+ * 修改的可编辑字段只有名称：账户类型、归属范围与期初金额一经创建均不可修改，故在弹窗内
+ * 一律只读呈现（不给可编辑控件，连禁用的也不给——禁用控件仍会暗示「以后能改」），
+ * 只读它们是为了让用户在弹窗内看全账户上下文，而不是让用户以为将来能改。
  *
  * 停用即软删除（数据行保留、可重新启用），故按钮文案统一用「停用」而非「删除」。
  */
@@ -54,6 +57,18 @@ const notice = ref('')
 /** 是否呈现已停用的账户（软删除后的账户只在此模式下可见，并可被重新启用）。 */
 const showInactive = ref(false)
 
+/**
+ * 当前页签的账户类型。
+ *
+ * 页签集合直接复用 `ACCOUNT_TYPE_OPTIONS`（资金/负债/往来三项）：它与后端枚举里
+ * 「用户可手工指定的类型」本就是同一个集合，另立一份清单只会多一处需要同步的地方。
+ * 默认停在资金账户——它是记账里最常用的一类，首屏不该是空的。
+ */
+const activeType = ref<AccountType>('Fund')
+
+/** 页签条容器：键盘导航时据此在页签之间移动焦点。 */
+const tablistRef = ref<HTMLElement | null>(null)
+
 /** 新建弹窗是否可见。 */
 const createOpen = ref(false)
 
@@ -72,14 +87,37 @@ const NEW_ID = 0
 /** 正在提交的账户 Id（`NEW_ID` 表示新建）；用于禁用按钮、避免重复提交。 */
 const pendingId = ref<number | null>(null)
 
-/** 正在行内编辑的账户 Id 及其草稿值；类型与期初金额不可修改，故草稿中只有名称。 */
-const editingId = ref<number | null>(null)
-const draftName = ref('')
+/**
+ * 正在修改的账户；`null` 表示修改弹窗已关闭。
+ *
+ * 弹窗内的只读上下文（归属范围/类型/期初金额/余额）直接取自这个对象，是**打开时的快照**：
+ * 唯一能改动账户的操作是保存成功，而成功即关窗，故快照不会有机会变成陈旧显示。
+ */
+const editTarget = ref<Account | null>(null)
+
+/** 修改弹窗中可编辑的名称草稿；类型、归属范围、期初金额、余额均不可修改。 */
+const editName = ref('')
+
+/** 修改弹窗的面板元素：打开时聚焦，使 `Esc` 监听在弹窗内生效。 */
+const editPanelRef = ref<HTMLElement | null>(null)
 
 /** 待二次确认停用的账户 Id。 */
 const confirmingId = ref<number | null>(null)
 
 const accounts = computed(() => accountsStore.accounts)
+
+/**
+ * 当前页签下要呈现的账户。
+ *
+ * 分组依据是账户自带的 `type`，不额外维护一份「按类型分桶」的缓存——账套切换与增删改
+ * 都会整体替换 `accountsStore.accounts`，派生值必须跟着源走才不会脱节。
+ */
+const tabAccounts = computed(() =>
+  accounts.value.filter((account) => account.type === activeType.value),
+)
+
+/** 当前页签的类型标签，用于空态文案。 */
+const activeTypeLabel = computed(() => ACCOUNT_TYPE_LABELS[activeType.value])
 
 /** 是否已选定账套；未选定时页面只提示，不展示账户数据。 */
 const hasAccountSet = computed(() => accountSets.currentId !== null)
@@ -147,7 +185,8 @@ async function load(): Promise<void> {
 async function openCreate(): Promise<void> {
   newName.value = ''
   newScope.value = 'Personal'
-  newType.value = 'Fund'
+  // 类型默认取当前页签——「新增时自动调整账户类型」这个要求就落在这一行
+  newType.value = activeType.value
   newInitialBalance.value = '0'
   errorMessage.value = ''
   notice.value = ''
@@ -187,44 +226,109 @@ async function createAccount(): Promise<void> {
 
   // 先记下归属范围的中文标签：下面的回调会把 newScope 复位前先用于提示文案
   const scopeLabel = ACCOUNT_SCOPE_LABELS[newScope.value]
+  // 类型要在 await 之前取得：它既要生成提示文案，还要决定落表后停在哪个页签
+  const createdType = newType.value
+  const typeLabel = ACCOUNT_TYPE_LABELS[createdType]
 
   const ok = await run(async () => {
     await accountsStore.create({
       name,
       scope: newScope.value,
-      type: newType.value,
+      type: createdType,
       initialBalance,
     })
-    notice.value = `已新建${scopeLabel}账户 ${name}`
+    notice.value = `已新建${scopeLabel}${typeLabel} ${name}`
   }, NEW_ID)
 
   if (ok) {
     createOpen.value = false
+
+    // 用户在弹窗里改选了别的类型：不切页签的话，新建的账户不在当前列表里，
+    // 会让人以为「没建成功」而重复提交；切过去，让它在页签下当场可见。
+    if (createdType !== activeType.value) {
+      activeType.value = createdType
+    }
   }
 }
 
-/** 进入行内编辑状态。 */
-function startEdit(account: Account): void {
-  editingId.value = account.id
-  draftName.value = account.name
+/** 打开修改弹窗：载入名称草稿并复位上一次的提示。 */
+async function openEdit(account: Account): Promise<void> {
+  editTarget.value = account
+  editName.value = account.name
+  errorMessage.value = ''
+  notice.value = ''
+
+  await nextTick()
+  editPanelRef.value?.focus()
 }
 
-/** 保存行内编辑（类型、归属范围与期初金额均不可修改，故草稿中没有这些字段）。 */
-async function saveEdit(account: Account): Promise<void> {
-  const name = draftName.value.trim()
+/** 关闭修改弹窗（与新建弹窗同规则：提交中不关，理由见 `closeCreate`）。 */
+function closeEdit(): void {
+  if (pendingId.value !== null) {
+    return
+  }
+
+  editTarget.value = null
+}
+
+/** 保存修改。名称以外的字段都不可修改，故请求体只有名称。 */
+async function saveEdit(): Promise<void> {
+  const target = editTarget.value
+  if (target === null) {
+    return
+  }
+
+  const name = editName.value.trim()
   if (name.length === 0) {
     errorMessage.value = '账户名称不能为空'
     return
   }
 
   const ok = await run(async () => {
-    await accountsStore.update(account.id, { name })
+    await accountsStore.update(target.id, { name })
     notice.value = `已保存账户 ${name}`
-  }, account.id)
+  }, target.id)
 
   if (ok) {
-    editingId.value = null
+    editTarget.value = null
   }
+}
+
+/**
+ * 页签键盘导航：方向键在页签之间移动并即时切换，`Home` / `End` 跳首尾。
+ *
+ * 这是 ARIA tabs 的标准形态（roving tabindex：只有活动页签在 Tab 序列里），
+ * 故切换后必须把焦点交给新页签——否则焦点留在原地，而用户看到的已是另一个页签的内容。
+ */
+function onTabKeydown(event: KeyboardEvent, index: number): void {
+  const count = ACCOUNT_TYPE_OPTIONS.length
+  let target = index
+
+  if (event.key === 'ArrowRight') {
+    target = (index + 1) % count
+  } else if (event.key === 'ArrowLeft') {
+    target = (index - 1 + count) % count
+  } else if (event.key === 'Home') {
+    target = 0
+  } else if (event.key === 'End') {
+    target = count - 1
+  } else {
+    return
+  }
+
+  // 越界在正常情况下不会发生（target 恒由取模或常量得出），此处的判空只为过类型收窄
+  const nextType = ACCOUNT_TYPE_OPTIONS[target]
+  if (nextType === undefined) {
+    return
+  }
+
+  event.preventDefault()
+  activeType.value = nextType.value
+
+  void nextTick(() => {
+    const tab = tablistRef.value?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[target]
+    tab?.focus()
+  })
 }
 
 /** 停用或启用账户（停用需先点一次再确认）。 */
@@ -234,10 +338,6 @@ async function toggleActive(account: Account): Promise<void> {
   await run(async () => {
     await accountsStore.setActive(account.id, target)
     notice.value = target ? `已启用账户 ${account.name}` : `已停用账户 ${account.name}`
-
-    if (editingId.value === account.id) {
-      editingId.value = null
-    }
   }, account.id)
 }
 
@@ -246,11 +346,12 @@ async function toggleActive(account: Account): Promise<void> {
 watch(
   () => accountSets.currentId,
   async (currentId) => {
-    editingId.value = null
     confirmingId.value = null
-    // 弹窗里填的是上一个账套的账户，换账套后不该继续沿用
+    // 弹窗里填的是上一个账套的账户，换账套后不该继续沿用（两个弹窗都要关）
     createOpen.value = false
+    editTarget.value = null
     notice.value = ''
+    // 页签是视图偏好而非账套数据，换账套后保持不动：新账套里同样有该类型的账户
 
     if (currentId === null) {
       accountsStore.clear()
@@ -313,85 +414,83 @@ onMounted(() => {
 
     <template v-else>
       <!-- 弹窗打开时错误改在弹窗内呈现：页面级提示会被遮罩盖住，用户看不到 -->
-      <p v-if="errorMessage && !createOpen" class="error">{{ errorMessage }}</p>
+      <p v-if="errorMessage && !createOpen && editTarget === null" class="error">
+        {{ errorMessage }}
+      </p>
       <p v-if="notice" class="notice">{{ notice }}</p>
 
       <div class="toolbar">
+        <!-- 页签即账户类型：集合与顺序直接取自 ACCOUNT_TYPE_OPTIONS，不另立清单 -->
+        <div ref="tablistRef" class="tabs" role="tablist" aria-label="账户类型">
+          <button
+            v-for="(option, index) in ACCOUNT_TYPE_OPTIONS"
+            :id="`account-tab-${option.value}`"
+            :key="option.value"
+            type="button"
+            class="tab"
+            :class="{ 'tab-active': option.value === activeType }"
+            role="tab"
+            :aria-selected="option.value === activeType"
+            aria-controls="account-tab-panel"
+            :tabindex="option.value === activeType ? 0 : -1"
+            @click="activeType = option.value"
+            @keydown="onTabKeydown($event, index)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+
         <label class="toggle">
           <input v-model="showInactive" type="checkbox" :disabled="accountsStore.loading" />
           <span>显示已停用账户</span>
         </label>
       </div>
 
-      <table class="table">
-        <thead>
-          <tr>
-            <th>序号</th>
-            <th>账户名称</th>
-            <th>归属</th>
-            <th>类型</th>
-            <th class="amount">期初金额</th>
-            <th class="amount">余额</th>
-            <th>状态</th>
-            <th>创建时间</th>
-            <th class="actions-head">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(account, index) in accounts" :key="account.id">
-            <td class="row-index">{{ index + 1 }}</td>
-            <td class="name">
-              <input
-                v-if="editingId === account.id"
-                v-model="draftName"
-                type="text"
-                maxlength="64"
-                :disabled="pendingId !== null"
-              />
-              <template v-else>{{ account.name }}</template>
-            </td>
-            <td>
-              <span class="badge" :class="account.scope === 'Public' ? 'badge-public' : ''">
-                {{ ACCOUNT_SCOPE_LABELS[account.scope] }}
-              </span>
-              <span v-if="account.ownerUsername" class="owner">{{ account.ownerUsername }}</span>
-            </td>
-            <!-- 类型一经创建不可修改，故编辑态也不给控件：只读文本与期初金额列保持一致 -->
-            <td class="type">{{ ACCOUNT_TYPE_LABELS[account.type] }}</td>
-            <!-- 期初金额一经创建不可修改（已落成一笔期初交易），故编辑态下也只读呈现 -->
-            <td class="amount">{{ formatAmount(account.initialBalance) }}</td>
-            <td class="amount balance">{{ formatAmount(account.balance) }}</td>
-            <td>
-              <span class="badge" :class="account.isActive ? 'badge-active' : 'badge-inactive'">
-                {{ account.isActive ? '已启用' : '已停用' }}
-              </span>
-            </td>
-            <td class="created">{{ formatDateTime(account.createdAt) }}</td>
-            <td class="actions">
-              <template v-if="editingId === account.id">
+      <!-- 单个动态面板：切换页签换的只是它的内容，故 aria-labelledby 指向当前页签 -->
+      <div
+        id="account-tab-panel"
+        role="tabpanel"
+        :aria-labelledby="`account-tab-${activeType}`"
+      >
+        <table class="table">
+          <thead>
+            <tr>
+              <th>序号</th>
+              <th>账户名称</th>
+              <th>归属</th>
+              <th class="amount">期初金额</th>
+              <th class="amount">余额</th>
+              <th>状态</th>
+              <th>创建时间</th>
+              <th class="actions-head">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <!-- 序号按当前页签的列表重排：页签一变，行号就从 1 重新开始 -->
+            <tr v-for="(account, index) in tabAccounts" :key="account.id">
+              <td class="row-index">{{ index + 1 }}</td>
+              <td class="name">{{ account.name }}</td>
+              <td>
+                <span class="badge" :class="account.scope === 'Public' ? 'badge-public' : ''">
+                  {{ ACCOUNT_SCOPE_LABELS[account.scope] }}
+                </span>
+                <span v-if="account.ownerUsername" class="owner">{{ account.ownerUsername }}</span>
+              </td>
+              <!-- 期初金额一经创建不可修改（已落成一笔期初交易），故只读呈现 -->
+              <td class="amount">{{ formatAmount(account.initialBalance) }}</td>
+              <td class="amount balance">{{ formatAmount(account.balance) }}</td>
+              <td>
+                <span class="badge" :class="account.isActive ? 'badge-active' : 'badge-inactive'">
+                  {{ account.isActive ? '已启用' : '已停用' }}
+                </span>
+              </td>
+              <td class="created">{{ formatDateTime(account.createdAt) }}</td>
+              <td class="actions">
                 <button
                   type="button"
                   class="ghost"
                   :disabled="pendingId !== null"
-                  @click="saveEdit(account)"
-                >
-                  保存
-                </button>
-                <button
-                  type="button"
-                  class="ghost"
-                  :disabled="pendingId !== null"
-                  @click="editingId = null"
-                >
-                  取消
-                </button>
-              </template>
-              <template v-else>
-                <button
-                  type="button"
-                  class="ghost"
-                  :disabled="pendingId !== null"
-                  @click="startEdit(account)"
+                  @click="openEdit(account)"
                 >
                   编辑
                 </button>
@@ -435,16 +534,16 @@ onMounted(() => {
                 >
                   启用
                 </button>
-              </template>
-            </td>
-          </tr>
-          <tr v-if="!accountsStore.loading && accounts.length === 0">
-            <td class="empty" colspan="9">
-              {{ showInactive ? '暂无账户' : '暂无启用的账户' }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+              </td>
+            </tr>
+            <tr v-if="!accountsStore.loading && tabAccounts.length === 0">
+              <td class="empty" colspan="8">
+                {{ showInactive ? `暂无${activeTypeLabel}` : `暂无启用的${activeTypeLabel}` }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </template>
 
     <!-- 新建弹窗：形态与账套选择弹窗一致（遮罩 + 面板 + 打开即聚焦，Esc / 点遮罩关闭） -->
@@ -525,6 +624,76 @@ onMounted(() => {
             :disabled="pendingId !== null"
             @click="closeCreate"
           >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 修改弹窗：与新建弹窗同构（遮罩 + 面板 + 打开即聚焦，Esc / 点遮罩关闭） -->
+    <div v-if="editTarget" class="mask" @click="closeEdit">
+      <div
+        ref="editPanelRef"
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="account-edit-title"
+        tabindex="-1"
+        @click.stop
+        @keydown.esc="closeEdit"
+      >
+        <h2 id="account-edit-title" class="dialog-title">修改账户</h2>
+        <p class="dialog-subtitle">
+          只有名称可以修改：账户类型、归属范围与期初金额一经创建即不可变更。
+        </p>
+
+        <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+
+        <div class="dialog-form">
+          <label class="field">
+            <span class="label">名称</span>
+            <input
+              v-model="editName"
+              type="text"
+              maxlength="64"
+              placeholder="必填，同一归属范围内不重名"
+              :disabled="pendingId !== null"
+            />
+          </label>
+        </div>
+
+        <!-- 不可修改的字段一律只读文本呈现：不给控件，连禁用的也不给 -->
+        <dl class="dialog-readonly">
+          <div class="readonly-row">
+            <dt>归属范围</dt>
+            <dd>
+              <span class="badge" :class="editTarget.scope === 'Public' ? 'badge-public' : ''">
+                {{ ACCOUNT_SCOPE_LABELS[editTarget.scope] }}
+              </span>
+              <span v-if="editTarget.ownerUsername" class="owner">
+                {{ editTarget.ownerUsername }}
+              </span>
+            </dd>
+          </div>
+          <div class="readonly-row">
+            <dt>账户类型</dt>
+            <dd>{{ ACCOUNT_TYPE_LABELS[editTarget.type] }}</dd>
+          </div>
+          <div class="readonly-row">
+            <dt>期初金额</dt>
+            <dd>{{ formatAmount(editTarget.initialBalance) }}</dd>
+          </div>
+          <div class="readonly-row">
+            <dt>余额</dt>
+            <dd class="balance">{{ formatAmount(editTarget.balance) }}</dd>
+          </div>
+        </dl>
+
+        <div class="dialog-actions">
+          <button type="button" class="submit" :disabled="pendingId !== null" @click="saveEdit">
+            {{ pendingId === editTarget.id ? '保存中…' : '保存' }}
+          </button>
+          <button type="button" class="ghost" :disabled="pendingId !== null" @click="closeEdit">
             取消
           </button>
         </div>
@@ -613,9 +782,7 @@ onMounted(() => {
 }
 
 .field input,
-.field select,
-.table input,
-.table select {
+.field select {
   padding: 0.5rem 0.7rem;
   border: 1px solid var(--color-border-hover);
   border-radius: var(--radius-control);
@@ -627,22 +794,56 @@ onMounted(() => {
 }
 
 .field input:focus,
-.field select:focus,
-.table input:focus,
-.table select:focus {
+.field select:focus {
   outline: 2px solid var(--color-accent-soft);
   outline-offset: 1px;
   border-color: var(--color-accent);
 }
 
+/* 页签与「显示已停用」同处一行：页签靠左随内容伸缩，开关靠右固定 */
 .toolbar {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 1rem;
+}
+
+/* 页签条：只在这里横向滚动，不撑破内容区 */
+.tabs {
+  display: flex;
+  min-width: 0;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding-bottom: 0.15rem;
+}
+
+.tab {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--color-border-hover);
+  border-radius: var(--radius-control);
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s,
+    color 0.3s;
+}
+
+/* 活动页签复用主色：与 .badge-public / .notice 同一套语义色，不引入新色值 */
+.tab-active {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  font-weight: 600;
 }
 
 .toggle {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 0.35rem;
   font-size: 13px;
@@ -688,10 +889,6 @@ onMounted(() => {
 
 .name {
   font-weight: 600;
-}
-
-.type {
-  white-space: nowrap;
 }
 
 /* 金额右对齐并等宽呈现，便于纵向比对 */
@@ -804,6 +1001,35 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+}
+
+/* 修改弹窗里的只读上下文：一列标签一列值，与表格的字段顺序无关，只求一眼看全 */
+.dialog-readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-background-mute);
+  font-size: 13px;
+}
+
+.readonly-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.readonly-row dt {
+  font-size: 12.5px;
+  opacity: 0.75;
+}
+
+.readonly-row dd {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .dialog-actions {
