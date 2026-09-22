@@ -195,11 +195,6 @@ public sealed class AccountEndpoints : IEndpoint
                 var errors = new Dictionary<string, string[]>();
                 ValidateName(request.Name, errors);
 
-                if (!TryResolveType(request.Type, out var type))
-                {
-                    errors["type"] = TYPE_ERROR;
-                }
-
                 if (errors.Count > 0)
                 {
                     return Results.ValidationProblem(errors);
@@ -221,18 +216,19 @@ public sealed class AccountEndpoints : IEndpoint
                     return Results.Conflict(new { message = "该范围内已存在同名账户" });
                 }
 
-                return await accounts.UpdateAsync(account, name, type, cancellationToken)
+                return await accounts.UpdateAsync(account, name, cancellationToken)
                     ? Results.NoContent()
                     : NotFound();
             })
             .WithName("UpdateAccount")
-            .WithSummary("修改账户名称与类型")
+            .WithSummary("修改账户名称")
             .WithDescription(
-                "修改账户名称与类型。归属范围、归属人与所属账套一经创建不可修改" +
+                "修改账户名称，**本端点只改名称**。归属范围、归属人与所属账套一经创建不可修改" +
                 "（个人 → 公共等于把私有数据公开给全账套，故不提供该能力）。" +
-                $"账户类型只能是 {ASSIGNABLE_TYPE_HINT}——改成账本账户同样被拒，" +
-                "否则「不允许手工建立账本账户」可经「先建资金账户再改类型」绕过。" +
-                "**期初金额同样不可修改**：它已落成一笔期初交易，调整余额应记一笔余额调整交易，" +
+                "**账户类型同样不可修改**：类型是账户的分类身份，既有流水都按它归类，换类型等于给历史流水换一套解释；" +
+                "类型不可改还顺带消灭了「先建资金账户再改成账本账户」这条绕过路径——" +
+                "请求体因此只有 name，传 type 也不会被读取。" +
+                "**期初金额亦不可修改**：它已落成一笔期初交易，调整余额应记一笔余额调整交易，" +
                 "而非改写既成的期初。");
 
         group.MapPost("/{id:int}/deactivate", async (
@@ -402,7 +398,8 @@ public sealed class AccountEndpoints : IEndpoint
     /// <remarks>
     /// 校验两件事：文本必须是枚举名（见 <see cref="TryParseByName{TEnum}"/>），
     /// 且该类型必须可由用户指定（见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。
-    /// 新建与修改两条路径共用本方法——只挡新建是不够的，把既有账户的类型改成账本账户同样能绕过限制。
+    /// **现仅服务新建路径**：修改端点已不接收类型（类型一经创建不可修改），
+    /// 故不必再考虑「靠改类型把既有账户变成账本账户」那条路径——它已随类型不可改而消失。
     /// </remarks>
     private static bool TryResolveType(string? raw, out AccountType type) =>
         TryParseByName(raw, out type) && type.IsUserAssignable();
@@ -453,14 +450,13 @@ public sealed record AccountRequest(string? Name, string? Scope, string? Type, d
 
 /// <summary>修改账户请求体。</summary>
 /// <param name="Name">账户名称。</param>
-/// <param name="Type">
-/// 账户类型：<c>Fund</c> / <c>Liability</c> / <c>Contact</c>，与新建请求同一口径。
-/// </param>
 /// <remarks>
 /// 刻意不含归属范围与归属人：两者一经创建不可修改。
 /// 也刻意不含期初金额：它已落成一笔期初交易，改写它等于篡改既成事实（见更新端点的说明）。
+/// 更刻意不含账户类型：类型是账户的分类身份，既有流水都按它归类，故一经创建同样不可修改；
+/// 字段不在这里，**请求里带上它也不会被读取**。
 /// </remarks>
-public sealed record AccountUpdateRequest(string? Name, string? Type);
+public sealed record AccountUpdateRequest(string? Name);
 
 /// <summary>账户信息（对外暴露）。</summary>
 /// <param name="Id">账户主键。</param>

@@ -2,18 +2,24 @@
 /**
  * /accounts 页面：当前账套内的账户管理。
  *
- * 账户一律挂在账套下，故页面严格跟随「当前账套」：未选择账套时只提示、不渲染表单与表格，
+ * 账户一律挂在账套下，故页面严格跟随「当前账套」：未选择账套时只提示、不渲染弹窗与表格，
  * 账套切换时重新拉取（否则会残留上一账套的账户）。
  *
  * 页面上「个人账户只显示自己的」「公共账户人人可见」等现象都是后端判定的结果，
  * 本页不做任何本地过滤——绕过前端只会拿到 403 / 404。
  *
- * 账本账户（系统在期初入账时自动创建）同样由后端过滤：接口不返回它、也不接受把类型改成它，
+ * 账本账户（系统在期初入账时自动创建）同样由后端过滤：接口不返回它、也不接受手工新建它，
  * 故本页既看不到它、也无法造出它，前端无需为此写任何过滤或禁用逻辑。
+ *
+ * 新建走弹窗（【新增】→ 表单 →【保存】落表），编辑则就地行内改——两种形态是本页有意的分工：
+ * 新建要一次性填四个字段、且是低频主操作，弹窗能把注意力收拢；编辑只改一个名称，行内更省事。
+ *
+ * 账户类型与期初金额一经创建不可修改，故两者在编辑态都只读呈现（不给可编辑控件，
+ * 连禁用的下拉也不给——禁用控件仍会暗示「以后能改」）。
  *
  * 停用即软删除（数据行保留、可重新启用），故按钮文案统一用「停用」而非「删除」。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import {
@@ -48,6 +54,12 @@ const notice = ref('')
 /** 是否呈现已停用的账户（软删除后的账户只在此模式下可见，并可被重新启用）。 */
 const showInactive = ref(false)
 
+/** 新建弹窗是否可见。 */
+const createOpen = ref(false)
+
+/** 新建弹窗的面板元素：打开时聚焦，使 `Esc` 监听在弹窗内生效。 */
+const createPanelRef = ref<HTMLElement | null>(null)
+
 /** 新建表单。 */
 const newName = ref('')
 const newScope = ref<AccountScope>('Personal')
@@ -60,10 +72,9 @@ const NEW_ID = 0
 /** 正在提交的账户 Id（`NEW_ID` 表示新建）；用于禁用按钮、避免重复提交。 */
 const pendingId = ref<number | null>(null)
 
-/** 正在行内编辑的账户 Id 及其草稿值；期初金额不可修改，故草稿中没有该字段。 */
+/** 正在行内编辑的账户 Id 及其草稿值；类型与期初金额不可修改，故草稿中只有名称。 */
 const editingId = ref<number | null>(null)
 const draftName = ref('')
-const draftType = ref<AccountType>('Fund')
 
 /** 待二次确认停用的账户 Id。 */
 const confirmingId = ref<number | null>(null)
@@ -132,7 +143,35 @@ async function load(): Promise<void> {
   }
 }
 
-/** 新建账户。 */
+/** 打开新建弹窗：每次都把表单复位，避免上一次填了一半的内容留在弹窗里。 */
+async function openCreate(): Promise<void> {
+  newName.value = ''
+  newScope.value = 'Personal'
+  newType.value = 'Fund'
+  newInitialBalance.value = '0'
+  errorMessage.value = ''
+  notice.value = ''
+  createOpen.value = true
+
+  await nextTick()
+  createPanelRef.value?.focus()
+}
+
+/**
+ * 关闭新建弹窗。
+ *
+ * 提交中不允许关闭：请求已经发出，此刻关掉弹窗会让用户以为「没建成功」，
+ * 而去重试一个其实已经落表了的账户。
+ */
+function closeCreate(): void {
+  if (pendingId.value !== null) {
+    return
+  }
+
+  createOpen.value = false
+}
+
+/** 新建账户；成功后关闭弹窗。 */
 async function createAccount(): Promise<void> {
   const name = newName.value.trim()
   if (name.length === 0) {
@@ -146,27 +185,31 @@ async function createAccount(): Promise<void> {
     return
   }
 
-  await run(async () => {
+  // 先记下归属范围的中文标签：下面的回调会把 newScope 复位前先用于提示文案
+  const scopeLabel = ACCOUNT_SCOPE_LABELS[newScope.value]
+
+  const ok = await run(async () => {
     await accountsStore.create({
       name,
       scope: newScope.value,
       type: newType.value,
       initialBalance,
     })
-    newName.value = ''
-    newInitialBalance.value = '0'
-    notice.value = `已新建${ACCOUNT_SCOPE_LABELS[newScope.value]}账户 ${name}`
+    notice.value = `已新建${scopeLabel}账户 ${name}`
   }, NEW_ID)
+
+  if (ok) {
+    createOpen.value = false
+  }
 }
 
 /** 进入行内编辑状态。 */
 function startEdit(account: Account): void {
   editingId.value = account.id
   draftName.value = account.name
-  draftType.value = account.type
 }
 
-/** 保存行内编辑（归属范围与期初金额均不可修改，故草稿中没有这两个字段）。 */
+/** 保存行内编辑（类型、归属范围与期初金额均不可修改，故草稿中没有这些字段）。 */
 async function saveEdit(account: Account): Promise<void> {
   const name = draftName.value.trim()
   if (name.length === 0) {
@@ -175,10 +218,7 @@ async function saveEdit(account: Account): Promise<void> {
   }
 
   const ok = await run(async () => {
-    await accountsStore.update(account.id, {
-      name,
-      type: draftType.value,
-    })
+    await accountsStore.update(account.id, { name })
     notice.value = `已保存账户 ${name}`
   }, account.id)
 
@@ -208,6 +248,8 @@ watch(
   async (currentId) => {
     editingId.value = null
     confirmingId.value = null
+    // 弹窗里填的是上一个账套的账户，换账套后不该继续沿用
+    createOpen.value = false
     notice.value = ''
 
     if (currentId === null) {
@@ -243,77 +285,36 @@ onMounted(() => {
           余额为派生值（该账户全部交易明细的有符号汇总，期初已计入其中），不可直接编辑。
         </p>
       </div>
-      <button
-        type="button"
-        class="ghost"
-        :disabled="accountsStore.loading || !hasAccountSet"
-        @click="load"
-      >
-        {{ accountsStore.loading ? '刷新中…' : '刷新' }}
-      </button>
+      <div class="head-actions">
+        <!-- 新增是本页的主操作：实心主色，与次要的「刷新」并列 -->
+        <button
+          type="button"
+          class="submit"
+          :disabled="pendingId !== null || !hasAccountSet"
+          @click="openCreate"
+        >
+          新增
+        </button>
+        <button
+          type="button"
+          class="ghost"
+          :disabled="accountsStore.loading || !hasAccountSet"
+          @click="load"
+        >
+          {{ accountsStore.loading ? '刷新中…' : '刷新' }}
+        </button>
+      </div>
     </header>
 
-    <!-- 未选定账套：账户必须落在某个账套内，此时不渲染表单与表格 -->
+    <!-- 未选定账套：账户必须落在某个账套内，此时不渲染弹窗与表格 -->
     <p v-if="!hasAccountSet" class="hint">
       当前未选择账套，请先点击右上角的【切换】选择账套后再管理账户。
     </p>
 
     <template v-else>
-      <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+      <!-- 弹窗打开时错误改在弹窗内呈现：页面级提示会被遮罩盖住，用户看不到 -->
+      <p v-if="errorMessage && !createOpen" class="error">{{ errorMessage }}</p>
       <p v-if="notice" class="notice">{{ notice }}</p>
-
-      <section class="create-panel">
-        <h2 class="panel-title">新建账户</h2>
-        <div class="create-row">
-          <label class="field">
-            <span class="label">名称</span>
-            <input
-              v-model="newName"
-              type="text"
-              maxlength="64"
-              placeholder="必填，同一归属范围内不重名"
-              :disabled="pendingId !== null"
-            />
-          </label>
-          <label class="field">
-            <span class="label">归属范围</span>
-            <select v-model="newScope" :disabled="pendingId !== null">
-              <option v-for="option in ACCOUNT_SCOPE_OPTIONS" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="label">账户类型</span>
-            <select v-model="newType" :disabled="pendingId !== null">
-              <option v-for="option in ACCOUNT_TYPE_OPTIONS" :key="option.value" :value="option.value">
-                {{ option.label }}
-              </option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="label">期初金额</span>
-            <input
-              v-model="newInitialBalance"
-              type="number"
-              step="0.01"
-              :disabled="pendingId !== null"
-            />
-          </label>
-          <button
-            type="button"
-            class="submit"
-            :disabled="pendingId !== null"
-            @click="createAccount"
-          >
-            {{ pendingId === NEW_ID ? '创建中…' : '创建' }}
-          </button>
-        </div>
-        <p class="panel-hint">
-          个人账户的归属人固定为当前登录者，创建后不可转让；归属范围与所属账套一经创建不可修改。
-          账本账户由系统在期初入账时自动创建，不接受手工建立，也不在本列表呈现。
-        </p>
-      </section>
 
       <div class="toolbar">
         <label class="toggle">
@@ -355,22 +356,8 @@ onMounted(() => {
               </span>
               <span v-if="account.ownerUsername" class="owner">{{ account.ownerUsername }}</span>
             </td>
-            <td class="type">
-              <select
-                v-if="editingId === account.id"
-                v-model="draftType"
-                :disabled="pendingId !== null"
-              >
-                <option
-                  v-for="option in ACCOUNT_TYPE_OPTIONS"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ option.label }}
-                </option>
-              </select>
-              <template v-else>{{ ACCOUNT_TYPE_LABELS[account.type] }}</template>
-            </td>
+            <!-- 类型一经创建不可修改，故编辑态也不给控件：只读文本与期初金额列保持一致 -->
+            <td class="type">{{ ACCOUNT_TYPE_LABELS[account.type] }}</td>
             <!-- 期初金额一经创建不可修改（已落成一笔期初交易），故编辑态下也只读呈现 -->
             <td class="amount">{{ formatAmount(account.initialBalance) }}</td>
             <td class="amount balance">{{ formatAmount(account.balance) }}</td>
@@ -459,6 +446,90 @@ onMounted(() => {
         </tbody>
       </table>
     </template>
+
+    <!-- 新建弹窗：形态与账套选择弹窗一致（遮罩 + 面板 + 打开即聚焦，Esc / 点遮罩关闭） -->
+    <div v-if="createOpen" class="mask" @click="closeCreate">
+      <div
+        ref="createPanelRef"
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="account-create-title"
+        tabindex="-1"
+        @click.stop
+        @keydown.esc="closeCreate"
+      >
+        <h2 id="account-create-title" class="dialog-title">新增账户</h2>
+        <p class="dialog-subtitle">
+          账户归属当前账套：个人账户的归属人固定为当前登录者，创建后不可转让；
+          归属范围与所属账套一经创建不可修改。
+        </p>
+
+        <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
+
+        <div class="dialog-form">
+          <label class="field">
+            <span class="label">名称</span>
+            <input
+              v-model="newName"
+              type="text"
+              maxlength="64"
+              placeholder="必填，同一归属范围内不重名"
+              :disabled="pendingId !== null"
+            />
+          </label>
+          <label class="field">
+            <span class="label">归属范围</span>
+            <select v-model="newScope" :disabled="pendingId !== null">
+              <option v-for="option in ACCOUNT_SCOPE_OPTIONS" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="label">账户类型</span>
+            <select v-model="newType" :disabled="pendingId !== null">
+              <option v-for="option in ACCOUNT_TYPE_OPTIONS" :key="option.value" :value="option.value">
+                {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="label">期初金额</span>
+            <input
+              v-model="newInitialBalance"
+              type="number"
+              step="0.01"
+              :disabled="pendingId !== null"
+            />
+          </label>
+        </div>
+
+        <p class="dialog-hint">
+          类型与期初金额一经保存不可修改；期初金额非 0 时后端会同时落成一笔期初交易。
+          账本账户由系统在期初入账时自动创建，不接受手工建立，也不在本列表呈现。
+        </p>
+
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="submit"
+            :disabled="pendingId !== null"
+            @click="createAccount"
+          >
+            {{ pendingId === NEW_ID ? '保存中…' : '保存' }}
+          </button>
+          <button
+            type="button"
+            class="ghost"
+            :disabled="pendingId !== null"
+            @click="closeCreate"
+          >
+            取消
+          </button>
+        </div>
+      </div>
+    </div>
   </main>
 </template>
 
@@ -521,32 +592,11 @@ onMounted(() => {
   color: var(--color-accent-strong);
 }
 
-.create-panel {
+/* 页头操作区：主操作「新增」在前，次要的「刷新」在后 */
+.head-actions {
   display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  padding: 1rem 1.25rem;
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-card);
-  background: var(--color-accent-soft);
-}
-
-.panel-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--color-accent-strong);
-}
-
-.panel-hint {
-  font-size: 12.5px;
-  line-height: 1.7;
-  opacity: 0.8;
-}
-
-.create-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
+  flex: none;
+  align-items: center;
   gap: 0.5rem;
 }
 
@@ -709,6 +759,60 @@ onMounted(() => {
   opacity: 0.6;
 }
 
+/* 遮罩层级高于窄屏抽屉与遮罩（z-index 19/20）：弹窗必须盖住侧栏 */
+.mask {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background-color: rgba(0, 0, 0, 0.32);
+}
+
+.dialog {
+  width: 100%;
+  max-width: 30rem;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.5rem 1.5rem 1.25rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
+  /* 字段多、窄屏下弹窗可能高于视口：自身滚动，不撑破遮罩 */
+  overflow-y: auto;
+}
+
+.dialog-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-heading);
+}
+
+.dialog-subtitle,
+.dialog-hint {
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.75;
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 .ghost,
 .danger,
 .submit {
@@ -733,9 +837,8 @@ onMounted(() => {
   color: var(--color-danger);
 }
 
-/* 实心主色按钮：面板中的强视觉锚点（与登录页提交按钮同源） */
+/* 实心主色按钮：页头「新增」与弹窗「保存」共用的强视觉锚点（与登录页提交按钮同源） */
 .submit {
-  align-self: flex-start;
   align-items: center;
   display: inline-flex;
   padding: 0.5rem 1rem;

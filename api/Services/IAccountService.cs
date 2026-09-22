@@ -109,30 +109,35 @@ public interface IAccountService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 修改账户的名称与类型。
+    /// 修改账户名称。
     /// </summary>
     /// <param name="account">
     /// 目标账户，**必须是 <see cref="FindVisibleAsync"/> 取得的实体**：
     /// 归属范围、归属人与所属账套一经创建不可修改，故不在此方法的参数中。
     /// </param>
     /// <param name="name">新名称（调用方需保证已 Trim 且未被占用）。</param>
-    /// <param name="type">新类型。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>受影响行数大于 0 返回 <c>true</c>；账户已被删除返回 <c>false</c>。</returns>
     /// <remarks>
-    /// **期初金额不在此方法的参数中，因为它已不可修改**：期初余额一经创建即是一笔落库的期初交易
-    /// （借贷两条明细），改它就必须同步改写那笔交易，而期初是既成事实而非可随意改写的设置项。
-    /// 需要调整余额时应记一笔「余额调整交易」，而不是回头改期初——后者会让已经发生的账变得不可信。
-    /// <para>
-    /// **前置条件**：<paramref name="type"/> 必须可由用户指定
-    /// （见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。只挡新建是不够的——
-    /// 把既有账户改成账本账户同样是「手工建立账本账户」，端点两条路径共用同一校验。
-    /// </para>
+    /// **除名称外的列一律不可修改，故都不在参数中**：
+    /// <list type="bullet">
+    ///   <item>
+    ///   期初金额：一经创建即是一笔落库的期初交易（借贷两条明细），改它就必须同步改写那笔交易，
+    ///   而期初是既成事实而非可随意改写的设置项。需要调整余额时应记一笔「余额调整交易」，
+    ///   而不是回头改期初——后者会让已经发生的账变得不可信。
+    ///   </item>
+    ///   <item>
+    ///   账户类型：类型是账户的**分类身份**，既有的流水都按它归类，改类型等于把历史流水换一个科目解释。
+    ///   且旧实现允许改类型时，必须额外引入 <see cref="AccountTypeExtensions.IsUserAssignable"/> 校验来
+    ///   堵住「先建资金账户再改成账本账户」的绕过路径——类型不可改之后，这条绕过路径连同该校验一起消失，
+    ///   本方法也就**不再需要**任何类型前置条件。
+    ///   </item>
+    /// </list>
+    /// 参数只留名称，让「不可改」成为**编译期事实**：未来新增调用点不可能误传一个类型进来。
     /// </remarks>
     Task<bool> UpdateAsync(
         Account account,
         string name,
-        AccountType type,
         CancellationToken cancellationToken = default);
 
     /// <summary>

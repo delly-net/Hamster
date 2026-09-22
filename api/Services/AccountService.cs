@@ -127,15 +127,14 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
     public async Task<bool> UpdateAsync(
         Account account,
         string name,
-        AccountType type,
         CancellationToken cancellationToken = default)
     {
-        // 只更新可变的两列：account_set_id / scope / owner_user_id / initial_balance 一经创建不可修改
+        // 只更新唯一可变的那一列：
+        // account_set_id / scope / owner_user_id / initial_balance / type 一经创建均不可修改
         var affected = await db.Updateable<Account>()
             .SetColumns(target => new Account
             {
                 Name = name.Trim(),
-                Type = type,
             })
             .Where(target => target.Id == account.Id)
             .ExecuteCommandAsync(cancellationToken);

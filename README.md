@@ -220,13 +220,15 @@ Four account types exist and users cannot extend them:
 | Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) | Yes |
 
 The **ledger account is a purely internal system account**: it exists only as the double-entry
-counterparty of opening balances. It **cannot be created or assigned by hand** (`POST` / `PUT`
-with `type: "Ledger"` always answers 400) and it **appears in no account list** — an
+counterparty of opening balances. It **cannot be created by hand** (`POST` with `type: "Ledger"`
+always answers 400) and it **appears in no account list** — an
 administrator's list excludes it too. There is no exception and no toggle, so there is exactly
 one visibility rule. It still counts toward balances and takes part in double-entry balancing;
 only its presentation is hidden. Which types a user may assign is decided in exactly one place —
 `AccountTypeExtensions.IsUserAssignable` — and the endpoint's validation and error text derive
-from it.
+from it. That check now **serves the create path only**: an account's type is immutable once
+created (see the `PUT` row below), which removes the "create a `Fund` account and retype it to
+`Ledger`" detour along with the ability to retype at all.
 
 The **opening balance** is what the account already held when it was created (at most two decimal
 places). It is written as an opening transaction at creation time (see the next section) and is
@@ -242,15 +244,16 @@ account is hidden from the default list; `includeInactive=true` shows it and let
 `isSystem` marks accounts the system created for itself (today, the opening ledger account). It
 **cannot be created by a user and never appears in an account list** (the list filters on the
 `Ledger` type — see the table above; "not creatable by hand" and "not listed" close the loop on
-each other). The marker itself only serves "reuse the same row when creating on demand", so the
-account **never loses its system identity by being renamed or retyped** — the identity lives on a
-marker column rather than being reverse-engineered from a name or type.
+each other). The marker itself only serves "reuse the same row when creating on demand", and the
+identity lives on that marker column rather than being reverse-engineered from a name or a type —
+neither of which is mutable anyway (see the `PUT` row below), so there is nothing left that could
+make the system lose track of its own account.
 
 | Endpoint | Auth | Description |
 |---|---|---|
 | `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator); `balance` is the derived figure. **Never includes the ledger account** |
 | `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }` where `type` is `Fund` / `Liability` / `Contact`. A personal account's owner is forced to the caller. A non-zero opening balance also posts an opening transaction |
-| `PUT /api/accounts/{id}` | Bearer | Rename / retype (204), `type` again excluding `Ledger`; scope, owner, account set and the **opening balance** are all immutable |
+| `PUT /api/accounts/{id}` | Bearer | Rename only (204) — the body is just `{ name }`; scope, owner, account set, **`type`** and the **opening balance** are all immutable. Sending `type` has no effect (it is not on the request record) |
 | `POST /api/accounts/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
 | `POST /api/accounts/{id}/activate` | Bearer | Reactivate (204) |
 
@@ -301,7 +304,8 @@ Opening balance of 500 on "Cash":
 The **opening ledger account** (named "期初账本", type `Ledger`, public, `isSystem = true`) is the
 counterparty. The system **creates it on demand**: once per account set, reused thereafter, and
 **an account set always has exactly one**. It **never appears in an account list**, and it cannot
-be created or retyped by hand (see the type table under "Accounts"). An account with an opening
+be created by hand (see the type table under "Accounts" — `Ledger` is rejected on create, and the
+type of an existing account can no longer be changed at all). An account with an opening
 balance of 0 **posts nothing** (its entry sum is 0, matching the opening balance). A negative opening balance (a
 liability) flips the direction automatically — the target account takes the credit (balance
 decreases) and the ledger account takes the debit.

@@ -89,10 +89,15 @@ export interface CreateAccountPayload {
   initialBalance: number
 }
 
-/** 修改账户的入参；归属范围、归属人与期初金额均不可修改，故不在其中。 */
+/**
+ * 修改账户的入参。
+ *
+ * **只有名称**：归属范围、归属人、期初金额与账户类型一经创建均不可修改，故都不在其中。
+ * 类型不可改的理由是——类型是账户的分类身份，既有流水都按它归类，换类型等于给历史流水换一套解释。
+ * 后端 `PUT` 的请求体同样只有名称，传了类型不会被读取。
+ */
 export interface UpdateAccountPayload {
   name: string
-  type: AccountType
 }
 
 /** 接口基址。 */
@@ -127,7 +132,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     await request<Account>(ACCOUNTS_PATH, { method: 'POST', body: payload })
   }
 
-  /** 修改账户名称与类型；期初金额已落成一笔期初交易，不可修改。 */
+  /** 修改账户名称；类型与期初金额均不可修改（见 `UpdateAccountPayload` 的说明）。 */
   async function update(id: number, payload: UpdateAccountPayload): Promise<void> {
     await request<void>(`${ACCOUNTS_PATH}/${id}`, { method: 'PUT', body: payload })
   }
