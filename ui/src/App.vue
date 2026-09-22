@@ -117,6 +117,9 @@ async function handleLogout(): Promise<void> {
 
       <div class="account">
         <template v-if="auth.isAuthenticated">
+          <!-- 身份在前、账套在后：用户名是「谁在用」，账套是「在哪个账套里操作」 -->
+          <span class="account-name">{{ auth.user?.username ?? '已登录' }}</span>
+
           <!-- 当前账套置于【退出登录】之前：名称只读展示，切换走弹窗 -->
           <span v-if="accountSets.current" class="account-set">
             <span class="account-set-name" :title="accountSets.current.remark ?? ''">
@@ -131,7 +134,6 @@ async function handleLogout(): Promise<void> {
             {{ accountSets.emptyNotice }}
           </span>
 
-          <span class="account-name">{{ auth.user?.username ?? '已登录' }}</span>
           <button type="button" class="logout" @click="handleLogout">退出登录</button>
         </template>
         <RouterLink v-else class="login-link" to="/login">登录 / 注册</RouterLink>
@@ -383,7 +385,7 @@ async function handleLogout(): Promise<void> {
     display: flex;
   }
 
-  /* 窄屏 header 一行要放下品牌、账套、用户名与两个按钮，账套名进一步让位 */
+  /* 窄屏 header 一行要放下品牌、用户名、账套与两个按钮，账套名进一步让位 */
   .account-set-name {
     max-width: 6rem;
   }

@@ -15,8 +15,9 @@ export interface MenuItem {
 
 export const menuItems: MenuItem[] = [
   { label: '首页', routeName: 'home' },
-  { label: '关于', routeName: 'about' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },
   { label: '用户管理', routeName: 'admin-users', adminOnly: true },
   { label: '账套管理', routeName: 'admin-account-sets', adminOnly: true },
+  // 面向所有登录用户的个性化入口，固定收尾；软件关于信息已并入该页
+  { label: '用户设置', routeName: 'settings' },
 ]

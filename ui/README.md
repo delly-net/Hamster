@@ -38,10 +38,11 @@ ui/
     ├── auth/token.ts        # 登录令牌的本地读写（localStorage + 内存兜底）
     ├── config/
     │   ├── appConfig.ts     # 运行时配置加载
+    │   ├── appInfo.ts       # 产品名 / 版本号 / 简介 / 技术栈 / 许可（「用户设置」的关于区块）
     │   └── menu.ts          # 左侧功能菜单配置（新增菜单项只改这里）
     ├── components/          # 通用组件（含 openapi/ 调试面板组件）
-    ├── views/               # 页面组件（HomeView / AboutView / LoginView / OpenApiView
-    │                        #          / UserAdminView / ResetPasswordView）
+    ├── views/               # 页面组件（HomeView / LoginView / OpenApiView / UserAdminView
+    │                        #          / AccountSetAdminView / SettingsView / ResetPasswordView）
     ├── router/index.ts      # 路由表、布局 meta 与登录 / 管理员守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
@@ -90,20 +91,20 @@ ui/
 全站为经典的「header + body」后台结构：
 
 ```
-┌─────────────────────────────────────────────┐
-│ header：产品 Logo + 产品名  │  用户名 + 退出登录 │
-├──────────────┬──────────────────────────────┤
-│ body 左侧     │ body 右侧                     │
-│ 功能菜单侧栏   │ 内容主体区（路由页面）           │
-└──────────────┴──────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│ header：产品 Logo + 产品名 │ 用户名 · 账套 + 切换 · 退出登录 │
+├──────────────┬───────────────────────────────────┤
+│ body 左侧     │ body 右侧                          │
+│ 功能菜单侧栏   │ 内容主体区（路由页面）                │
+└──────────────┴───────────────────────────────────┘
 ```
 
 | 环节 | 实现 |
 |---|---|
 | 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
 | header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
-| header 右侧 | 已登录时显示用户名 +「退出登录」；未登录时显示「登录 / 注册」入口 |
-| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染 |
+| header 右侧 | 已登录时依次为**用户名 → 当前账套名 +【切换】→【退出登录】**；未登录时仅显示「登录 / 注册」入口 |
+| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染；末尾固定为面向所有登录用户的「用户设置」 |
 | 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
 | 内容区宽度 | 页面**铺满** `.app-main` 的可用宽度，内边距统一由 `.app-main` 提供，页面自身不再限宽居中 |
 | 窄屏（<1024px） | 侧栏收起为抽屉，由 header 内汉堡按钮开合；路由跳转 / `Esc` / 点击遮罩均可关闭 |
@@ -164,7 +165,7 @@ ui/
 | 头部/菜单/页脚切换 | [`src/App.vue`](src/App.vue) 依 `route.meta.layout` 在空白布局下只渲染页面与版权页脚，同时在 `body` 上切换 `layout-blank` 类 |
 | 版式分支 | [`src/assets/main.css`](src/assets/main.css) 的 `body:not(.layout-blank) #app` 只在完整布局下锁定整屏高度；卡片的居中由页面自己用 `margin: auto` 完成 |
 
-其余路由（`/`、`/about`、`/openapi`）沿用完整 header-body 布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。
+其余路由（`/`、`/settings`、`/openapi`、`/admin/*`）沿用完整 header-body 布局。新增其它空白页只需在路由上补 `meta: { layout: 'blank' }`，无需改动 `App.vue`。
 
 ### 登录态的存放与恢复
 
@@ -197,6 +198,25 @@ ui/
 
 > **已知边界**：停用只阻止**新的登录**，已签发的令牌在其 1 天有效期内仍可访问非管理接口。若需要「停用即踢下线」，需在服务端的令牌校验环节回查用户状态（本项目当前未实现）。
 
+## 用户设置 `/settings`
+
+面向**所有登录用户**的个性化页（[`src/views/SettingsView.vue`](src/views/SettingsView.vue)），路由只标 `requiresAuth`——**不带** `requiresAdmin`，菜单项同样不设 `adminOnly`。页内含两个区块：
+
+| 区块 | 内容 |
+|---|---|
+| 修改密码 | 原密码 + 新密码 + 确认新密码，提交 `POST /api/auth/change-password` |
+| 关于 | 产品名、版本号、一句话简介、技术栈、开源许可（MIT）与版权 |
+
+设计约定：
+
+- **改密必须提供原密码**：仅有令牌不足以改密（否则令牌泄露即可直接夺号），后端校验原密码失败时统一返回 400「原密码不正确」。
+- **改密成功后前端主动登出**：成功提示下方提供「前往登录」链接，用户须用新密码重新登录。见下方「已知边界」——这是体验层的收口，不是服务端的强制失效。
+- **改密失败不触发全局登录失效处理**：请求层传 `handleUnauthorized: false`，400 是业务校验失败，不应被误判为登录态过期。
+- **关于信息集中在 [`src/config/appInfo.ts`](src/config/appInfo.ts)**，页面只做渲染。
+- **版本号以 `package.json` 为单一数据源**：`vite.config.ts` 读取后在构建时经 `define` 注入全局常量 `__APP_VERSION__`（类型声明见 [`env.d.ts`](env.d.ts)），页面与 `appInfo.ts` 均不硬编码版本号。当前版本 `0.1.0`。
+
+> **已知边界**：JWT 不携带密码版本，**改密（乃至被管理员停用）都不会使已签发的旧令牌立即失效**，旧令牌在其 1 天有效期内仍可访问非管理接口。前端改密后主动登出只是让本人这台浏览器不再沿用旧令牌；若需要「改密即踢下线」，需在服务端的令牌校验环节回查用户状态（本项目当前未实现）。
+
 ## 密码重置 `/reset-password`
 
 管理员生成的重置链接落地页（[`src/views/ResetPasswordView.vue`](src/views/ResetPasswordView.vue)），**免登录**（路由 `meta: { layout: 'blank' }`，不带 `requiresAuth`）——被重置的用户多半处于未登录态，要求登录会让链接形同虚设。
@@ -210,7 +230,7 @@ ui/
 
 [`src/router/index.ts`](src/router/index.ts) 中的 `beforeEach` 按 `meta.requiresAuth` / `meta.requiresAdmin` 拦截：
 
-- 未登录访问受保护路由（`/`、`/about`、`/admin/users`）→ 重定向到 `/login`，并带上 `redirect` 查询参数，登录成功后跳回来源页；
+- 未登录访问受保护路由（`/`、`/settings`、`/admin/*`）→ 重定向到 `/login`，并带上 `redirect` 查询参数，登录成功后跳回来源页；
 - 已登录但非管理员访问 `/admin/users` → 重定向回首页；
 - 已登录访问 `/login` → 直接跳回首页。
 
@@ -248,6 +268,7 @@ GET  http://localhost:5004/openapi/v1.json         # OpenAPI 文档（仅开发�
 POST http://localhost:5004/api/auth/register       # 注册（201，不返回令牌，需管理员激活）
 POST http://localhost:5004/api/auth/login          # 登录（200，返回令牌）
 GET  http://localhost:5004/api/auth/me             # 当前用户（需 Bearer 令牌）
+POST http://localhost:5004/api/auth/change-password # 自助修改密码（需 Bearer 令牌 + 原密码）
 POST http://localhost:5004/api/auth/reset-password # 凭用户名 + 令牌设置新密码（免登录）
 
 GET    http://localhost:5004/api/admin/users                    # 用户列表（需管理员）

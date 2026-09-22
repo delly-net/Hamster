@@ -138,6 +138,50 @@ public sealed class AuthEndpoints : IEndpoint
             .WithSummary("重置密码")
             .WithDescription("凭管理员生成的专属重置链接（15 分钟内有效、一次性）设置新密码；需同时提供用户名与链接中的令牌。");
 
+        group.MapPost("/change-password", async (
+                ChangePasswordRequest request,
+                ClaimsPrincipal principal,
+                IUserService users,
+                CancellationToken cancellationToken) =>
+            {
+                var userId = principal.GetUserId();
+                if (userId is null)
+                {
+                    return Results.Unauthorized();
+                }
+
+                // 先校验新密码强度：格式问题应立即告知，不必先花一次哈希校验的开销
+                var passwordErrors = ValidatePassword(request.NewPassword);
+                if (passwordErrors.Count > 0)
+                {
+                    return Results.ValidationProblem(passwordErrors);
+                }
+
+                var user = await users.FindByIdAsync(userId.Value, cancellationToken);
+                if (user is null)
+                {
+                    return Results.Unauthorized();
+                }
+
+                // 原密码是本人身份的第二道证明：仅有令牌不足以改密，
+                // 否则令牌一旦泄露（浏览器共用、XSS 等）即可直接夺号
+                if (string.IsNullOrEmpty(request.CurrentPassword) ||
+                    !PasswordHasher.Verify(request.CurrentPassword, user.PasswordHash))
+                {
+                    return Results.Json(
+                        new { message = "原密码不正确" },
+                        statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                // 复用重置密码：写入新哈希的同时清空待处理的重置令牌（链接一次性，改密后即失效）
+                await users.ResetPasswordAsync(user.Id, request.NewPassword!, cancellationToken);
+                return Results.Ok(new { message = "密码已修改，请使用新密码重新登录" });
+            })
+            .RequireAuthorization()
+            .WithName("ChangePassword")
+            .WithSummary("修改密码")
+            .WithDescription($"已登录用户凭原密码自行设置新密码（新密码至少 {PASSWORD_MIN_LENGTH} 位）；原密码错误时返回 400。改密后已签发的旧令牌在过期前仍有效，客户端应主动重新登录。");
+
         group.MapGet("/me", async (
                 ClaimsPrincipal principal,
                 IUserService users,
@@ -249,6 +293,11 @@ public sealed record AuthResponse(string Token, DateTimeOffset ExpiresAt, UserDt
 /// <param name="Token">重置链接中的令牌明文。</param>
 /// <param name="NewPassword">新密码明文。</param>
 public sealed record ResetPasswordRequest(string? Username, string? Token, string? NewPassword);
+
+/// <summary>自助修改密码请求体。</summary>
+/// <param name="CurrentPassword">原密码明文，用于证明是本人操作。</param>
+/// <param name="NewPassword">新密码明文。</param>
+public sealed record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
 
 /// <summary>对外暴露的用户信息，不含任何凭据字段。</summary>
 /// <param name="Id">用户主键。</param>
