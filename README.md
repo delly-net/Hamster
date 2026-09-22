@@ -220,20 +220,26 @@ Four account types exist and users cannot extend them:
 | Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) |
 
 The **opening balance** is what the account already held when it was created (at most two decimal
-places). The **balance** is a **read-only derived value** equal to "opening balance + transaction
-totals" — there is no transaction table yet, so today it equals the opening balance. The database
-holds **no balance column**: the two would be identical while there are no transactions, and once
-transactions land a stale column would silently produce wrong totals.
+places). It is written as an opening transaction at creation time (see the next section) and is
+**immutable afterwards** — to change a balance, post a balance-adjustment transaction rather than
+rewriting the opening. The **balance** is a **read-only derived value**: the signed sum of every
+transaction entry on the account. The database holds **no balance column** — keeping a single
+derivation path is what prevents a stale column from silently producing wrong totals.
 
 Accounts are never physically deleted, only deactivated and reactivated (soft delete): accounts
 are what transactions hang off, so deleting one would orphan historical rows. A deactivated
 account is hidden from the default list; `includeInactive=true` shows it and lets you reactivate.
 
+`isSystem` marks accounts the system created for itself (today, the opening ledger account). They
+sit in the same list as ordinary accounts, but can never be created by a user, and **never lose
+their system identity by being renamed or retyped** — the identity lives on a marker column rather
+than being reverse-engineered from a name or type.
+
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator) |
-| `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }`. A personal account's owner is forced to the caller |
-| `PUT /api/accounts/{id}` | Bearer | Rename / retype / change the opening balance (204); scope, owner and account set are immutable |
+| `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator); `balance` is the derived figure |
+| `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }`. A personal account's owner is forced to the caller. A non-zero opening balance also posts an opening transaction |
+| `PUT /api/accounts/{id}` | Bearer | Rename / retype (204); scope, owner, account set and the **opening balance** are all immutable |
 | `POST /api/accounts/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
 | `POST /api/accounts/{id}/activate` | Bearer | Reactivate (204) |
 
@@ -244,12 +250,67 @@ be used to probe for other people's accounts); 409 when the name repeats within 
 "account set + scope"; 400 for a numeric or unknown `scope` / `type`, since both travel as
 **strings**.
 
+##### Transactions and entries
+
+Bookkeeping is **double-entry**: **every transaction carries two entries, one debit and one
+credit**, and total debits always equal total credits. The data lives in two tables:
+
+| Table | Contents |
+|---|---|
+| `hamster_transaction` | Transaction header: account set, type, timestamp, summary, remark, who posted it |
+| `hamster_transaction_entry` | Transaction entry: parent transaction, account, direction, amount |
+
+An entry's direction is a **`direction` enum plus a positive amount**, not a signed amount:
+
+| Direction | Value | Effect on that account's balance |
+|---|---|---|
+| Debit | `Debit` (1) | Increase |
+| Credit | `Credit` (2) | Decrease |
+
+The sign conversion happens in **exactly one place** (`TransactionService.SumSignedAmountsAsync`:
+debits positive, credits negative); everywhere else only positive amounts are moved around. The
+enum is deliberately **not flipped per account type** (as in "a credit increases a liability") —
+that would give one `direction` opposite meanings on different accounts, and once the sign logic is
+scattered it stops lining up.
+
+Balance is guaranteed on the **write side**: entries are always written in pairs of "target
+account + counterparty account", and there is no path that writes a single side.
+
+###### Opening balances
+
+When an account is created, its opening balance **is posted as an opening transaction** rather than
+only stored in the `initial_balance` column:
+
+```
+Opening balance of 500 on "Cash":
+  Debit   Cash            500
+  Credit  Opening Ledger  500
+```
+
+The **opening ledger account** (named "期初账本", type `Ledger`, public, `isSystem = true`) is the
+counterparty. The system **creates it on demand**: once per account set, reused thereafter, and
+**an account set always has exactly one**. An account with an opening balance of 0 **posts
+nothing** (its entry sum is 0, matching the opening balance). A negative opening balance (a
+liability) flips the direction automatically — the target account takes the credit (balance
+decreases) and the ledger account takes the debit.
+
+The **balance is therefore the signed sum of all entries**: the opening entry already carries
+"+opening balance", so `initial_balance` is **not added on top** — that would count it twice.
+
+Accounts that predate this version get their missing opening transactions written by an **opening
+balance backfill** at startup: it is idempotent, an account that already has an opening entry is
+left alone, backfilled transactions carry no poster, and a failure only logs a warning rather than
+blocking startup.
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.
 On startup the API therefore backfills the `is_admin` / `is_active` flags of any older user row
 to `false` — meaning **accounts created before this version start out as "not an administrator,
-not activated"** and need an administrator to activate them.
+not activated"** and need an administrator to activate them. For the same reason it backfills
+`is_system` to `false` on older account rows (no account created before this version can be a
+system account); without that, a NULL `is_system` makes the account list fail to bind and return
+500.
 
 ### Frontend Setup
 

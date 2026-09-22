@@ -14,6 +14,7 @@ builder.Services.AddHamsterDatabase(builder.Configuration);
 builder.Services.AddSingleton<ISampleAccountService, SampleAccountService>();
 builder.Services.AddSingleton<IUserService, UserService>();
 builder.Services.AddSingleton<IAccountSetService, AccountSetService>();
+builder.Services.AddSingleton<ITransactionService, TransactionService>();
 builder.Services.AddSingleton<IAccountService, AccountService>();
 
 // 默认管理员播种与密码重置链接所需配置（均由环境变量优先）
@@ -73,6 +74,9 @@ app.InitializeDatabase();
 
 // 默认管理员播种：仅在同名账户不存在时创建，失败不阻断启动
 app.SeedDefaultAdmin();
+
+// 期初余额回填：为缺少期初分录的既有账户补写期初交易（幂等，失败不阻断启动）
+app.BackfillOpeningBalances();
 
 app.UseAuthentication();
 app.UseAuthorization();

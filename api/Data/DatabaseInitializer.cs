@@ -12,6 +12,9 @@ public static class DatabaseInitializer
     /// <summary>用户表表名（与 <see cref="User"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
     private const string USER_TABLE = "hamster_user";
 
+    /// <summary>账户表表名（与 <see cref="Account"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
+    private const string ACCOUNT_TABLE = "hamster_account";
+
     /// <summary>
     /// 执行数据库初始化。
     /// 建表失败（如连接不可用）时仅记录告警，不阻断应用启动。
@@ -33,12 +36,15 @@ public static class DatabaseInitializer
         try
         {
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
+            // 分两次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
             db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
+            db.CodeFirst.InitTables<Transaction, TransactionEntry>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry",
                 options.DbTypeLabel);
 
             BackfillUserFlags(db, options.DbType, logger);
+            BackfillAccountFlags(db, options.DbType, logger);
         }
         catch (Exception ex)
         {
@@ -56,10 +62,55 @@ public static class DatabaseInitializer
     /// <param name="dbType">当前数据库类型，决定「不可绑定的空值」如何判定。</param>
     /// <param name="logger">日志记录器。</param>
     /// <remarks>
-    /// SqlSugar 的增量加列只把新列追加为**可空**，不会为既有行补值（即使实体上标了 <c>DefaultValue</c>），
-    /// 于是升级前已存在的用户在 <c>is_admin</c> / <c>is_active</c> 上是 NULL；读回时无法绑定到非空 <c>bool</c>，
-    /// 会让整个用户列表查询抛异常。这里显式回填一次：
     /// **既有账号一律视为「非管理员 + 未激活」**——需由管理员在用户管理页激活后才能登录。
+    /// </remarks>
+    private static void BackfillUserFlags(ISqlSugarClient db, HamsterDbType dbType, ILogger logger)
+    {
+        var affected = BackfillBoolColumns(db, dbType, USER_TABLE, ["is_admin", "is_active"]);
+
+        if (affected > 0)
+        {
+            logger.LogInformation(
+                "已回填 {Count} 处历史用户标志（既有账号一律为「非管理员 + 未激活」，需管理员在用户管理页激活）",
+                affected);
+        }
+    }
+
+    /// <summary>
+    /// 回填既有账户行的布尔标志列。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="dbType">当前数据库类型，决定「不可绑定的空值」如何判定。</param>
+    /// <param name="logger">日志记录器。</param>
+    /// <remarks>
+    /// **既有账户一律视为「非系统账户」**：<c>is_system</c> 是随本任务才引入的列，
+    /// 升级前存在的账户不可能有系统账户，而期初账本账户由期初余额入账时按需创建。
+    /// 不补这一步的话，<c>is_system</c> 为 NULL 会让账户列表查询因无法绑定到非空 <c>bool</c> 而 500。
+    /// </remarks>
+    private static void BackfillAccountFlags(ISqlSugarClient db, HamsterDbType dbType, ILogger logger)
+    {
+        var affected = BackfillBoolColumns(db, dbType, ACCOUNT_TABLE, ["is_system"]);
+
+        if (affected > 0)
+        {
+            logger.LogInformation(
+                "已回填 {Count} 处历史账户标志（既有账户一律为「非系统账户」，期初账本账户在期初余额入账时按需创建）",
+                affected);
+        }
+    }
+
+    /// <summary>
+    /// 把指定表的布尔标志列中「无法绑定到非空 <c>bool</c>」的历史取值回填为 <c>false</c>。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="dbType">当前数据库类型，决定「不可绑定的空值」如何判定。</param>
+    /// <param name="table">目标表名。</param>
+    /// <param name="columns">目标列名。</param>
+    /// <returns>受影响的行数合计。</returns>
+    /// <remarks>
+    /// SqlSugar 的增量加列只把新列追加为**可空**，不会为既有行补值（即使实体上标了 <c>DefaultValue</c>），
+    /// 于是升级前已存在的行在这些列上是 NULL；读回时无法绑定到非空 <c>bool</c>，
+    /// 会让整个列表查询抛异常。
     /// <para>
     /// 待回填的取值有两种形态：<c>NULL</c>（Sqlite 增量加列的实测结果）与空串 <c>''</c>
     /// （由带 <c>DefaultValue</c> 标注的中间版本升级出的库，实测于 hamster.db）。两者都无法绑定到
@@ -70,24 +121,23 @@ public static class DatabaseInitializer
     /// 回填用 ANSI 的 <c>false</c> 而非 <c>0</c>，以便 Sqlite 与 PostgreSQL 两种库都能执行。
     /// </para>
     /// </remarks>
-    private static void BackfillUserFlags(ISqlSugarClient db, HamsterDbType dbType, ILogger logger)
+    private static int BackfillBoolColumns(
+        ISqlSugarClient db,
+        HamsterDbType dbType,
+        string table,
+        IReadOnlyList<string> columns)
     {
         var affected = 0;
-        foreach (var column in new[] { "is_admin", "is_active" })
+        foreach (var column in columns)
         {
             var where = dbType == HamsterDbType.Sqlite
                 ? $"{column} IS NULL OR {column} = ''"
                 : $"{column} IS NULL";
 
             affected += db.Ado.ExecuteCommand(
-                $"UPDATE {USER_TABLE} SET {column} = false WHERE {where}");
+                $"UPDATE {table} SET {column} = false WHERE {where}");
         }
 
-        if (affected > 0)
-        {
-            logger.LogInformation(
-                "已回填 {Count} 处历史用户标志（既有账号一律为「非管理员 + 未激活」，需管理员在用户管理页激活）",
-                affected);
-        }
+        return affected;
     }
 }

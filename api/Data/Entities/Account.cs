@@ -14,9 +14,11 @@ namespace Hamster.Api.Data.Entities;
 /// </para>
 /// <para>
 /// **刻意不存余额列**：账户只有<see cref="InitialBalance"/>（期初金额）一列。
-/// 余额是「期初金额 + 流水汇总」的派生值（对外 DTO 上提供，见 <c>AccountDto.From</c>）。
-/// 若同时存一份余额列，在没有流水的当前阶段两列必然恒等，等流水表落地又会出现
-/// 「余额列忘了同步」的静默错账——单一真相比省一次计算重要得多。
+/// 余额是「全部交易明细的有符号汇总」的派生值（对外 DTO 上提供，见 <c>AccountDto.From</c>）。
+/// 期初金额在创建时即落成一笔期初交易（见 <c>TransactionService.RecordOpeningBalanceAsync</c>），
+/// 本身就在这份汇总里，故派生时**不再叠加**本列——叠加会把期初金额重复计一次。
+/// 若同时存一份余额列，则又多出一条需要同步的路径，迟早出现「余额列忘了同步」的静默错账——
+/// 单一真相比省一次计算重要得多。
 /// </para>
 /// </remarks>
 [SugarTable("hamster_account")]
@@ -82,6 +84,26 @@ public sealed class Account
     /// </summary>
     [SugarColumn(ColumnName = "is_active")]
     public bool IsActive { get; set; }
+
+    /// <summary>
+    /// 是否为系统自动创建的内置账户。
+    /// </summary>
+    /// <remarks>
+    /// 当前唯一的用途是标识**期初账本账户**：期初余额入账需要一个对手方账户
+    /// （「目标账户 +期初金额，账本账户 −期初金额」），该账户按账套自动创建、每账套至多一个。
+    /// <para>
+    /// 之所以用一个持久化的标记位而不是「按名称找」或「按类型找」：
+    /// 名称与类型都是**用户可改**的属性（<c>UpdateAsync</c> 允许改名与改类型），
+    /// 拿它们当身份依据，一次改名就会让系统认不出既有账本账户、再建一个出来。
+    /// 标记位随行持久化，改名、改类型、停用都不影响识别。
+    /// </para>
+    /// <para>
+    /// 系统账户**不做额外保护**：它就是一条真实的账本账户（<see cref="AccountType.Ledger"/>
+    /// 的语义正是「记账用的汇总性账户」），照常出现在账户列表里、照常计入余额与参与复式配平。
+    /// </para>
+    /// </remarks>
+    [SugarColumn(ColumnName = "is_system")]
+    public bool IsSystem { get; set; }
 
     /// <summary>
     /// 创建时间（UTC）。

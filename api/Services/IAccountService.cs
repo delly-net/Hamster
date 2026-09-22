@@ -84,6 +84,11 @@ public interface IAccountService
     /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>创建后的账户实体。</returns>
+    /// <remarks>
+    /// **期初金额会同时落成一笔期初交易**：账户与「借（或贷）目标账户、贷（或借）账本账户」的
+    /// 两条明细在同一事务内写入（见 <see cref="ITransactionService.RecordOpeningBalanceAsync"/>），
+    /// 账本账户不存在时按需自动创建。期初金额为 0 时只建账户、不写分录。
+    /// </remarks>
     Task<Account> CreateAsync(
         int accountSetId,
         string name,
@@ -94,7 +99,7 @@ public interface IAccountService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 修改账户的名称、类型与期初金额。
+    /// 修改账户的名称与类型。
     /// </summary>
     /// <param name="account">
     /// 目标账户，**必须是 <see cref="FindVisibleAsync"/> 取得的实体**：
@@ -102,14 +107,17 @@ public interface IAccountService
     /// </param>
     /// <param name="name">新名称（调用方需保证已 Trim 且未被占用）。</param>
     /// <param name="type">新类型。</param>
-    /// <param name="initialBalance">新期初金额。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>受影响行数大于 0 返回 <c>true</c>；账户已被删除返回 <c>false</c>。</returns>
+    /// <remarks>
+    /// **期初金额不在此方法的参数中，因为它已不可修改**：期初余额一经创建即是一笔落库的期初交易
+    /// （借贷两条明细），改它就必须同步改写那笔交易，而期初是既成事实而非可随意改写的设置项。
+    /// 需要调整余额时应记一笔「余额调整交易」，而不是回头改期初——后者会让已经发生的账变得不可信。
+    /// </remarks>
     Task<bool> UpdateAsync(
         Account account,
         string name,
         AccountType type,
-        decimal initialBalance,
         CancellationToken cancellationToken = default);
 
     /// <summary>

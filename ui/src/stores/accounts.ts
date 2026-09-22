@@ -57,10 +57,12 @@ export interface Account {
   ownerUserId: number | null
   /** 归属人用户名；公共账户为 `null`。 */
   ownerUsername: string | null
-  /** 期初金额。 */
+  /** 期初金额；创建后不可修改（已落成一笔期初交易）。 */
   initialBalance: number
-  /** 余额；**只读派生值**，当前等于期初金额（尚无流水表）。 */
+  /** 余额；**只读派生值**，等于该账户全部交易明细的有符号汇总。 */
   balance: number
+  /** 是否为系统自动创建的内置账户（当前即期初账本账户）。 */
+  isSystem: boolean
   /** 是否启用；`false` 表示已停用（软删除）。 */
   isActive: boolean
   /** 创建时间（UTC，ISO 8601）。 */
@@ -75,11 +77,10 @@ export interface CreateAccountPayload {
   initialBalance: number
 }
 
-/** 修改账户的入参；归属范围与归属人不可修改，故不在其中。 */
+/** 修改账户的入参；归属范围、归属人与期初金额均不可修改，故不在其中。 */
 export interface UpdateAccountPayload {
   name: string
   type: AccountType
-  initialBalance: number
 }
 
 /** 接口基址。 */
@@ -114,7 +115,7 @@ export const useAccountsStore = defineStore('accounts', () => {
     await request<Account>(ACCOUNTS_PATH, { method: 'POST', body: payload })
   }
 
-  /** 修改账户名称、类型与期初金额。 */
+  /** 修改账户名称与类型；期初金额已落成一笔期初交易，不可修改。 */
   async function update(id: number, payload: UpdateAccountPayload): Promise<void> {
     await request<void>(`${ACCOUNTS_PATH}/${id}`, { method: 'PUT', body: payload })
   }

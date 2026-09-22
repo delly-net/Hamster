@@ -56,11 +56,10 @@ const NEW_ID = 0
 /** 正在提交的账户 Id（`NEW_ID` 表示新建）；用于禁用按钮、避免重复提交。 */
 const pendingId = ref<number | null>(null)
 
-/** 正在行内编辑的账户 Id 及其草稿值。 */
+/** 正在行内编辑的账户 Id 及其草稿值；期初金额不可修改，故草稿中没有该字段。 */
 const editingId = ref<number | null>(null)
 const draftName = ref('')
 const draftType = ref<AccountType>('Fund')
-const draftInitialBalance = ref('0')
 
 /** 待二次确认停用的账户 Id。 */
 const confirmingId = ref<number | null>(null)
@@ -159,10 +158,9 @@ function startEdit(account: Account): void {
   editingId.value = account.id
   draftName.value = account.name
   draftType.value = account.type
-  draftInitialBalance.value = String(account.initialBalance)
 }
 
-/** 保存行内编辑（归属范围不可修改，故草稿中没有该字段）。 */
+/** 保存行内编辑（归属范围与期初金额均不可修改，故草稿中没有这两个字段）。 */
 async function saveEdit(account: Account): Promise<void> {
   const name = draftName.value.trim()
   if (name.length === 0) {
@@ -170,17 +168,10 @@ async function saveEdit(account: Account): Promise<void> {
     return
   }
 
-  const initialBalance = parseAmount(draftInitialBalance.value)
-  if (initialBalance === null) {
-    errorMessage.value = '请填写有效的期初金额'
-    return
-  }
-
   const ok = await run(async () => {
     await accountsStore.update(account.id, {
       name,
       type: draftType.value,
-      initialBalance,
     })
     notice.value = `已保存账户 ${name}`
   }, account.id)
@@ -243,7 +234,7 @@ onMounted(() => {
         <h1 class="title">账户管理</h1>
         <p class="subtitle">
           账户归属当前账套：公共账户账套内成员共用，个人账户仅创建者本人可见可用。
-          余额为派生值（期初金额 + 流水汇总），当前尚无流水，故与期初金额一致。
+          余额为派生值（该账户全部交易明细的有符号汇总，期初已计入其中），不可直接编辑。
         </p>
       </div>
       <button
@@ -373,16 +364,8 @@ onMounted(() => {
               </select>
               <template v-else>{{ ACCOUNT_TYPE_LABELS[account.type] }}</template>
             </td>
-            <td class="amount">
-              <input
-                v-if="editingId === account.id"
-                v-model="draftInitialBalance"
-                type="number"
-                step="0.01"
-                :disabled="pendingId !== null"
-              />
-              <template v-else>{{ formatAmount(account.initialBalance) }}</template>
-            </td>
+            <!-- 期初金额一经创建不可修改（已落成一笔期初交易），故编辑态下也只读呈现 -->
+            <td class="amount">{{ formatAmount(account.initialBalance) }}</td>
             <td class="amount balance">{{ formatAmount(account.balance) }}</td>
             <td>
               <span class="badge" :class="account.isActive ? 'badge-active' : 'badge-inactive'">

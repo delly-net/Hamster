@@ -43,6 +43,7 @@ public sealed class AccountEndpoints : IEndpoint
                 IUserService users,
                 IAccountSetService accountSets,
                 IAccountService accounts,
+                ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
                 var (actor, accountSet, failure) = await ResolveContextAsync(
@@ -60,15 +61,27 @@ public sealed class AccountEndpoints : IEndpoint
                     includeInactive ?? false,
                     cancellationToken);
 
+                // 余额 = 该账户全部明细的有符号汇总。期初余额已是一笔落库的期初分录（+期初金额），
+                // 故**不再额外叠加 initial_balance**——叠加会把期初金额重复计一次。
+                // 一次性取回全部账户的汇总，避免逐账户查询的 N+1。
+                var balances = await transactions.SumSignedAmountsAsync(
+                    accountSet.Id,
+                    [.. visible.Select(item => item.Account.Id)],
+                    cancellationToken);
+
                 return Results.Ok(visible
-                    .Select(item => AccountDto.From(item.Account, item.OwnerUsername))
+                    .Select(item => AccountDto.From(
+                        item.Account,
+                        item.OwnerUsername,
+                        balances.GetValueOrDefault(item.Account.Id)))
                     .ToArray());
             })
             .WithName("ListAccounts")
             .WithSummary("账户列表")
             .WithDescription(
                 "返回当前账套内当前用户可见的账户，按主键升序。管理员可见账套内全部账户（含他人个人账户）；" +
-                "普通用户只见公共账户与自己创建的个人账户。默认只返回启用的账户，includeInactive=true 时含已停用的。");
+                "普通用户只见公共账户与自己创建的个人账户。默认只返回启用的账户，includeInactive=true 时含已停用的。" +
+                "balance 为派生值（该账户全部交易明细的有符号汇总），不是数据库中的列。");
 
         group.MapPost("", async (
                 AccountRequest request,
@@ -77,6 +90,7 @@ public sealed class AccountEndpoints : IEndpoint
                 IUserService users,
                 IAccountSetService accountSets,
                 IAccountService accounts,
+                ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
                 var (actor, accountSet, failure) = await ResolveContextAsync(
@@ -124,15 +138,27 @@ public sealed class AccountEndpoints : IEndpoint
                     actor!.Id,
                     cancellationToken);
 
+                // 余额照样走汇总、不因「刚建好必然等于期初金额」而直接回填 initialBalance：
+                // 派生口径只留一条，任何捷径都会在边界（如期初金额为 0）上与原口径分叉
+                var balances = await transactions.SumSignedAmountsAsync(
+                    accountSet.Id,
+                    [created.Id],
+                    cancellationToken);
+
                 return Results.Created(
                     $"{ApiPathConst.ACCOUNT_GROUP}/{created.Id}",
-                    AccountDto.From(created, ownerUserId is null ? null : actor.Username));
+                    AccountDto.From(
+                        created,
+                        ownerUserId is null ? null : actor.Username,
+                        balances.GetValueOrDefault(created.Id)));
             })
             .WithName("CreateAccount")
             .WithSummary("新建账户")
             .WithDescription(
                 "在当前账套内新建账户。个人账户的归属人强制为当前登录者（请求体无需也无法指定归属人）；" +
-                "名称在「账套 + 归属范围」内不区分大小写唯一，重复返回 409。");
+                "名称在「账套 + 归属范围」内不区分大小写唯一，重复返回 409。" +
+                "期初金额会同时落成一笔期初交易（借/贷各一条明细），对手方为该账套的期初账本账户——" +
+                "不存在时自动创建；期初金额为 0 时不写分录。");
 
         group.MapPut("/{id:int}", async (
                 int id,
@@ -160,8 +186,6 @@ public sealed class AccountEndpoints : IEndpoint
                     errors["type"] = ["账户类型只能是 Ledger / Fund / Liability / Contact"];
                 }
 
-                ValidateBalance(request.InitialBalance, errors);
-
                 if (errors.Count > 0)
                 {
                     return Results.ValidationProblem(errors);
@@ -183,15 +207,17 @@ public sealed class AccountEndpoints : IEndpoint
                     return Results.Conflict(new { message = "该范围内已存在同名账户" });
                 }
 
-                return await accounts.UpdateAsync(account, name, type, request.InitialBalance, cancellationToken)
+                return await accounts.UpdateAsync(account, name, type, cancellationToken)
                     ? Results.NoContent()
                     : NotFound();
             })
             .WithName("UpdateAccount")
-            .WithSummary("修改账户")
+            .WithSummary("修改账户名称与类型")
             .WithDescription(
-                "修改账户名称、类型与期初金额。归属范围、归属人与所属账套一经创建不可修改" +
-                "（个人 → 公共等于把私有数据公开给全账套，故不提供该能力）。");
+                "修改账户名称与类型。归属范围、归属人与所属账套一经创建不可修改" +
+                "（个人 → 公共等于把私有数据公开给全账套，故不提供该能力）。" +
+                "**期初金额同样不可修改**：它已落成一笔期初交易，调整余额应记一笔余额调整交易，" +
+                "而非改写既成的期初。");
 
         group.MapPost("/{id:int}/deactivate", async (
                 int id,
@@ -397,9 +423,11 @@ public sealed record AccountRequest(string? Name, string? Scope, string? Type, d
 /// <summary>修改账户请求体。</summary>
 /// <param name="Name">账户名称。</param>
 /// <param name="Type">账户类型。</param>
-/// <param name="InitialBalance">期初金额。</param>
-/// <remarks>刻意不含归属范围与归属人：两者一经创建不可修改。</remarks>
-public sealed record AccountUpdateRequest(string? Name, string? Type, decimal InitialBalance);
+/// <remarks>
+/// 刻意不含归属范围与归属人：两者一经创建不可修改。
+/// 也刻意不含期初金额：它已落成一笔期初交易，改写它等于篡改既成事实（见更新端点的说明）。
+/// </remarks>
+public sealed record AccountUpdateRequest(string? Name, string? Type);
 
 /// <summary>账户信息（对外暴露）。</summary>
 /// <param name="Id">账户主键。</param>
@@ -409,8 +437,9 @@ public sealed record AccountUpdateRequest(string? Name, string? Type, decimal In
 /// <param name="Type">账户类型，取值 <c>Ledger</c> / <c>Fund</c> / <c>Liability</c> / <c>Contact</c>。</param>
 /// <param name="OwnerUserId">归属人主键；公共账户为 <c>null</c>。</param>
 /// <param name="OwnerUsername">归属人用户名；公共账户为 <c>null</c>。</param>
-/// <param name="InitialBalance">期初金额。</param>
+/// <param name="InitialBalance">期初金额。创建后不可修改。</param>
 /// <param name="Balance">余额（派生值，只读）。</param>
+/// <param name="IsSystem">是否为系统自动创建的内置账户（当前即期初账本账户）。</param>
 /// <param name="IsActive">是否启用；<c>false</c> 表示已停用（软删除）。</param>
 /// <param name="CreatedAt">创建时间（UTC）。</param>
 public sealed record AccountDto(
@@ -423,23 +452,32 @@ public sealed record AccountDto(
     string? OwnerUsername,
     decimal InitialBalance,
     decimal Balance,
+    bool IsSystem,
     bool IsActive,
     DateTime CreatedAt)
 {
     /// <summary>由实体构造 DTO。</summary>
     /// <param name="account">账户实体。</param>
     /// <param name="ownerUsername">归属人用户名；公共账户传 <c>null</c>。</param>
+    /// <param name="balance">
+    /// 余额，由 <c>ITransactionService.SumSignedAmountsAsync</c> 汇总得出。
+    /// </param>
     /// <returns>账户 DTO。</returns>
     /// <remarks>
     /// 枚举以**字符串**对外暴露（而非默认的数字）：前端据此映射中文标签，且新增类型时
     /// 不必让前后端共同维护一份数值对照表。
     /// <para>
-    /// <see cref="Balance"/> 是**派生值**，当前等于期初金额——数据库中没有余额列，
-    /// 流水表尚未落地。流水表落地后，在此处叠加该账户的流水汇总即可；
-    /// 无需改动任何调用方，也不会出现「余额列忘了同步」的静默错账。
+    /// <see cref="Balance"/> 是**派生值**，数据库中没有余额列：
+    /// 等于该账户全部交易明细的有符号汇总（借方为正、贷方为负），
+    /// 其中期初分录本身就是「+期初金额」，故**不再叠加 <see cref="InitialBalance"/>**。
+    /// 期初金额为 0 的账户不写期初分录，其汇总恒为 0，与期初金额一致。
+    /// </para>
+    /// <para>
+    /// 余额由调用方算好后传入（而非在此处查询），是为了让列表端点能用**一次**分组查询
+    /// 取回整页账户的余额，避免逐行查询的 N+1。
     /// </para>
     /// </remarks>
-    public static AccountDto From(Account account, string? ownerUsername = null) => new(
+    public static AccountDto From(Account account, string? ownerUsername, decimal balance) => new(
         account.Id,
         account.AccountSetId,
         account.Name,
@@ -448,7 +486,8 @@ public sealed record AccountDto(
         account.OwnerUserId,
         ownerUsername,
         account.InitialBalance,
-        account.InitialBalance,
+        balance,
+        account.IsSystem,
         account.IsActive,
         // 从 Sqlite 读回的时间为 DateTimeKind.Unspecified，显式标记为 UTC，
         // 保证序列化输出带 Z 后缀、语义不产生歧义（与 AccountSetDto.From 一致）

@@ -7,7 +7,10 @@ namespace Hamster.Api.Services;
 /// 基于 SqlSugar 的账户业务实现。
 /// </summary>
 /// <param name="db">SqlSugar 客户端（单例 Scope，可安全并发使用）。</param>
-public sealed class AccountService(ISqlSugarClient db) : IAccountService
+/// <param name="transactions">
+/// 交易服务：新建账户时写入期初余额分录（「目标账户 +期初金额，账本账户 −期初金额」）。
+/// </param>
+public sealed class AccountService(ISqlSugarClient db, ITransactionService transactions) : IAccountService
 {
     /// <inheritdoc />
     public async Task<IReadOnlyList<AccountWithOwner>> ListByAccountSetAsync(
@@ -96,9 +99,21 @@ public sealed class AccountService(ISqlSugarClient db) : IAccountService
             Type = type,
             InitialBalance = NormalizeBalance(initialBalance),
             IsActive = true,
+            // 系统账户只能由 TransactionService 在期初入账时创建（期初账本），此处一律为普通账户
+            IsSystem = false,
         };
 
-        account.Id = await db.Insertable(account).ExecuteReturnIdentityAsync(cancellationToken);
+        // 账户与它的期初分录同事务写入：期初余额是一笔真正的交易，
+        // 若分两步执行，中途失败会留下「账户已存在、期初却未入账」的半成品——
+        // 账面上该账户余额为 0 而期初金额却是别的数，且回填只能在下次重启时才补救。
+        await db.Ado.UseTranAsync(async () =>
+        {
+            account.Id = await db.Insertable(account).ExecuteReturnIdentityAsync(cancellationToken);
+
+            // 期初金额为 0 时本调用不写任何分录（无信息量），账户照常建立
+            await transactions.RecordOpeningBalanceAsync(account, creatorUserId, cancellationToken);
+        });
+
         return account;
     }
 
@@ -107,16 +122,14 @@ public sealed class AccountService(ISqlSugarClient db) : IAccountService
         Account account,
         string name,
         AccountType type,
-        decimal initialBalance,
         CancellationToken cancellationToken = default)
     {
-        // 只更新可变的三个字段：account_set_id / scope / owner_user_id 一经创建不可修改
+        // 只更新可变的两列：account_set_id / scope / owner_user_id / initial_balance 一经创建不可修改
         var affected = await db.Updateable<Account>()
             .SetColumns(target => new Account
             {
                 Name = name.Trim(),
                 Type = type,
-                InitialBalance = NormalizeBalance(initialBalance),
             })
             .Where(target => target.Id == account.Id)
             .ExecuteCommandAsync(cancellationToken);
