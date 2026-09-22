@@ -49,7 +49,8 @@ const showInactive = ref(false)
 const newName = ref('')
 const newScope = ref<AccountScope>('Personal')
 const newType = ref<AccountType>('Fund')
-const newInitialBalance = ref('0')
+/** 期初金额：输入框是 `type="number"`，v-model 会自动把值转成 number（空串除外），故此处必须是联合类型。 */
+const newInitialBalance = ref<string | number>('0')
 
 /** 自定义账户 Id 从 1 起自增，`0` 可安全用作「新建表单提交中」的哨兵值。 */
 const NEW_ID = 0
@@ -83,9 +84,11 @@ function formatDateTime(value: string): string {
 /**
  * 把输入框中的金额文本解析为数字。
  * 用 `Number` 而非 `parseFloat`：后者会把 `"12abc"` 读成 `12`，让脏输入蒙混过关。
+ *
+ * 入参可能是 number（`type="number"` 的 v-model 自动转型所致），故先 `String` 归一再解析。
  */
-function parseAmount(raw: string): number | null {
-  const trimmed = raw.trim()
+function parseAmount(raw: string | number): number | null {
+  const trimmed = String(raw).trim()
   if (trimmed.length === 0) {
     return null
   }
