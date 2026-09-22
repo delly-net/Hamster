@@ -35,17 +35,19 @@ ui/
     ├── api/
     │   ├── http.ts          # 统一请求层（附加令牌、错误文案、401 处理）
     │   └── openapi/         # OpenAPI 文档拉取与调试请求（types / schema / client）
-    ├── auth/token.ts        # 登录令牌的本地读写（localStorage + 内存兜底）
+    ├── auth/                # 本地读写（localStorage + 内存兜底）：token.ts 登录令牌 / accountSet.ts 当前账套
     ├── config/
     │   ├── appConfig.ts     # 运行时配置加载
     │   ├── appInfo.ts       # 产品名 / 版本号 / 简介 / 技术栈 / 许可（「用户设置」的关于区块）
     │   └── menu.ts          # 左侧功能菜单配置（新增菜单项只改这里）
-    ├── components/          # 通用组件（含 openapi/ 调试面板组件）
+    ├── components/          # 通用组件（AccountSetPicker + openapi/ 调试面板组件）
     ├── views/               # 页面组件（HomeView / LoginView / OpenApiView / UserAdminView
-    │                        #          / AccountSetAdminView / SettingsView / ResetPasswordView）
+    │                        #          / AccountSetAdminView / AccountView / SettingsView / ResetPasswordView）
     ├── router/index.ts      # 路由表、布局 meta 与登录 / 管理员守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
+        ├── accountSets.ts   # 账套状态（我可访问的账套 / 当前账套 / 管理侧增删改与关联用户）
+        ├── accounts.ts      # 账户状态（当前账套内的账户列表 / 新建 / 修改 / 停用启用）
         └── users.ts         # 用户管理状态（列表 / 激活停用 / 重置链接 / 删除）
 ```
 
@@ -104,7 +106,7 @@ ui/
 | 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
 | header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
 | header 右侧 | 已登录时依次为**用户名 → 当前账套名 +【切换】→【退出登录】**；未登录时仅显示「登录 / 注册」入口 |
-| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染；末尾固定为面向所有登录用户的「用户设置」 |
+| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染；「首页」「账户管理」与末尾的「用户设置」面向所有登录用户 |
 | 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
 | 内容区宽度 | 页面**铺满** `.app-main` 的可用宽度，内边距统一由 `.app-main` 提供，页面自身不再限宽居中 |
 | 窄屏（<1024px） | 侧栏收起为抽屉，由 header 内汉堡按钮开合；路由跳转 / `Esc` / 点击遮罩均可关闭 |
@@ -197,6 +199,27 @@ ui/
 - **成功提示复用主色**而非绿色：全站只有 `--color-danger` 一种语义色，不额外引入绿色以维持暖色视觉体系。
 
 > **已知边界**：停用只阻止**新的登录**，已签发的令牌在其 1 天有效期内仍可访问非管理接口。若需要「停用即踢下线」，需在服务端的令牌校验环节回查用户状态（本项目当前未实现）。
+
+## 账户管理 `/accounts`
+
+面向**所有登录用户**的记账账户管理页（[`src/views/AccountView.vue`](src/views/AccountView.vue) + [`src/stores/accounts.ts`](src/stores/accounts.ts)），路由只标 `requiresAuth`——**不带** `requiresAdmin`，菜单项同样不设 `adminOnly`。页面提供新建表单、账户列表与行内编辑，并支持停用/启用。
+
+| 环节 | 行为 |
+|---|---|
+| 未选择账套 | 只显示「请先切换账套」的提示，**不渲染表单与表格**——账户一律挂在账套下，展示一个不属于任何账套的空列表只会误导 |
+| 跟随账套切换 | `watch` 账套 store 的 `currentId`，变化即重新拉取；未选择时清空列表。**仅靠 `onMounted` 会残留上一账套的账户** |
+| 新建 | 名称 + 归属范围（个人/公共）+ 类型（四选一）+ 期初金额。归属人由后端强制为当前登录者，故表单**没有**归属人字段 |
+| 行内编辑 | 可改名称、类型、期初金额；归属范围**不可改**（个人 → 公共等于把私有数据公开给全账套），故编辑态不呈现该字段 |
+| 停用 / 启用 | 停用需二次确认（就地变为「确认停用 / 取消」），启用直接生效；按钮文案统一用「停用」而非「删除」，与后端软删除语义一致 |
+| 显示已停用 | 勾选框驱动列表请求的 `includeInactive`，勾选即重拉，无需手动刷新 |
+| 金额呈现 | `Intl.NumberFormat` 固定两位小数，右对齐 + `tabular-nums` 便于纵向比对 |
+
+设计约定：
+
+- **个人账户的「私有」由后端维持**：列表里看不到他人个人账户、直接构造请求改他人个人账户返回 404，都是后端判定的结果。本页**不做任何本地过滤**——前端的可见性只是体验层，篡改本地状态只会拿到一批 403 / 404。
+- **余额是派生值**：页面展示的余额来自后端的 `balance` 字段，当前等于期初金额（尚无流水表）。**不要在前端用期初金额渲染余额列**，否则流水表落地后页面会与后端脱节。
+- **序号列是行号不是 Id**：同用户管理页，取行下标 +1，停用账户后不会断号。
+- **未选账套时的 400 是预期行为**：后端对不带 `X-Account-Set-Id` 的请求返回 400「请先选择账套」，这正是页面在无账套时不发请求的原因。
 
 ## 用户设置 `/settings`
 

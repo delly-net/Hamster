@@ -1,0 +1,143 @@
+/**
+ * 账户状态。
+ *
+ * 账户归属且仅归属一个账套，列表按**当前账套**过滤：请求由 `api/http.ts` 自动附带
+ * `X-Account-Set-Id`，此处不做账套判断——切换账套后的重新拉取由页面 watch 当前账套负责。
+ *
+ * 可见性（谁能看见、谁能改）完全由后端判定：本 store 不做任何本地过滤，
+ * 篡改本地状态只会拿到一批 403 / 404。
+ */
+
+import { ref } from 'vue'
+import { defineStore } from 'pinia'
+import { request } from '@/api/http'
+
+/** 归属范围：个人账户仅归属人可用，公共账户账套内成员共用。 */
+export type AccountScope = 'Personal' | 'Public'
+
+/** 账户类型。 */
+export type AccountType = 'Ledger' | 'Fund' | 'Liability' | 'Contact'
+
+/** 归属范围的中文标签。 */
+export const ACCOUNT_SCOPE_LABELS: Record<AccountScope, string> = {
+  Personal: '个人',
+  Public: '公共',
+}
+
+/** 账户类型的中文标签。 */
+export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
+  Ledger: '账本账户',
+  Fund: '资金账户',
+  Liability: '负债账户',
+  Contact: '往来账户',
+}
+
+/** 归属范围下拉选项（顺序即界面呈现顺序）。 */
+export const ACCOUNT_SCOPE_OPTIONS: { value: AccountScope; label: string }[] = [
+  { value: 'Personal', label: ACCOUNT_SCOPE_LABELS.Personal },
+  { value: 'Public', label: ACCOUNT_SCOPE_LABELS.Public },
+]
+
+/** 账户类型下拉选项（顺序即界面呈现顺序）。 */
+export const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
+  { value: 'Ledger', label: ACCOUNT_TYPE_LABELS.Ledger },
+  { value: 'Fund', label: ACCOUNT_TYPE_LABELS.Fund },
+  { value: 'Liability', label: ACCOUNT_TYPE_LABELS.Liability },
+  { value: 'Contact', label: ACCOUNT_TYPE_LABELS.Contact },
+]
+
+/** 账户（后端不回传内部明细）。 */
+export interface Account {
+  id: number
+  accountSetId: number
+  name: string
+  scope: AccountScope
+  type: AccountType
+  /** 归属人主键；公共账户为 `null`。 */
+  ownerUserId: number | null
+  /** 归属人用户名；公共账户为 `null`。 */
+  ownerUsername: string | null
+  /** 期初金额。 */
+  initialBalance: number
+  /** 余额；**只读派生值**，当前等于期初金额（尚无流水表）。 */
+  balance: number
+  /** 是否启用；`false` 表示已停用（软删除）。 */
+  isActive: boolean
+  /** 创建时间（UTC，ISO 8601）。 */
+  createdAt: string
+}
+
+/** 新建账户的入参。 */
+export interface CreateAccountPayload {
+  name: string
+  scope: AccountScope
+  type: AccountType
+  initialBalance: number
+}
+
+/** 修改账户的入参；归属范围与归属人不可修改，故不在其中。 */
+export interface UpdateAccountPayload {
+  name: string
+  type: AccountType
+  initialBalance: number
+}
+
+/** 接口基址。 */
+const ACCOUNTS_PATH = '/api/accounts'
+
+export const useAccountsStore = defineStore('accounts', () => {
+  /** 当前账套内我可见的账户。 */
+  const accounts = ref<Account[]>([])
+  const loading = ref(false)
+
+  /**
+   * 拉取当前账套内我可见的账户。
+   *
+   * @param includeInactive 是否包含已停用的账户；默认只取启用的。
+   * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+   */
+  async function list(includeInactive = false): Promise<Account[]> {
+    loading.value = true
+    try {
+      const result = await request<Account[]>(
+        `${ACCOUNTS_PATH}?includeInactive=${includeInactive}`,
+      )
+      accounts.value = result
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /** 新建账户。个人账户的归属人由后端强制为当前登录者，请求体无需指定。 */
+  async function create(payload: CreateAccountPayload): Promise<void> {
+    await request<Account>(ACCOUNTS_PATH, { method: 'POST', body: payload })
+  }
+
+  /** 修改账户名称、类型与期初金额。 */
+  async function update(id: number, payload: UpdateAccountPayload): Promise<void> {
+    await request<void>(`${ACCOUNTS_PATH}/${id}`, { method: 'PUT', body: payload })
+  }
+
+  /** 启用或停用账户（停用即软删除，数据行保留）。 */
+  async function setActive(id: number, isActive: boolean): Promise<void> {
+    await request<void>(`${ACCOUNTS_PATH}/${id}/${isActive ? 'activate' : 'deactivate'}`, {
+      method: 'POST',
+    })
+  }
+
+  /** 清空列表（退出登录或账套失效时调用，避免残留上一账套的账户）。 */
+  function clear(): void {
+    accounts.value = []
+  }
+
+  return {
+    accounts,
+    loading,
+    list,
+    create,
+    update,
+    setActive,
+    clear,
+  }
+})

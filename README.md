@@ -174,10 +174,12 @@ validated per request against the user's links — it is deliberately **not** pa
 Putting it in the token would mean an administrator's change to a user's links only takes effect
 after the token expires (1 day); validating per request makes it apply to the very next request.
 
-Switching account sets does **not** yet scope business data: `sample_account` and the other
-business tables have no account-set column. The API provides the hook for it —
-`CurrentAccountSetExtensions.ResolveCurrentAccountSetAsync` resolves and authorises the account
-set from the header — so scoping can be added once the real domain model lands.
+`hamster_account` (see below) is the **first business table actually scoped by account set**;
+the sample table `sample_account` and the other tables still have no account-set column. New
+business tables should follow the same contract: add an `account_set_id` column and resolve the
+current account set through `CurrentAccountSetExtensions.ResolveCurrentAccountSetAsync` (which
+resolves and authorises it from the header), **rejecting the request when none resolves** —
+otherwise the endpoint degrades into "query the whole table".
 
 | Endpoint | Auth | Description |
 |---|---|---|
@@ -189,6 +191,58 @@ set from the header — so scoping can be added once the real domain model lands
 | `DELETE /api/admin/account-sets/{id}` | Admin | Delete, dropping its links (204) |
 | `GET /api/admin/account-sets/{id}/members` | Admin | Linked user ids |
 | `PUT /api/admin/account-sets/{id}/members` | Admin | **Replace** the linked-user set with `{ userIds }` (204) |
+
+##### Accounts
+
+An **account** is what money and debts hang off in the bookkeeping model. Every account belongs
+to exactly one account set: the list is filtered by the current account set, so switching account
+sets switches the set of accounts (`hamster_account` is the first business table actually scoped
+by account set).
+
+An account's scope decides who can see and use it; the backend evaluates that on every request:
+
+| Scope | Who can see and change it |
+|---|---|
+| Public | **Every member** of the account set — for accounts the household shares |
+| Personal | **Only its owner** (the owner is the creator and cannot be reassigned) |
+
+A system administrator is the sole exception: any existing account set is reachable (the header
+is still required), and every account in it — including other people's personal accounts — is
+visible and editable. Visibility and editability coincide here, so there is no read-only state.
+
+Four account types exist and users cannot extend them:
+
+| Type | Value | Meaning |
+|---|---|---|
+| Ledger | `Ledger` | A summary account for bookkeeping; holds no money itself |
+| Fund | `Fund` | Actual money (cash, bank cards, e-wallets) |
+| Liability | `Liability` | Money owed (credit cards, loans); the opening balance may be negative |
+| Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) |
+
+The **opening balance** is what the account already held when it was created (at most two decimal
+places). The **balance** is a **read-only derived value** equal to "opening balance + transaction
+totals" — there is no transaction table yet, so today it equals the opening balance. The database
+holds **no balance column**: the two would be identical while there are no transactions, and once
+transactions land a stale column would silently produce wrong totals.
+
+Accounts are never physically deleted, only deactivated and reactivated (soft delete): accounts
+are what transactions hang off, so deleting one would orphan historical rows. A deactivated
+account is hidden from the default list; `includeInactive=true` shows it and lets you reactivate.
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator) |
+| `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }`. A personal account's owner is forced to the caller |
+| `PUT /api/accounts/{id}` | Bearer | Rename / retype / change the opening balance (204); scope, owner and account set are immutable |
+| `POST /api/accounts/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
+| `POST /api/accounts/{id}/activate` | Bearer | Reactivate (204) |
+
+Failure contract: 400 without the account-set header (accounts always live inside one); 403 when
+the account set is unknown or not yours; **404** when the account does not exist, belongs to
+another account set, or is invisible to the caller (all three answer alike so the endpoint cannot
+be used to probe for other people's accounts); 409 when the name repeats within the same
+"account set + scope"; 400 for a numeric or unknown `scope` / `type`, since both travel as
+**strings**.
 
 ##### Upgrading an existing database
 

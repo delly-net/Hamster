@@ -20,6 +20,9 @@ public static class ApiPathConst
     /// <summary>账套端点路由分组前缀（任意已登录用户）。</summary>
     public const string ACCOUNT_SET_GROUP = "/api/account-sets";
 
+    /// <summary>账户端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
+    public const string ACCOUNT_GROUP = "/api/accounts";
+
     /// <summary>示例账户端点路由分组前缀。</summary>
     public const string SAMPLE_ACCOUNT_GROUP = "/api/sample/accounts";
 }

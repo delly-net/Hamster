@@ -33,9 +33,9 @@ public static class DatabaseInitializer
         try
         {
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
-            db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember>();
+            db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account",
                 options.DbTypeLabel);
 
             BackfillUserFlags(db, options.DbType, logger);

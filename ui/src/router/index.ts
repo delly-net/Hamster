@@ -27,6 +27,13 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/accounts',
+      name: 'accounts',
+      // 账户管理（新建/编辑/停用，归属当前账套），面向所有登录用户，故不设 requiresAdmin
+      component: () => import('../views/AccountView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       // 用户设置（修改密码 + 软件关于信息），面向所有登录用户，故不设 requiresAdmin

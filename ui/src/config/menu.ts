@@ -15,6 +15,8 @@ export interface MenuItem {
 
 export const menuItems: MenuItem[] = [
   { label: '首页', routeName: 'home' },
+  // 账户属于日常记账入口，面向所有登录用户，故不设 adminOnly
+  { label: '账户管理', routeName: 'accounts' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },
   { label: '用户管理', routeName: 'admin-users', adminOnly: true },
   { label: '账套管理', routeName: 'admin-account-sets', adminOnly: true },
