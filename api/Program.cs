@@ -16,6 +16,7 @@ builder.Services.AddSingleton<IUserService, UserService>();
 builder.Services.AddSingleton<IAccountSetService, AccountSetService>();
 builder.Services.AddSingleton<ITransactionService, TransactionService>();
 builder.Services.AddSingleton<IAccountService, AccountService>();
+builder.Services.AddSingleton<IEntryQueryService, EntryQueryService>();
 
 // 默认管理员播种与密码重置链接所需配置（均由环境变量优先）
 builder.Services.AddSingleton(AdminSeedOptions.From(builder.Configuration));

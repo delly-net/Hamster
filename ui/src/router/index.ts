@@ -34,6 +34,13 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/entries',
+      name: 'entries',
+      // 账目明细查询（按时间区间与账户筛选当前账套内的交易明细），面向所有登录用户，故不设 requiresAdmin
+      component: () => import('../views/EntryQueryView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       // 用户设置（修改密码 + 软件关于信息），面向所有登录用户，故不设 requiresAdmin

@@ -318,6 +318,54 @@ balance backfill** at startup: it is idempotent, an account that already has an 
 left alone, backfilled transactions carry no poster, and a failure only logs a warning rather than
 blocking startup.
 
+###### Entry query
+
+Entries are read back through one endpoint, which answers "what moved, when, on which account":
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/entries?from=&to=&accountIds=&page=&pageSize=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `page` defaults to 1 and `pageSize` to 50 (max **200**). Returns `{ items, total, page, pageSize }` |
+
+**One row is one entry, not one transaction.** A transaction consists of a debit and a credit; when
+both sides sit on accounts you selected, both appear as rows — that is what double-entry looks like
+on screen. `amount` is always **positive** and the direction travels in `direction` (`Debit` /
+`Credit`); this endpoint performs **no sign conversion** (`SumSignedAmountsAsync` remains the only
+place that does).
+
+Ordering is `occurred_at` ascending, then transaction id, then entry id. The third key is not
+decoration: without it, rows sharing a timestamp could swap places between requests and appear on
+two pages at once.
+
+**Visibility is not re-implemented here.** The visible account set comes from the existing
+`IAccountService.ListByAccountSetAsync(..., includeInactive: true, ...)` — the same single source the
+account list uses — and entries are filtered by it. `includeInactive: true` is mandatory: accounts
+are soft-deleted, so a deactivated account still carries history, and dropping it would make past
+entries vanish while the rows sit in the database. `IAccountService` and `ITransactionService` are
+**untouched** by this feature, so the opening-balance, balance-aggregation and backfill paths are
+unaffected.
+
+`accountIds` is **intersected** with the visible set rather than validated against it: ids you cannot
+see are silently dropped (no error, no rows), and an empty intersection returns an empty page. Were
+an invisible id to answer 403/404, the parameter would become a probe for other people's accounts.
+
+The counterparty is the entry with the opposite direction in the same transaction, and it travels as
+a **tiered** `counterpartyKind`:
+
+| `counterpartyKind` | Meaning | Carries |
+|---|---|---|
+| `Account` | Counterparty is visible to the caller | `counterpartyAccountId` + `counterpartyName` |
+| `Ledger` | Counterparty is the opening **ledger account** | Nothing — neither id nor name |
+| `Hidden` | Counterparty exists but is not visible to the caller | Nothing — neither id nor name |
+| `None` | No opposite-direction entry in the transaction | Nothing |
+
+Splitting `Ledger` out from `Hidden` is not a leak: the ledger account is the system's own account,
+exactly one per account set, its existence already documented here, and it never appears in any
+account list. Someone else's personal account, by contrast, gets not even an id.
+
+Failure contract: 400 without the account-set header ("请先选择账套"); the account set unknown or not
+yours → 403; caller not found → 401; a malformed `from` / `to`, `from` later than `to`, `page < 1`, or
+`pageSize` outside `1..200` → 400 as a field-level error.
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.

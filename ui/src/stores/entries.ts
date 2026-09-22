@@ -1,0 +1,178 @@
+/**
+ * 账目明细状态。
+ *
+ * 明细一律挂在账套下，请求由 `api/http.ts` 自动附带 `X-Account-Set-Id`，此处不做账套判断
+ * ——切换账套后的重新查询由页面 watch 当前账套负责（与 `stores/accounts.ts` 同构）。
+ *
+ * **本 store 不做任何可见性过滤**：后端只返回「挂在我可见账户上」的明细，前端过滤只会造出一道假防线。
+ * 账户多选的候选也直接来自 `GET /api/accounts?includeInactive=true`：账户是软删除，停用账户上仍有
+ * 历史明细，漏掉它会让过去的账凭空消失。**账本账户不在其中**——后端从不返回它。
+ *
+ * 行粒度是**一条复式明细**（借方或贷方），不是一笔交易：一笔交易涉及两个所选账户时呈现两行，
+ * 这正是复式记账的呈现方式。金额**恒为正**，增减由 `direction` 表达；本 store 不折算带符号金额
+ * ——「方向 → 符号」的唯一换算点是后端的 `TransactionService.SumSignedAmountsAsync`，
+ * 前端再算一次就是第二个语义源。
+ */
+
+import { ref } from 'vue'
+import { defineStore } from 'pinia'
+import { request } from '@/api/http'
+
+/** 借贷方向。 */
+export type EntryDirection = 'Debit' | 'Credit'
+
+/**
+ * 交易类型。
+ *
+ * 与后端枚举一一对应，当前只有期初余额一种（其余类型尚无写入路径，故不在契约里占位）。
+ */
+export type TransactionType = 'OpeningBalance'
+
+/**
+ * 对手方账户相对当前用户的可见性档位。
+ *
+ * 覆盖后端枚举的**全部**取值。`None` 表示同笔交易里找不到方向相反的明细——当前数据模型下每笔交易
+ * 恒有借贷两条，故它**不应出现**；保留它是因为后端确实会回传这个取值，类型里漏掉它会让下面那张
+ * 标签表在运行时落空（返回 `undefined` 渲染成空白），比多写一行更糟。
+ */
+export type CounterpartyKind = 'None' | 'Account' | 'Ledger' | 'Hidden'
+
+/** 借贷方向的中文标签。 */
+export const ENTRY_DIRECTION_LABELS: Record<EntryDirection, string> = {
+  Debit: '借',
+  Credit: '贷',
+}
+
+/**
+ * 交易类型的中文标签。
+ *
+ * 取值使用处一律经 {@link transactionTypeLabel} 兜底：后端新增类型而前端尚未同步时，
+ * 界面显示原字符串而不是空白，问题当场可见且不至于丢信息。
+ */
+export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
+  OpeningBalance: '期初余额',
+}
+
+/**
+ * 对手方档位的中文占位文案。
+ *
+ * `Account` 档的文案是空串：该档对手方对当前用户可见，直接呈现 `counterpartyName`，
+ * 不需要占位（见 `EntryQueryView.vue` 的 `counterpartyText`）。
+ * `Ledger` 显示「期初」而非「账本账户」——账本账户对任何人不呈现，它当前只作为期初入账的
+ * 复式对手方存在，用户在明细里看到它时想问的是「这笔钱从哪来」，答案就是「期初」。
+ * `Hidden` 与 `None` 同为「—」：前者是权限的结论（存在但不可见），后者是数据的问题（没有对手方），
+ * 两者都不该给用户任何可辨识信息。
+ */
+export const COUNTERPARTY_KIND_LABELS: Record<CounterpartyKind, string> = {
+  Account: '',
+  Ledger: '期初',
+  Hidden: '—',
+  None: '—',
+}
+
+/** 默认每页条数，与后端 `EntryEndpoints.DEFAULT_PAGE_SIZE` 保持一致。 */
+export const ENTRY_PAGE_SIZE = 50
+
+/** 一条账目明细（一行 = 一个借贷方向）。 */
+export interface Entry {
+  id: number
+  /** 所属交易主键；同笔交易的两条明细共享它。 */
+  transactionId: number
+  /** 业务发生时间（UTC，ISO 8601）；可补记往日支出，故与落库时间无关。 */
+  occurredAt: string
+  /** 交易摘要。 */
+  summary: string
+  /** 交易备注；无备注时为 `null`。 */
+  remark: string | null
+  /** 交易类型。 */
+  transactionType: TransactionType
+  /** 挂靠账户主键（必然是当前用户可见的账户）。 */
+  accountId: number
+  /** 挂靠账户名称。 */
+  accountName: string
+  /** 借贷方向。 */
+  direction: EntryDirection
+  /** 金额，**恒为正**；增减由 `direction` 表达。 */
+  amount: number
+  /** 对手方账户的可见性档位。 */
+  counterpartyKind: CounterpartyKind
+  /** 对手方账户主键；**仅 `Account` 档有值**。 */
+  counterpartyAccountId: number | null
+  /** 对手方账户名称；**仅 `Account` 档有值**。 */
+  counterpartyName: string | null
+}
+
+/** 查询条件；`from` / `to` 均为 **ISO 8601 UTC** 且为闭区间端点。 */
+export interface EntryQueryParams {
+  from?: string
+  to?: string
+  /** 目标账户主键；省略即全部可见账户。不可见的账户会被后端静默剔除（不报错）。 */
+  accountIds?: number[]
+  page?: number
+  pageSize?: number
+}
+
+/** 一页明细。 */
+export interface EntryQueryPage {
+  items: Entry[]
+  /** 满足条件的明细总数（跨页），用于呈现总条数与总页数。 */
+  total: number
+  page: number
+  pageSize: number
+}
+
+/** 接口基址。 */
+const ENTRIES_PATH = '/api/entries'
+
+/** 取交易类型的中文标签；未知取值回退原字符串。 */
+export function transactionTypeLabel(type: TransactionType): string {
+  return TRANSACTION_TYPE_LABELS[type] ?? String(type)
+}
+
+export const useEntriesStore = defineStore('entries', () => {
+  /** 最近一次查询结果；`null` 表示尚未查过。 */
+  const page = ref<EntryQueryPage | null>(null)
+  const loading = ref(false)
+
+  /**
+   * 查询账目明细。
+   *
+   * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+   */
+  async function query(params: EntryQueryParams): Promise<EntryQueryPage> {
+    // accountIds 以**重复键**逐个 append（后端绑定为 int[]），不能拼成逗号串
+    const search = new URLSearchParams()
+    if (params.from !== undefined) {
+      search.set('from', params.from)
+    }
+    if (params.to !== undefined) {
+      search.set('to', params.to)
+    }
+    for (const accountId of params.accountIds ?? []) {
+      search.append('accountIds', String(accountId))
+    }
+    search.set('page', String(params.page ?? 1))
+    search.set('pageSize', String(params.pageSize ?? ENTRY_PAGE_SIZE))
+
+    loading.value = true
+    try {
+      const result = await request<EntryQueryPage>(`${ENTRIES_PATH}?${search.toString()}`)
+      page.value = result
+      return result
+    } finally {
+      loading.value = false
+    }
+  }
+
+  /** 清空结果（退出登录、账套切换时调用，避免残留上一账套的明细）。 */
+  function clear(): void {
+    page.value = null
+  }
+
+  return {
+    page,
+    loading,
+    query,
+    clear,
+  }
+})
