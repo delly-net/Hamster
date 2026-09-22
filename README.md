@@ -212,12 +212,21 @@ visible and editable. Visibility and editability coincide here, so there is no r
 
 Four account types exist and users cannot extend them:
 
-| Type | Value | Meaning |
-|---|---|---|
-| Ledger | `Ledger` | A summary account for bookkeeping; holds no money itself |
-| Fund | `Fund` | Actual money (cash, bank cards, e-wallets) |
-| Liability | `Liability` | Money owed (credit cards, loans); the opening balance may be negative |
-| Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) |
+| Type | Value | Meaning | User-selectable |
+|---|---|---|---|
+| Ledger | `Ledger` | A summary account for bookkeeping; holds no money itself | **No** — the system creates it, and it never appears in an account list |
+| Fund | `Fund` | Actual money (cash, bank cards, e-wallets) | Yes |
+| Liability | `Liability` | Money owed (credit cards, loans); the opening balance may be negative | Yes |
+| Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) | Yes |
+
+The **ledger account is a purely internal system account**: it exists only as the double-entry
+counterparty of opening balances. It **cannot be created or assigned by hand** (`POST` / `PUT`
+with `type: "Ledger"` always answers 400) and it **appears in no account list** — an
+administrator's list excludes it too. There is no exception and no toggle, so there is exactly
+one visibility rule. It still counts toward balances and takes part in double-entry balancing;
+only its presentation is hidden. Which types a user may assign is decided in exactly one place —
+`AccountTypeExtensions.IsUserAssignable` — and the endpoint's validation and error text derive
+from it.
 
 The **opening balance** is what the account already held when it was created (at most two decimal
 places). It is written as an opening transaction at creation time (see the next section) and is
@@ -230,16 +239,18 @@ Accounts are never physically deleted, only deactivated and reactivated (soft de
 are what transactions hang off, so deleting one would orphan historical rows. A deactivated
 account is hidden from the default list; `includeInactive=true` shows it and lets you reactivate.
 
-`isSystem` marks accounts the system created for itself (today, the opening ledger account). They
-sit in the same list as ordinary accounts, but can never be created by a user, and **never lose
-their system identity by being renamed or retyped** — the identity lives on a marker column rather
-than being reverse-engineered from a name or type.
+`isSystem` marks accounts the system created for itself (today, the opening ledger account). It
+**cannot be created by a user and never appears in an account list** (the list filters on the
+`Ledger` type — see the table above; "not creatable by hand" and "not listed" close the loop on
+each other). The marker itself only serves "reuse the same row when creating on demand", so the
+account **never loses its system identity by being renamed or retyped** — the identity lives on a
+marker column rather than being reverse-engineered from a name or type.
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator); `balance` is the derived figure |
-| `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }`. A personal account's owner is forced to the caller. A non-zero opening balance also posts an opening transaction |
-| `PUT /api/accounts/{id}` | Bearer | Rename / retype (204); scope, owner, account set and the **opening balance** are all immutable |
+| `GET /api/accounts?includeInactive=false` | Bearer | Accounts you can see in the current account set (all of them for an administrator); `balance` is the derived figure. **Never includes the ledger account** |
+| `POST /api/accounts` | Bearer | Create (201); body `{ name, scope, type, initialBalance }` where `type` is `Fund` / `Liability` / `Contact`. A personal account's owner is forced to the caller. A non-zero opening balance also posts an opening transaction |
+| `PUT /api/accounts/{id}` | Bearer | Rename / retype (204), `type` again excluding `Ledger`; scope, owner, account set and the **opening balance** are all immutable |
 | `POST /api/accounts/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
 | `POST /api/accounts/{id}/activate` | Bearer | Reactivate (204) |
 
@@ -289,8 +300,9 @@ Opening balance of 500 on "Cash":
 
 The **opening ledger account** (named "期初账本", type `Ledger`, public, `isSystem = true`) is the
 counterparty. The system **creates it on demand**: once per account set, reused thereafter, and
-**an account set always has exactly one**. An account with an opening balance of 0 **posts
-nothing** (its entry sum is 0, matching the opening balance). A negative opening balance (a
+**an account set always has exactly one**. It **never appears in an account list**, and it cannot
+be created or retyped by hand (see the type table under "Accounts"). An account with an opening
+balance of 0 **posts nothing** (its entry sum is 0, matching the opening balance). A negative opening balance (a
 liability) flips the direction automatically — the target account takes the credit (balance
 decreases) and the ledger account takes the debit.
 

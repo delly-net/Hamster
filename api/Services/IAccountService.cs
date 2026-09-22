@@ -14,6 +14,11 @@ namespace Hamster.Api.Services;
 /// </list>
 /// 因此无需再区分「只读」态——两套判定并行只会漂移出「能看见却改不了」，
 /// 甚至更糟的「看不见却能改」。
+/// <para>
+/// **账本账户（<see cref="AccountType.Ledger"/>）在上述两档之外，对任何人不呈现也不可改**：
+/// 它由系统在期初入账时按需自动创建，只作复式配平的对手方，用户既不需要也不应操作它。
+/// 过滤同时落在列表与单条查询上，故拿它的主键直接调改/停用端点同样会得到 404。
+/// </para>
 /// </remarks>
 public interface IAccountService
 {
@@ -25,7 +30,7 @@ public interface IAccountService
     /// <param name="isAdmin">是否为系统管理员；管理员可见该账套内全部账户。</param>
     /// <param name="includeInactive">是否包含已停用的账户；<c>false</c> 时只返回启用的（默认视图）。</param>
     /// <param name="cancellationToken">取消令牌。</param>
-    /// <returns>可见的账户及归属人用户名列表。</returns>
+    /// <returns>可见的账户及归属人用户名列表，**不含账本账户**（无论 <paramref name="isAdmin"/> 取值）。</returns>
     Task<IReadOnlyList<AccountWithOwner>> ListByAccountSetAsync(
         int accountSetId,
         int userId,
@@ -42,8 +47,8 @@ public interface IAccountService
     /// <param name="isAdmin">是否为系统管理员。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
-    /// 可见时返回账户实体；账户不存在、不属于该账套或对当前用户不可见时一律返回 <c>null</c>
-    /// （三种情形同响应，避免被用于探测他人账户是否存在）。
+    /// 可见时返回账户实体；账户不存在、不属于该账套、对当前用户不可见，或**是账本账户**时一律返回 <c>null</c>
+    /// （几种情形同响应，避免被用于探测他人账户是否存在，也不泄露账本账户的存在）。
     /// </returns>
     Task<Account?> FindVisibleAsync(
         int id,
@@ -88,6 +93,11 @@ public interface IAccountService
     /// **期初金额会同时落成一笔期初交易**：账户与「借（或贷）目标账户、贷（或借）账本账户」的
     /// 两条明细在同一事务内写入（见 <see cref="ITransactionService.RecordOpeningBalanceAsync"/>），
     /// 账本账户不存在时按需自动创建。期初金额为 0 时只建账户、不写分录。
+    /// <para>
+    /// **前置条件**：<paramref name="type"/> 必须可由用户指定
+    /// （见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。本方法不做二次校验——
+    /// 「账本账户不接受手工建立」在端点层拦下并给出 400 字段错误，本层不再重复一遍。
+    /// </para>
     /// </remarks>
     Task<Account> CreateAsync(
         int accountSetId,
@@ -113,6 +123,11 @@ public interface IAccountService
     /// **期初金额不在此方法的参数中，因为它已不可修改**：期初余额一经创建即是一笔落库的期初交易
     /// （借贷两条明细），改它就必须同步改写那笔交易，而期初是既成事实而非可随意改写的设置项。
     /// 需要调整余额时应记一笔「余额调整交易」，而不是回头改期初——后者会让已经发生的账变得不可信。
+    /// <para>
+    /// **前置条件**：<paramref name="type"/> 必须可由用户指定
+    /// （见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。只挡新建是不够的——
+    /// 把既有账户改成账本账户同样是「手工建立账本账户」，端点两条路径共用同一校验。
+    /// </para>
     /// </remarks>
     Task<bool> UpdateAsync(
         Account account,

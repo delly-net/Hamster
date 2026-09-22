@@ -29,6 +29,17 @@ public sealed class AccountEndpoints : IEndpoint
     /// <summary>期初金额绝对值上限，防止超出 decimal(18,2) 的表示范围。</summary>
     private const decimal BALANCE_ABS_LIMIT = 999_999_999_999.99M;
 
+    /// <summary>
+    /// 可由用户指定的账户类型文本，用于错误提示。
+    /// 由枚举派生而非手写：新增类型时提示自动跟上，不会出现「代码放行、文案说不能」这类两处漂移。
+    /// </summary>
+    private static readonly string ASSIGNABLE_TYPE_HINT =
+        string.Join(" / ", Enum.GetValues<AccountType>().Where(type => type.IsUserAssignable()));
+
+    /// <summary>账户类型校验失败时的字段错误。文案统一在这里写一次，新建与修改两条路径共用。</summary>
+    private static readonly string[] TYPE_ERROR =
+        [$"账户类型只能是 {ASSIGNABLE_TYPE_HINT}（账本账户由系统自动创建，不接受手工指定）"];
+
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
     {
@@ -81,6 +92,8 @@ public sealed class AccountEndpoints : IEndpoint
             .WithDescription(
                 "返回当前账套内当前用户可见的账户，按主键升序。管理员可见账套内全部账户（含他人个人账户）；" +
                 "普通用户只见公共账户与自己创建的个人账户。默认只返回启用的账户，includeInactive=true 时含已停用的。" +
+                "**账本账户（Ledger）对任何人不呈现**（管理员同样看不到）：它由系统在期初入账时自动创建，" +
+                "只作复式配平的对手方，界面呈现它只会多出一个无法理解也无法操作的汇总项。" +
                 "balance 为派生值（该账户全部交易明细的有符号汇总），不是数据库中的列。");
 
         group.MapPost("", async (
@@ -109,9 +122,9 @@ public sealed class AccountEndpoints : IEndpoint
                     errors["scope"] = ["归属范围只能是 Personal（个人）或 Public（公共）"];
                 }
 
-                if (!TryParseByName(request.Type, out AccountType type))
+                if (!TryResolveType(request.Type, out var type))
                 {
-                    errors["type"] = ["账户类型只能是 Ledger / Fund / Liability / Contact"];
+                    errors["type"] = TYPE_ERROR;
                 }
 
                 ValidateBalance(request.InitialBalance, errors);
@@ -157,6 +170,7 @@ public sealed class AccountEndpoints : IEndpoint
             .WithDescription(
                 "在当前账套内新建账户。个人账户的归属人强制为当前登录者（请求体无需也无法指定归属人）；" +
                 "名称在「账套 + 归属范围」内不区分大小写唯一，重复返回 409。" +
+                $"账户类型只能是 {ASSIGNABLE_TYPE_HINT}：账本账户由系统自动创建，不接受手工指定。" +
                 "期初金额会同时落成一笔期初交易（借/贷各一条明细），对手方为该账套的期初账本账户——" +
                 "不存在时自动创建；期初金额为 0 时不写分录。");
 
@@ -181,9 +195,9 @@ public sealed class AccountEndpoints : IEndpoint
                 var errors = new Dictionary<string, string[]>();
                 ValidateName(request.Name, errors);
 
-                if (!TryParseByName(request.Type, out AccountType type))
+                if (!TryResolveType(request.Type, out var type))
                 {
-                    errors["type"] = ["账户类型只能是 Ledger / Fund / Liability / Contact"];
+                    errors["type"] = TYPE_ERROR;
                 }
 
                 if (errors.Count > 0)
@@ -216,6 +230,8 @@ public sealed class AccountEndpoints : IEndpoint
             .WithDescription(
                 "修改账户名称与类型。归属范围、归属人与所属账套一经创建不可修改" +
                 "（个人 → 公共等于把私有数据公开给全账套，故不提供该能力）。" +
+                $"账户类型只能是 {ASSIGNABLE_TYPE_HINT}——改成账本账户同样被拒，" +
+                "否则「不允许手工建立账本账户」可经「先建资金账户再改类型」绕过。" +
                 "**期初金额同样不可修改**：它已落成一笔期初交易，调整余额应记一笔余额调整交易，" +
                 "而非改写既成的期初。");
 
@@ -379,6 +395,18 @@ public sealed class AccountEndpoints : IEndpoint
         }
     }
 
+    /// <summary>按**名称**解析账户类型，并确认该类型可由用户指定。</summary>
+    /// <param name="raw">原始类型文本。</param>
+    /// <param name="type">解析结果。</param>
+    /// <returns>解析成功且类型可由用户指定时返回 <c>true</c>。</returns>
+    /// <remarks>
+    /// 校验两件事：文本必须是枚举名（见 <see cref="TryParseByName{TEnum}"/>），
+    /// 且该类型必须可由用户指定（见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。
+    /// 新建与修改两条路径共用本方法——只挡新建是不够的，把既有账户的类型改成账本账户同样能绕过限制。
+    /// </remarks>
+    private static bool TryResolveType(string? raw, out AccountType type) =>
+        TryParseByName(raw, out type) && type.IsUserAssignable();
+
     /// <summary>按**名称**解析枚举，大小写不敏感。</summary>
     /// <typeparam name="TEnum">目标枚举类型。</typeparam>
     /// <param name="raw">原始字符串。</param>
@@ -416,13 +444,18 @@ public sealed class AccountEndpoints : IEndpoint
 /// <summary>新建账户请求体。</summary>
 /// <param name="Name">账户名称。</param>
 /// <param name="Scope">归属范围：<c>Personal</c>（个人，仅本人可用）或 <c>Public</c>（公共）。</param>
-/// <param name="Type">账户类型：<c>Ledger</c> / <c>Fund</c> / <c>Liability</c> / <c>Contact</c>。</param>
+/// <param name="Type">
+/// 账户类型：<c>Fund</c> / <c>Liability</c> / <c>Contact</c>。
+/// **不含 <c>Ledger</c>**：账本账户由系统自动创建，传它会被拒绝（见 <c>AccountTypeExtensions.IsUserAssignable</c>）。
+/// </param>
 /// <param name="InitialBalance">期初金额，两位小数以内，负债账户可为负。</param>
 public sealed record AccountRequest(string? Name, string? Scope, string? Type, decimal InitialBalance);
 
 /// <summary>修改账户请求体。</summary>
 /// <param name="Name">账户名称。</param>
-/// <param name="Type">账户类型。</param>
+/// <param name="Type">
+/// 账户类型：<c>Fund</c> / <c>Liability</c> / <c>Contact</c>，与新建请求同一口径。
+/// </param>
 /// <remarks>
 /// 刻意不含归属范围与归属人：两者一经创建不可修改。
 /// 也刻意不含期初金额：它已落成一笔期初交易，改写它等于篡改既成事实（见更新端点的说明）。
@@ -434,7 +467,10 @@ public sealed record AccountUpdateRequest(string? Name, string? Type);
 /// <param name="AccountSetId">所属账套主键。</param>
 /// <param name="Name">账户名称。</param>
 /// <param name="Scope">归属范围，取值 <c>Personal</c> / <c>Public</c>。</param>
-/// <param name="Type">账户类型，取值 <c>Ledger</c> / <c>Fund</c> / <c>Liability</c> / <c>Contact</c>。</param>
+/// <param name="Type">
+/// 账户类型，取值 <c>Fund</c> / <c>Liability</c> / <c>Contact</c>。
+/// <c>Ledger</c> 是合法枚举值但**不会出现在本端点的返回中**——账本账户对任何人不呈现。
+/// </param>
 /// <param name="OwnerUserId">归属人主键；公共账户为 <c>null</c>。</param>
 /// <param name="OwnerUsername">归属人用户名；公共账户为 <c>null</c>。</param>
 /// <param name="InitialBalance">期初金额。创建后不可修改。</param>

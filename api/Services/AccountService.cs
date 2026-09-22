@@ -22,6 +22,11 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
     {
         var accounts = await db.Queryable<Account>()
             .Where(account => account.AccountSetId == accountSetId)
+            // 账本账户对任何人不呈现（管理员同样不可见）：它由系统按需创建、只作期初入账的复式对手方，
+            // 界面呈现它只会让用户看到一个无法理解也无法操作的汇总项。
+            // 这里写枚举字面量而非 AccountTypeExtensions.IsUserAssignable：SqlSugar 的表达式树翻译不了扩展方法。
+            // 事务侧（期初入账 / 回填）直连 ISqlSugarClient，不经本服务，故不受这条过滤影响。
+            .Where(account => account.Type != AccountType.Ledger)
             // 可见性条件在此处只写一次；单条查询（FindVisibleAsync）复用同一表达式，避免两处漂移
             .WhereIF(!isAdmin, account => account.Scope == AccountScope.Public || account.OwnerUserId == userId)
             .WhereIF(!includeInactive, account => account.IsActive)
@@ -46,6 +51,7 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
         var matched = await db.Queryable<Account>()
             .Where(account => account.Id == id && account.AccountSetId == accountSetId)
             // 与列表同一可见性条件：杜绝「列表过滤了、单条没过」的越权缺口
+            .Where(account => account.Type != AccountType.Ledger)
             .WhereIF(!isAdmin, account => account.Scope == AccountScope.Public || account.OwnerUserId == userId)
             .Take(1)
             .ToListAsync(cancellationToken);

@@ -24,7 +24,12 @@ export const ACCOUNT_SCOPE_LABELS: Record<AccountScope, string> = {
   Public: '公共',
 }
 
-/** 账户类型的中文标签。 */
+/**
+ * 账户类型的中文标签。
+ *
+ * 覆盖后端枚举的**全部**取值（是枚举的完整镜像），其中 `Ledger` 不会出现在任何接口返回里：
+ * 账本账户由系统在期初入账时自动创建，对任何人不呈现。保留它只为让本表与枚举一一对应。
+ */
 export const ACCOUNT_TYPE_LABELS: Record<AccountType, string> = {
   Ledger: '账本账户',
   Fund: '资金账户',
@@ -38,9 +43,15 @@ export const ACCOUNT_SCOPE_OPTIONS: { value: AccountScope; label: string }[] = [
   { value: 'Public', label: ACCOUNT_SCOPE_LABELS.Public },
 ]
 
-/** 账户类型下拉选项（顺序即界面呈现顺序）。 */
+/**
+ * 账户类型下拉选项（顺序即界面呈现顺序）。
+ *
+ * **刻意不含 `Ledger`**：新建与行内编辑两个下拉共用本数组，一处收敛即两处生效。
+ * 与 `AccountType` 联合类型 / `ACCOUNT_TYPE_LABELS` 的分工是——那两者描述「接口可能回传什么」
+ * （后端枚举的忠实镜像），本数组描述「用户可手工选什么」，故这里少一项不是遗漏。
+ * 后端同样会拒绝 `Ledger`（见 `AccountTypeExtensions.IsUserAssignable`），此处少一项只是不让用户白试一次。
+ */
 export const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
-  { value: 'Ledger', label: ACCOUNT_TYPE_LABELS.Ledger },
   { value: 'Fund', label: ACCOUNT_TYPE_LABELS.Fund },
   { value: 'Liability', label: ACCOUNT_TYPE_LABELS.Liability },
   { value: 'Contact', label: ACCOUNT_TYPE_LABELS.Contact },
@@ -52,6 +63,7 @@ export interface Account {
   accountSetId: number
   name: string
   scope: AccountScope
+  /** 账户类型；接口**不会回传 `Ledger`**——账本账户由系统创建、对任何人不呈现。 */
   type: AccountType
   /** 归属人主键；公共账户为 `null`。 */
   ownerUserId: number | null
