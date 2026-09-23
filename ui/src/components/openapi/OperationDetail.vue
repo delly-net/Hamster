@@ -3,7 +3,12 @@
 import { computed, ref, watch } from 'vue'
 import { invokeOperation } from '@/api/openapi/client'
 import { buildSampleValue, resolveSchema, schemaTypeLabel, toJsonText } from '@/api/openapi/schema'
-import type { InvokeResult, OpenApiDocument, OpenApiParameter, OperationEntry } from '@/api/openapi/types'
+import type {
+  InvokeResult,
+  OpenApiDocument,
+  OpenApiParameter,
+  OperationEntry,
+} from '@/api/openapi/types'
 
 const props = defineProps<{
   doc: OpenApiDocument | null
@@ -58,7 +63,10 @@ const sampleBodyText = computed(() => {
     return ''
   }
 
-  const schema = resolveSchema(props.doc, props.entry.operation.requestBody?.content?.[contentType]?.schema)
+  const schema = resolveSchema(
+    props.doc,
+    props.entry.operation.requestBody?.content?.[contentType]?.schema,
+  )
   return toJsonText(buildSampleValue(props.doc, schema))
 })
 
@@ -100,8 +108,10 @@ const statusClass = computed(() => {
 })
 
 /** 路径参数全填齐才允许发送。 */
-const canSend = computed(
-  () => pathParams.value.filter((item) => item.required).every((item) => pathValues.value[item.name] !== ''),
+const canSend = computed(() =>
+  pathParams.value
+    .filter((item) => item.required)
+    .every((item) => pathValues.value[item.name] !== ''),
 )
 
 async function send() {
@@ -141,12 +151,18 @@ async function copyResponse() {
   <section class="detail">
     <header class="head">
       <div class="head-line">
-        <span class="method" :class="`method-${entry.method}`">{{ entry.method.toUpperCase() }}</span>
+        <span class="method" :class="`method-${entry.method}`">{{
+          entry.method.toUpperCase()
+        }}</span>
         <code class="path">{{ entry.path }}</code>
       </div>
       <h2 v-if="entry.operation.summary" class="summary">{{ entry.operation.summary }}</h2>
-      <p v-if="entry.operation.description" class="description">{{ entry.operation.description }}</p>
-      <p v-if="entry.operation.operationId" class="operation-id">operationId：{{ entry.operation.operationId }}</p>
+      <p v-if="entry.operation.description" class="description">
+        {{ entry.operation.description }}
+      </p>
+      <p v-if="entry.operation.operationId" class="operation-id">
+        operationId：{{ entry.operation.operationId }}
+      </p>
     </header>
 
     <!-- 路径参数 -->
@@ -158,7 +174,12 @@ async function copyResponse() {
           <span v-if="param.required" class="required">*</span>
           <span class="type">{{ schemaTypeLabel(doc, resolveSchema(doc, param.schema)) }}</span>
         </label>
-        <input :id="`path-${param.name}`" v-model="pathValues[param.name]" type="text" :placeholder="param.description" />
+        <input
+          :id="`path-${param.name}`"
+          v-model="pathValues[param.name]"
+          type="text"
+          :placeholder="param.description"
+        />
       </div>
     </section>
 
@@ -171,7 +192,12 @@ async function copyResponse() {
           <span v-if="param.required" class="required">*</span>
           <span class="type">{{ schemaTypeLabel(doc, resolveSchema(doc, param.schema)) }}</span>
         </label>
-        <input :id="`query-${param.name}`" v-model="queryValues[param.name]" type="text" :placeholder="param.description" />
+        <input
+          :id="`query-${param.name}`"
+          v-model="queryValues[param.name]"
+          type="text"
+          :placeholder="param.description"
+        />
       </div>
     </section>
 
@@ -184,7 +210,12 @@ async function copyResponse() {
           <span v-if="param.required" class="required">*</span>
           <span class="type">{{ schemaTypeLabel(doc, resolveSchema(doc, param.schema)) }}</span>
         </label>
-        <input :id="`header-${param.name}`" v-model="headerValues[param.name]" type="text" :placeholder="param.description" />
+        <input
+          :id="`header-${param.name}`"
+          v-model="headerValues[param.name]"
+          type="text"
+          :placeholder="param.description"
+        />
       </div>
     </section>
 
@@ -193,7 +224,9 @@ async function copyResponse() {
       <h3 class="block-title">
         请求体
         <span class="type">{{ jsonContentType }}</span>
-        <button type="button" class="text-button" @click="bodyText = sampleBodyText">重置为示例</button>
+        <button type="button" class="text-button" @click="bodyText = sampleBodyText">
+          重置为示例
+        </button>
       </h3>
       <textarea v-model="bodyText" class="body-editor" rows="10" spellcheck="false"></textarea>
     </section>

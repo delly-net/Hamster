@@ -48,7 +48,9 @@ export async function fetchOpenApiDocument(): Promise<OpenApiDocument> {
     }
 
     if (!response.ok) {
-      throw new Error(`拉取接口文档失败：${url} 返回 HTTP ${response.status} ${response.statusText}`)
+      throw new Error(
+        `拉取接口文档失败：${url} 返回 HTTP ${response.status} ${response.statusText}`,
+      )
     }
 
     return (await response.json()) as OpenApiDocument
@@ -57,7 +59,10 @@ export async function fetchOpenApiDocument(): Promise<OpenApiDocument> {
       throw new Error(`拉取接口文档超时（${timeoutMs}ms）：${url}`)
     }
 
-    if (error instanceof Error && (error.message.startsWith('拉取接口文档失败') || error.message === DOC_UNAVAILABLE_MESSAGE)) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('拉取接口文档失败') || error.message === DOC_UNAVAILABLE_MESSAGE)
+    ) {
       throw error
     }
 

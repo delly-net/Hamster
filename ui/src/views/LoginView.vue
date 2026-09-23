@@ -172,9 +172,7 @@ async function submit(): Promise<void> {
       <button type="submit" class="submit" :disabled="submitting">{{ submitLabel }}</button>
     </form>
 
-    <p class="hint">
-      登录令牌有效期 1 天，保存在浏览器本地；令牌失效后需重新登录。
-    </p>
+    <p class="hint">登录令牌有效期 1 天，保存在浏览器本地；令牌失效后需重新登录。</p>
   </main>
 </template>
 

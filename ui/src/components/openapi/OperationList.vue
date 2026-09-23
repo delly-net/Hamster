@@ -44,7 +44,12 @@ const groups = computed(() => {
 
 <template>
   <aside class="operation-list">
-    <input v-model="keyword" class="search" type="search" placeholder="搜索路径 / 摘要 / operationId" />
+    <input
+      v-model="keyword"
+      class="search"
+      type="search"
+      placeholder="搜索路径 / 摘要 / operationId"
+    />
 
     <p v-if="groups.length === 0" class="empty">没有匹配的接口</p>
 
@@ -59,7 +64,9 @@ const groups = computed(() => {
         :class="{ active: entry.key === selectedKey }"
         @click="emit('select', entry)"
       >
-        <span class="method" :class="`method-${entry.method}`">{{ entry.method.toUpperCase() }}</span>
+        <span class="method" :class="`method-${entry.method}`">{{
+          entry.method.toUpperCase()
+        }}</span>
         <span class="item-body">
           <span class="path">{{ entry.path }}</span>
           <span v-if="entry.operation.summary" class="summary">{{ entry.operation.summary }}</span>

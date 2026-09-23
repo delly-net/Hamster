@@ -254,9 +254,18 @@ onMounted(load)
 
       <div class="members-actions">
         <button type="button" class="submit" :disabled="pendingId !== null" @click="saveMembers">
-          {{ pendingId === membersTarget.id ? '保存中…' : `保存关联（已选 ${checkedUserIds.length} 个）` }}
+          {{
+            pendingId === membersTarget.id
+              ? '保存中…'
+              : `保存关联（已选 ${checkedUserIds.length} 个）`
+          }}
         </button>
-        <button type="button" class="ghost" :disabled="pendingId !== null" @click="membersId = null">
+        <button
+          type="button"
+          class="ghost"
+          :disabled="pendingId !== null"
+          @click="membersId = null"
+        >
           关闭
         </button>
       </div>

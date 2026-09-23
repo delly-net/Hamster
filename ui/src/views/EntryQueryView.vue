@@ -476,12 +476,7 @@ onMounted(() => {
 
         <div class="filter-actions">
           <!-- 查询是页面的主操作：条件改动后需用户点它才生效，避免边改边查 -->
-          <button
-            type="button"
-            class="submit"
-            :disabled="entriesStore.loading"
-            @click="search"
-          >
+          <button type="button" class="submit" :disabled="entriesStore.loading" @click="search">
             {{ entriesStore.loading ? '查询中…' : '查询' }}
           </button>
           <button
@@ -528,13 +523,12 @@ onMounted(() => {
             <!-- 已停用账户照常可选：历史明细仍挂在它上面，且其明细只会出现在它被选中时 -->
             <span v-if="!account.isActive" class="badge badge-inactive">已停用</span>
           </label>
-          <p v-if="accountOptions.length === 0" class="picker-empty">
-            当前账套内没有可选的账户。
-          </p>
+          <p v-if="accountOptions.length === 0" class="picker-empty">当前账套内没有可选的账户。</p>
         </div>
 
         <p class="picker-hint">
-          日期区间为闭区间（含起止当天），默认本月 1 日至今天。账本账户为系统内部账户，不在筛选列表中。
+          日期区间为闭区间（含起止当天），默认本月 1
+          日至今天。账本账户为系统内部账户，不在筛选列表中。
         </p>
       </section>
 

@@ -65,8 +65,7 @@
   --gradient-page: linear-gradient(160deg, #fffbf4 0%, #fdeedc 55%, #fbe3c8 100%);
   --radius-card: 18px;
   --radius-control: 10px;
-  --shadow-card:
-    0 18px 40px -22px rgba(90, 58, 34, 0.4), 0 2px 6px rgba(90, 58, 34, 0.06);
+  --shadow-card: 0 18px 40px -22px rgba(90, 58, 34, 0.4), 0 2px 6px rgba(90, 58, 34, 0.06);
   --shadow-control: 0 1px 2px rgba(90, 58, 34, 0.08);
 
   --section-gap: 160px;
@@ -103,8 +102,7 @@
 
     /* 渐变页底必须在此重新声明，否则暗色下会残留亮色奶油渐变 */
     --gradient-page: linear-gradient(160deg, #241b15 0%, #2a1f17 55%, #33251a 100%);
-    --shadow-card:
-      0 18px 40px -22px rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.3);
+    --shadow-card: 0 18px 40px -22px rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.3);
     --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.35);
   }
 }

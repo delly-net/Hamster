@@ -26,9 +26,7 @@ const isBlankLayout = computed(() => route.meta.layout === 'blank')
 const sidebarOpen = ref(false)
 
 /** 按权限过滤后的菜单项：非管理员看不到「用户管理」。 */
-const visibleMenuItems = computed(() =>
-  menuItems.filter((item) => !item.adminOnly || auth.isAdmin),
-)
+const visibleMenuItems = computed(() => menuItems.filter((item) => !item.adminOnly || auth.isAdmin))
 
 // 根组件是 Fragment，无法直接给 #app 绑定布局类，故落到 body 上供 main.css 切换布局模式。
 // 本组件即根组件、不会卸载，无需清理该 class。
@@ -125,9 +123,7 @@ async function handleLogout(): Promise<void> {
             <span class="account-set-name" :title="accountSets.current.remark ?? ''">
               {{ accountSets.current.name }}
             </span>
-            <button type="button" class="switch-set" @click="accountSets.openPicker()">
-              切换
-            </button>
+            <button type="button" class="switch-set" @click="accountSets.openPicker()">切换</button>
           </span>
           <!-- 一个账套都没关联：仅提示，不显示名称与切换按钮 -->
           <span v-else-if="accountSets.emptyNotice" class="account-set-empty">

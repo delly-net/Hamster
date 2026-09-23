@@ -154,9 +154,7 @@ async function submit(): Promise<void> {
       </button>
     </form>
 
-    <p class="hint">
-      若链接已过期，请联系系统管理员在「用户管理」中重新生成。
-    </p>
+    <p class="hint">若链接已过期，请联系系统管理员在「用户管理」中重新生成。</p>
   </main>
 </template>
 

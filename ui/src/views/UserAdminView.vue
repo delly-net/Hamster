@@ -144,7 +144,8 @@ onMounted(load)
     <section v-if="resetLink" class="link-panel">
       <h2 class="panel-title">用户 {{ resetLink.username }} 的重置链接</h2>
       <p class="panel-hint">
-        有效期至 {{ formatDateTime(resetLink.expiresAt) }}，仅可使用一次；重新生成会使本链接立即失效。
+        有效期至
+        {{ formatDateTime(resetLink.expiresAt) }}，仅可使用一次；重新生成会使本链接立即失效。
       </p>
       <div class="link-row">
         <input class="link-input" type="text" readonly :value="resetLink.url" />
@@ -207,10 +208,20 @@ onMounted(load)
               重置链接
             </button>
             <template v-if="confirmingDeleteId === user.id">
-              <button type="button" class="danger" :disabled="pendingId !== null" @click="removeUser(user)">
+              <button
+                type="button"
+                class="danger"
+                :disabled="pendingId !== null"
+                @click="removeUser(user)"
+              >
                 确认删除
               </button>
-              <button type="button" class="ghost" :disabled="pendingId !== null" @click="confirmingDeleteId = null">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="pendingId !== null"
+                @click="confirmingDeleteId = null"
+              >
                 取消
               </button>
             </template>

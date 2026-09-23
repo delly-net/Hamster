@@ -45,7 +45,9 @@ onMounted(load)
         <h1 class="title">接口调试</h1>
         <p class="doc-url">
           文档地址：<code>{{ docUrl }}</code>
-          <template v-if="doc?.info?.title"> · {{ doc.info.title }} {{ doc.info.version }}</template>
+          <template v-if="doc?.info?.title">
+            · {{ doc.info.title }} {{ doc.info.version }}</template
+          >
         </p>
       </div>
       <button type="button" class="reload" :disabled="phase === 'loading'" @click="load">
@@ -60,14 +62,19 @@ onMounted(load)
       <span>{{ errorMessage }}</span>
       <span class="state-hint">
         OpenAPI 文档仅在开发环境暴露（<code>/openapi/v1.json</code>）。请确认后端以 Development
-        环境启动，并检查 <code>public/conf/setting.json</code> 中的 <code>api.baseUrl</code> 是否指向正确的后端地址。
+        环境启动，并检查 <code>public/conf/setting.json</code> 中的
+        <code>api.baseUrl</code> 是否指向正确的后端地址。
       </span>
     </div>
 
     <p v-else-if="entries.length === 0" class="state">文档已载入，但没有可用接口。</p>
 
     <div v-else class="panes">
-      <OperationList :entries="entries" :selected-key="selected?.key ?? ''" @select="selected = $event" />
+      <OperationList
+        :entries="entries"
+        :selected-key="selected?.key ?? ''"
+        @select="selected = $event"
+      />
       <OperationDetail v-if="selected" :doc="doc" :entry="selected" />
     </div>
   </main>
