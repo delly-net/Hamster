@@ -8,17 +8,23 @@
  * 账户多选的候选也直接来自 `GET /api/accounts?includeInactive=true`：账户是软删除，停用账户上仍有
  * 历史明细，漏掉它会让过去的账凭空消失。**账本账户不在其中**——后端从不返回它。
  *
- * 行粒度是**一条复式明细**（借方或贷方），不是一笔交易：一笔交易涉及两个所选账户时呈现两行，
- * 这正是复式记账的呈现方式。金额**恒为正**，增减由 `direction` 表达；本 store 不折算带符号金额
- * ——「方向 → 符号」的唯一换算点是后端的 `TransactionService.SumSignedAmountsAsync`，
- * 前端再算一次就是第二个语义源。
+ * 行粒度是**一条交易明细**，不是一笔交易：一笔交易涉及两个所选账户时呈现两行。
+ * 金额的增减由后端的 `signedAmount` 表达（借方为正、贷方为负），本 store **不折算带符号金额**
+ * ——「方向 → 符号」的唯一换算定义在后端的 `EntryDirectionExtensions.SignedAmount`，
+ * 前端再算一次就是第二个语义源。`amount` 与 `direction` 仍如实回传，但只作账本的底层事实，
+ * 界面按 `signedAmount` 分列呈现。
  */
 
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { request } from '@/api/http'
 
-/** 借贷方向。 */
+/**
+ * 借贷方向。
+ *
+ * 界面**不再呈现**它（「借/贷」对普通用户不友好，见 `/entries` 页），但接口仍如实回传，
+ * 故类型保留：它是账本的底层事实，也是 `signedAmount` 的来源。
+ */
 export type EntryDirection = 'Debit' | 'Credit'
 
 /**
@@ -37,12 +43,6 @@ export type TransactionType = 'OpeningBalance' | 'Income' | 'Expense'
  * 标签表在运行时落空（返回 `undefined` 渲染成空白），比多写一行更糟。
  */
 export type CounterpartyKind = 'None' | 'Account' | 'Ledger' | 'Hidden'
-
-/** 借贷方向的中文标签。 */
-export const ENTRY_DIRECTION_LABELS: Record<EntryDirection, string> = {
-  Debit: '借',
-  Credit: '贷',
-}
 
 /**
  * 交易类型的中文标签。
@@ -94,10 +94,18 @@ export interface Entry {
   accountId: number
   /** 挂靠账户名称。 */
   accountName: string
-  /** 借贷方向。 */
+  /** 借贷方向；账本的底层事实，界面不再呈现。 */
   direction: EntryDirection
-  /** 金额，**恒为正**；增减由 `direction` 表达。 */
+  /** 原始金额，**恒为正**；界面不再呈现它，改用 `signedAmount`。 */
   amount: number
+  /**
+   * 带符号金额：`amount` 按 `direction` 取符号后的值（借方为正、贷方为负），
+   * 含义是「该条明细对该账户余额的增减了多少」。
+   *
+   * 由后端派生（换算定义 `EntryDirectionExtensions.SignedAmount`，与余额汇总共用一处），
+   * 前端据此把金额分入「收入」（正）/「支出」（负）两列并着色。
+   */
+  signedAmount: number
   /** 对手方账户的可见性档位。 */
   counterpartyKind: CounterpartyKind
   /** 对手方账户主键；**仅 `Account` 档有值**。 */

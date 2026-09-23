@@ -2,6 +2,10 @@
  * 调色板取自产品 Logo（doc/Hamster_512.png）：
  * 琥珀橙底 #F9BC72、条纹焦糖橙 #E89B52、腹部奶油 #FDF3E3、全身描边深暖棕 #5A3A22。
  * 亮/暗两套语义令牌均由此派生；页面样式一律引用语义令牌，不再出现硬编码色值。
+ *
+ * 例外是收支语义色（--color-income / --color-expense）：它们表达的是「金额正负号」，
+ * 与品牌无关——收入绿不能是橙色、支出红也不该跟着主题色走，故不由上方原生色板派生，
+ * 而是按语义直接取自通用绿/红。支出红复用危险色，全站因此仍只有一个红。
  */
 :root {
   /* 原生色板（亮色取样） */
@@ -51,6 +55,12 @@
   --color-danger-soft: rgba(192, 57, 43, 0.09);
   --color-danger-border: rgba(192, 57, 43, 0.35);
 
+  /* 收支语义色：收入（+）为绿、支出（−）为红。支出红直接复用危险色（同砖红，不引入第二个红），
+     故这里只新增收入的绿——它是全站第一个非 Logo 派生的颜色，理由见文件头。 */
+  --color-income: #1f8a4c;
+  --color-income-soft: rgba(31, 138, 76, 0.12);
+  --color-expense: var(--color-danger);
+
   /* 视觉强化令牌：渐变页底、圆角与柔和阴影 */
   --gradient-page: linear-gradient(160deg, #fffbf4 0%, #fdeedc 55%, #fbe3c8 100%);
   --radius-card: 18px;
@@ -85,6 +95,11 @@
     --color-danger: #e8836f;
     --color-danger-soft: rgba(232, 131, 111, 0.14);
     --color-danger-border: rgba(232, 131, 111, 0.4);
+
+    /* 收支语义色必须在此重新声明：暗色底上的绿要提亮才够对比度，沿用亮色值会偏暗发灰 */
+    --color-income: #5cc98a;
+    --color-income-soft: rgba(92, 201, 138, 0.16);
+    --color-expense: var(--color-danger);
 
     /* 渐变页底必须在此重新声明，否则暗色下会残留亮色奶油渐变 */
     --gradient-page: linear-gradient(160deg, #241b15 0%, #2a1f17 55%, #33251a 100%);

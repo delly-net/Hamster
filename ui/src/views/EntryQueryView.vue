@@ -5,8 +5,11 @@
  * 明细一律挂在账套下，故页面严格跟随「当前账套」：未选择账套时只提示、不渲染筛选区与表格，
  * 账套切换时清空结果、重拉账户筛选列表并复位为默认条件（否则会残留上一账套的明细）。
  *
- * **一行是一条复式明细**（借方或贷方），不是一笔交易：一笔交易涉及两个所选账户时呈现两行。
- * 金额恒为正，增减由「借/贷」标签表达——本页不折算带符号金额，「方向 → 符号」的唯一换算点在后端。
+ * **一行是一条交易明细**，不是一笔交易：一笔交易涉及两个所选账户时呈现两行。
+ * 金额按「收入 / 支出 / 净额」三列呈现，增减由后端回传的 `signedAmount` 表达（借方为正、贷方为负）
+ * ——本页不折算带符号金额，「方向 → 符号」的唯一换算定义在后端。表格底部按当页给出小计。
+ *
+ * 「借/贷」这一层刻意不呈现给用户：复式记账是数据的组织方式，不是普通人读账的方式。
  *
  * 筛选条件分「草稿」与「已应用」两份：改动输入不立刻发请求（避免边打字边查询），
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
@@ -21,12 +24,10 @@ import { useAccountSetsStore } from '@/stores/accountSets'
 import { useAccountsStore } from '@/stores/accounts'
 import {
   COUNTERPARTY_KIND_LABELS,
-  ENTRY_DIRECTION_LABELS,
   ENTRY_PAGE_SIZE,
   transactionTypeLabel,
   useEntriesStore,
   type Entry,
-  type EntryDirection,
 } from '@/stores/entries'
 
 const accountSets = useAccountSetsStore()
@@ -84,6 +85,28 @@ const accountOptions = computed(() => accountsStore.accounts)
 const items = computed(() => entriesStore.page?.items ?? [])
 const totalCount = computed(() => entriesStore.page?.total ?? 0)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / ENTRY_PAGE_SIZE)))
+
+/**
+ * 本页小计：收入合计 / 支出合计 / 净额合计。
+ *
+ * 口径是**当页可见数据之和**——期初余额行按正负号入列后一并计入（它同样带 `signedAmount`），
+ * 故小计恒等于三列本页数据相加，用户核对时不会对不上。支出合计累加的是负数，
+ * 呈现时由 {@link formatSigned} 补回 `-` 号。
+ */
+const pageTotals = computed(() => {
+  let income = 0
+  let expense = 0
+
+  for (const entry of items.value) {
+    if (entry.signedAmount < 0) {
+      expense += entry.signedAmount
+    } else {
+      income += entry.signedAmount
+    }
+  }
+
+  return { income, expense, net: income + expense }
+})
 
 /** 空态文案：带上本次查询的条件概要，让「没查到」与「查错了条件」当场可分辨。 */
 const emptyText = computed(() => {
@@ -152,6 +175,24 @@ function formatAmount(value: number): string {
   return Number.isFinite(value) ? amountFormatter.format(value) : String(value)
 }
 
+/**
+ * 格式化**带符号**金额：正数补 `+`、负数用 `-`，两者共用同一套两位小数口径。
+ *
+ * 符号手工拼接而非交给 `Intl`（它对正数不出 `+`），且用的是 ASCII 连字符——
+ * 让「收入 +100.00 / 支出 -50.00」在等宽字体下纵向对齐。
+ * 符号是金额本身的一部分（本页不再有单独的「方向」列），故 `+` 不能省。
+ *
+ * @param value 带符号金额（后端 `signedAmount`）。
+ * @returns 带正负号的金额文本；无法解析时原样回显。
+ */
+function formatSigned(value: number): string {
+  if (!Number.isFinite(value)) {
+    return String(value)
+  }
+
+  return `${value < 0 ? '-' : '+'}${formatAmount(Math.abs(value))}`
+}
+
 /** 格式化 ISO 时间；无法解析时原样回显。 */
 function formatDateTime(value: string): string {
   const parsed = new Date(value)
@@ -173,9 +214,19 @@ function counterpartyText(entry: Entry): string {
   return COUNTERPARTY_KIND_LABELS[entry.counterpartyKind]
 }
 
-/** 借贷方向的中文标签。 */
-function directionLabel(direction: EntryDirection): string {
-  return ENTRY_DIRECTION_LABELS[direction]
+/** 收入列文本：只有正数行有值，其余行留空。 */
+function incomeText(entry: Entry): string {
+  return entry.signedAmount > 0 ? formatSigned(entry.signedAmount) : ''
+}
+
+/** 支出列文本：只有负数行有值，其余行留空。 */
+function expenseText(entry: Entry): string {
+  return entry.signedAmount < 0 ? formatSigned(entry.signedAmount) : ''
+}
+
+/** 金额单元格的语义色类：正数绿（收入）、负数红（支出）。 */
+function amountClass(value: number): string {
+  return value < 0 ? 'expense' : 'income'
 }
 
 /** 拉取账户筛选候选；含已停用账户。 */
@@ -332,8 +383,9 @@ onMounted(() => {
         <h1 class="title">账目明细</h1>
         <p class="subtitle">
           在当前账套内按时间区间与账户（可多选）查询交易明细，按业务发生时间正序排列。
-          一行是一条复式明细（借方或贷方），故一笔交易涉及两个所选账户时会呈现两行；
-          金额恒为正，增减看方向。时间取业务发生时间，可补记往日收支。
+          钱进来记在【收入】列（绿色，带 + 号），钱出去记在【支出】列（红色，带 − 号），
+          【净额】列是这一行的增减合计；表格底部给出当页小计。
+          一笔交易涉及两个所选账户时会呈现两行。时间取业务发生时间，可补记往日收支。
         </p>
       </div>
     </header>
@@ -428,8 +480,9 @@ onMounted(() => {
             <th>序号</th>
             <th>发生时间</th>
             <th>账户</th>
-            <th>方向</th>
-            <th class="amount">金额</th>
+            <th class="amount">收入</th>
+            <th class="amount">支出</th>
+            <th class="amount">净额</th>
             <th>对手方</th>
             <th>摘要</th>
             <th>备注</th>
@@ -441,15 +494,12 @@ onMounted(() => {
             <td class="row-index">{{ index + 1 }}</td>
             <td class="occurred">{{ formatDateTime(entry.occurredAt) }}</td>
             <td class="name">{{ entry.accountName }}</td>
-            <td>
-              <span
-                class="badge"
-                :class="entry.direction === 'Debit' ? 'badge-debit' : 'badge-credit'"
-              >
-                {{ directionLabel(entry.direction) }}
-              </span>
+            <!-- 收入/支出各占一列，同一行只有一列有值：金额的增减不再靠「借/贷」标签表达 -->
+            <td class="amount income">{{ incomeText(entry) }}</td>
+            <td class="amount expense">{{ expenseText(entry) }}</td>
+            <td class="amount" :class="amountClass(entry.signedAmount)">
+              {{ formatSigned(entry.signedAmount) }}
             </td>
-            <td class="amount">{{ formatAmount(entry.amount) }}</td>
             <td class="counterparty">{{ counterpartyText(entry) }}</td>
             <td>
               <span class="summary">{{ entry.summary }}</span>
@@ -459,9 +509,22 @@ onMounted(() => {
             <td class="remark">{{ entry.remark || '—' }}</td>
           </tr>
           <tr v-if="items.length === 0">
-            <td colspan="8" class="empty">{{ emptyText }}</td>
+            <td colspan="9" class="empty">{{ emptyText }}</td>
           </tr>
         </tbody>
+        <!-- 小计只统计**当页**：跨页合计会让「本页小计」这个标题名不副实，
+             全区间合计应由账户页的余额或另设的汇总能力承担 -->
+        <tfoot v-if="items.length > 0">
+          <tr>
+            <td colspan="3" class="subtotal-label">本页小计</td>
+            <td class="amount income">{{ formatSigned(pageTotals.income) }}</td>
+            <td class="amount expense">{{ formatSigned(pageTotals.expense) }}</td>
+            <td class="amount" :class="amountClass(pageTotals.net)">
+              {{ formatSigned(pageTotals.net) }}
+            </td>
+            <td colspan="3"></td>
+          </tr>
+        </tfoot>
       </table>
 
       <div class="pager">
@@ -541,7 +604,7 @@ onMounted(() => {
   color: var(--color-danger);
 }
 
-/* 提示态复用主色：全站只有 danger 一种语义色，不额外引入绿色 */
+/* 提示态复用主色：提示是「中性告知」，不占用收支语义色（绿/红只表达金额正负） */
 .notice {
   border: 1px solid var(--color-accent);
   background: var(--color-accent-soft);
@@ -705,12 +768,40 @@ onMounted(() => {
   font-weight: 600;
 }
 
-/* 金额右对齐并等宽呈现，便于纵向比对 */
+/* 金额右对齐并等宽呈现，便于纵向比对；收入/支出/净额三列共用 */
 .amount {
   text-align: right;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
+}
+
+/* 收支语义色：正数绿（收入侧）、负数红（支出侧）。
+   语义色令牌见 base.css——支出红复用危险色，故全站仍只有一个红。 */
+.income {
+  color: var(--color-income);
+}
+
+.expense {
+  color: var(--color-expense);
+}
+
+/* 小计行：用上边框与底色把它和明细行分开，读作「汇总」而不是「又一条明细」 */
+.table tfoot td {
+  padding: 0.6rem 0.75rem;
+  border-top: 1px solid var(--color-border-hover);
+  background: var(--color-background-mute);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.table tfoot tr:last-child td {
+  border-bottom: 0;
+}
+
+.subtotal-label {
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 .counterparty {
@@ -741,18 +832,8 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-/* 借方复用主色（资金流入账户的一侧），贷方只描边：全站不引入新语义色 */
-.badge-debit {
-  border-color: var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent-strong);
-}
-
-.badge-credit {
-  border-color: var(--color-border-hover);
-  opacity: 0.85;
-}
-
+/* 「借/贷」徽标已随方向列移除：复式记账是数据的组织方式，不是普通人读账的方式。
+   .badge 与 .badge-inactive 仍被下方账户多选面板的「已停用」使用，故保留。 */
 .badge-inactive {
   border-color: var(--color-danger-border);
   background: var(--color-danger-soft);

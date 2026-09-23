@@ -257,7 +257,8 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 | 借方 | `Debit`（1） | 增加 |
 | 贷方 | `Credit`（2） | 减少 |
 
-符号换算**只在一处发生**（`TransactionService.SumSignedAmountsAsync`：借方计正、贷方计负），
+符号换算**只有一个定义**（`EntryDirectionExtensions.SignedAmount`：借方计正、贷方计负），
+由两处共用——账户余额汇总（`SumSignedAmountsAsync`）与明细出参的 `signedAmount` 字段；
 其余各处一律只搬运正数金额。刻意**不按账户类型翻转符号**（例如「负债账户贷方表示增加」）——
 那会让同一个 `direction` 在不同账户上含义相反，符号一旦分散到多处就再难对齐。
 
@@ -319,7 +320,7 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 **账户不可见、不存在或属于其他账套一律 404**（三种情形回答相同，避免被用来探测他人账户）；
 当前账套的**系统账本账户本身不可记**——它不出现在任何账户列表里，故请求方拿不到它的主键。
 
-需要逐条明细（含对手方档位与借贷方向）请用 `GET /api/entries`：
+需要逐条明细（含对手方档位与带符号金额）请用 `GET /api/entries`：
 为「读回刚刚写入的那笔」再开一个近似端点，只会多出一条会与明细查询漂移的读取路径。
 
 ###### 账目明细查询
@@ -331,8 +332,13 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 | `GET /api/entries?from=&to=&accountIds=&page=&pageSize=` | Bearer | 当前账套内的交易明细，按发生时间正序分页；`from` / `to` 为 ISO 8601 时间、与交易的**业务发生时间**（`occurred_at`）比较且**均为闭区间**，省略即该侧不限；`accountIds` 可重复传参、也可整体省略；`page` 默认 1，`pageSize` 默认 50（上限 **200**）。返回 `{ items, total, page, pageSize }` |
 
 **一行是一条明细，不是一笔交易。** 一笔交易由借贷两条明细构成，当两侧都落在所选账户上时就会呈现
-两行——这正是复式记账在界面上的样子。`amount` **恒为正**，方向由 `direction`（`Debit` / `Credit`）
-表达，本端点**不做符号折算**（唯一换算点仍是 `SumSignedAmountsAsync`）。
+两行。`amount` **恒为正**、`direction`（`Debit` / `Credit`）为借贷方向，两者是账本的底层事实
+（库内不存带符号金额）。
+
+**呈现请用 `signedAmount`**：它是 `amount` 按 `direction` 取符号后的值（借方为正、贷方为负），
+含义是「该条明细对它挂靠账户的余额增减」。界面的收入/支出分列与正负着色都由它派生，
+调用方因此**不必**自己再做一次方向→符号的折算——换算的定义只有一处
+（`EntryDirectionExtensions.SignedAmount`），与账户余额汇总 `SumSignedAmountsAsync` 共用。
 
 排序为 `occurred_at` 升序 → 交易主键 → 明细主键。第三级排序键不是装饰：缺了它，同一时刻的行可能在
 两次请求间互换位置，同一行会在两页里各出现一次。

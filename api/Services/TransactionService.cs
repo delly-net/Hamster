@@ -211,11 +211,12 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             })
             .ToListAsync(cancellationToken);
 
-        // 「明细方向 → 账户余额」的唯一换算处：借方为正、贷方为负
+        // 「明细方向 → 账户余额」的换算定义见 EntryDirectionExtensions.SignedAmount：
+        // 借方为正、贷方为负。此处与「账目明细出参」共用同一个定义，不自行再写一遍三元表达式。
         var balances = new Dictionary<int, decimal>();
         foreach (var row in rows)
         {
-            var signed = row.Direction == EntryDirection.Debit ? row.Total : -row.Total;
+            var signed = row.Direction.SignedAmount(row.Total);
             balances[row.AccountId] = balances.TryGetValue(row.AccountId, out var current)
                 ? current + signed
                 : signed;

@@ -281,8 +281,9 @@ An entry's direction is a **`direction` enum plus a positive amount**, not a sig
 | Debit | `Debit` (1) | Increase |
 | Credit | `Credit` (2) | Decrease |
 
-The sign conversion happens in **exactly one place** (`TransactionService.SumSignedAmountsAsync`:
-debits positive, credits negative); everywhere else only positive amounts are moved around. The
+The sign conversion has **exactly one definition** (`EntryDirectionExtensions.SignedAmount`: debits
+positive, credits negative), shared by two callers — the balance roll-up (`SumSignedAmountsAsync`)
+and the entry query's `signedAmount` field; everywhere else only positive amounts are moved around. The
 enum is deliberately **not flipped per account type** (as in "a credit increases a liability") —
 that would give one `direction` opposite meanings on different accounts, and once the sign logic is
 scattered it stops lining up.
@@ -361,7 +362,7 @@ set** (all three answer alike so the endpoint cannot be used to probe for other 
 The account set's **system ledger account cannot be posted to by hand**: it is never returned in
 any account list, so a caller has no way to obtain its primary key.
 
-For line-level detail (including the counterparty bucket and the debit/credit direction) use
+For line-level detail (including the counterparty bucket and the signed amount) use
 `GET /api/entries`. Opening a second, near-identical endpoint just to read back what was just
 written would add a read path free to drift away from the entries query.
 
@@ -374,10 +375,15 @@ Entries are read back through one endpoint, which answers "what moved, when, on 
 | `GET /api/entries?from=&to=&accountIds=&page=&pageSize=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `page` defaults to 1 and `pageSize` to 50 (max **200**). Returns `{ items, total, page, pageSize }` |
 
 **One row is one entry, not one transaction.** A transaction consists of a debit and a credit; when
-both sides sit on accounts you selected, both appear as rows — that is what double-entry looks like
-on screen. `amount` is always **positive** and the direction travels in `direction` (`Debit` /
-`Credit`); this endpoint performs **no sign conversion** (`SumSignedAmountsAsync` remains the only
-place that does).
+both sides sit on accounts you selected, both appear as rows. `amount` is always **positive** and
+`direction` (`Debit` / `Credit`) carries the side: those two are the underlying bookkeeping facts,
+and no signed amount is stored.
+
+**Read `signedAmount` to render.** It is `amount` signed by `direction` (debits positive, credits
+negative) and means "how much this entry moved its account's balance". The UI's income / expense
+columns and its green / red colouring derive from it, so a caller **need not** repeat the
+direction-to-sign conversion — that conversion has exactly one definition
+(`EntryDirectionExtensions.SignedAmount`), shared with the balance roll-up `SumSignedAmountsAsync`.
 
 Ordering is `occurred_at` ascending, then transaction id, then entry id. The third key is not
 decoration: without it, rows sharing a timestamp could swap places between requests and appear on

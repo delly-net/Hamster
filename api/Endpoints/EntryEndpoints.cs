@@ -109,7 +109,10 @@ public sealed class EntryEndpoints : IEndpoint
                 "（同一时刻按交易主键、再按明细主键升序，保证翻页结果稳定）。" +
                 "**行粒度是一条交易明细**：一笔交易由借贷两条明细构成，若两条明细挂在两个不同的所选账户上，" +
                 "则它们在结果里各占一行——这正是复式记账的呈现方式。" +
-                "amount 恒为正数，增减由 direction（Debit/Credit）表达，本端点不做符号折算。" +
+                "amount 恒为正数、direction 为借贷方向，两者是账本的底层事实（库内不存带符号金额）；" +
+                "**呈现请用 signedAmount**：它是 amount 按 direction 取符号后的值（借方为正、贷方为负），" +
+                "含义是该条明细对它挂靠账户的余额增减——收入/支出分列与正负着色都由它派生，" +
+                "换算定义与账户余额汇总共用一处（借方为正、贷方为负）。" +
                 "时间区间比较的是 occurred_at（业务发生时间，可补记往日支出），不是落库时间；" +
                 "from/to 均为**闭区间**端点，省略即该侧不限。" +
                 "accountIds 可重复传参、省略即不限账户；**其中的不可见账户会被静默剔除**" +
@@ -220,7 +223,13 @@ public sealed class EntryEndpoints : IEndpoint
 /// <param name="AccountId">挂靠账户主键。</param>
 /// <param name="AccountName">挂靠账户名称。</param>
 /// <param name="Direction">借贷方向，取值 <c>Debit</c> / <c>Credit</c>。</param>
-/// <param name="Amount">金额，**恒为正**；方向由 <paramref name="Direction"/> 表达，不折算符号。</param>
+/// <param name="Amount">金额，**恒为正**；方向由 <paramref name="Direction"/> 表达，库内不折算符号。</param>
+/// <param name="SignedAmount">
+/// 带符号金额：<paramref name="Amount"/> 按其 <paramref name="Direction"/> 取符号后的值
+/// （借方为正、贷方为负），含义是「该条明细对它挂靠账户的余额增减了多少」。
+/// **界面的主依据**——收入/支出分列、正负着色都取自它；<paramref name="Amount"/> 与
+/// <paramref name="Direction"/> 则保留为账本的底层事实。
+/// </param>
 /// <param name="CounterpartyKind">
 /// 对手方档位，取值 <c>None</c>（无对手方明细）/ <c>Account</c>（可见）/ <c>Ledger</c>（系统账本账户）/
 /// <c>Hidden</c>（存在但不可见）。
@@ -243,6 +252,7 @@ public sealed record EntryDto(
     string AccountName,
     string Direction,
     decimal Amount,
+    decimal SignedAmount,
     string CounterpartyKind,
     int? CounterpartyAccountId,
     string? CounterpartyName)
@@ -263,6 +273,11 @@ public sealed record EntryDto(
         row.AccountName,
         row.Direction.ToString(),
         row.Amount,
+        // 带符号金额在 DTO 层派生而非在 IEntryQueryService 里：后者在注释中承诺
+        // 「纯读取、不参与符号换算」，那条承诺继续成立；且这是**出参呈现**的派生值，
+        // 与 Direction.ToString() 同级，属于 DTO 的职责。换算定义仍是 EntryDirectionExtensions
+        // .SignedAmount 一处（与余额汇总共用）。
+        row.Direction.SignedAmount(row.Amount),
         row.CounterpartyKind.ToString(),
         row.CounterpartyAccountId,
         row.CounterpartyName);
