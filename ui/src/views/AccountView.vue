@@ -16,9 +16,12 @@
  * 可见性/权限（前端过滤只会造出假防线），而按类型分组是展示分组，一行数据都没被丢掉。
  *
  * 新建与修改统一走弹窗（【新增】/【编辑】→ 表单 →【保存】落表），不再有行内编辑。
- * 修改的可编辑字段只有名称：账户类型、归属范围与期初金额一经创建均不可修改，故在弹窗内
- * 一律只读呈现（不给可编辑控件，连禁用的也不给——禁用控件仍会暗示「以后能改」），
+ * 修改的可编辑字段只有名称：账户类型、归属范围、期初金额与**币种**一经创建均不可修改，
+ * 故在弹窗内一律只读呈现（不给可编辑控件，连禁用的也不给——禁用控件仍会暗示「以后能改」），
  * 只读它们是为了让用户在弹窗内看全账户上下文，而不是让用户以为将来能改。
+ *
+ * 币种在**新建时必选**：它是一切金额的计价单位，也是记账时的硬约束（跨币种无法交易）。
+ * 候选只取启用的币种，初值为系统默认币种（由后端标出，前端不再另算一次回退）。
  *
  * 停用即软删除（数据行保留、可重新启用），故按钮文案统一用「停用」而非「删除」。
  */
@@ -35,9 +38,11 @@ import {
   type AccountScope,
   type AccountType,
 } from '@/stores/accounts'
+import { useCurrenciesStore } from '@/stores/currencies'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
+const currenciesStore = useCurrenciesStore()
 
 /** 金额呈现：固定两位小数，与后端的 decimal(...,2) 对齐。 */
 const amountFormatter = new Intl.NumberFormat('zh-CN', {
@@ -81,6 +86,8 @@ const newScope = ref<AccountScope>('Personal')
 const newType = ref<AccountType>('Fund')
 /** 期初金额：输入框是 `type="number"`，v-model 会自动把值转成 number（空串除外），故此处必须是联合类型。 */
 const newInitialBalance = ref<string | number>('0')
+/** 新建账户的币种代码；创建后不可修改。 */
+const newCurrencyCode = ref('')
 
 /** 自定义账户 Id 从 1 起自增，`0` 可安全用作「新建表单提交中」的哨兵值。 */
 const NEW_ID = 0
@@ -175,7 +182,8 @@ async function run(action: () => Promise<void>, pending: number): Promise<boolea
 async function load(): Promise<void> {
   errorMessage.value = ''
   try {
-    await accountsStore.list(showInactive.value)
+    // 币种字典与账户列表一并拉取：新建弹窗需要币种候选，列表需要币种代码的展示文本
+    await Promise.all([accountsStore.list(showInactive.value), currenciesStore.loadActive()])
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '加载账户失败'
   }
@@ -188,6 +196,8 @@ async function openCreate(): Promise<void> {
   // 类型默认取当前页签——「新增时自动调整账户类型」这个要求就落在这一行
   newType.value = activeType.value
   newInitialBalance.value = '0'
+  // 币种初值取系统默认币种：绝大多数账户都用它，改选是少数情况
+  newCurrencyCode.value = currenciesStore.defaultCode ?? currenciesStore.currencies[0]?.code ?? ''
   errorMessage.value = ''
   notice.value = ''
   createOpen.value = true
@@ -224,11 +234,18 @@ async function createAccount(): Promise<void> {
     return
   }
 
+  if (newCurrencyCode.value.length === 0) {
+    errorMessage.value = '请选择币种'
+    return
+  }
+
   // 先记下归属范围的中文标签：下面的回调会把 newScope 复位前先用于提示文案
   const scopeLabel = ACCOUNT_SCOPE_LABELS[newScope.value]
   // 类型要在 await 之前取得：它既要生成提示文案，还要决定落表后停在哪个页签
   const createdType = newType.value
   const typeLabel = ACCOUNT_TYPE_LABELS[createdType]
+  // 币种同样要在 await 之前取得，理由与类型相同：它要进提示文案
+  const createdCurrency = newCurrencyCode.value
 
   const ok = await run(async () => {
     await accountsStore.create({
@@ -236,8 +253,9 @@ async function createAccount(): Promise<void> {
       scope: newScope.value,
       type: createdType,
       initialBalance,
+      currencyCode: newCurrencyCode.value,
     })
-    notice.value = `已新建${scopeLabel}${typeLabel} ${name}`
+    notice.value = `已新建${scopeLabel}${typeLabel} ${name}（${createdCurrency}）`
   }, NEW_ID)
 
   if (ok) {
@@ -447,17 +465,14 @@ onMounted(() => {
       </div>
 
       <!-- 单个动态面板：切换页签换的只是它的内容，故 aria-labelledby 指向当前页签 -->
-      <div
-        id="account-tab-panel"
-        role="tabpanel"
-        :aria-labelledby="`account-tab-${activeType}`"
-      >
+      <div id="account-tab-panel" role="tabpanel" :aria-labelledby="`account-tab-${activeType}`">
         <table class="table">
           <thead>
             <tr>
               <th>序号</th>
               <th>账户名称</th>
               <th>归属</th>
+              <th>币种</th>
               <th class="amount">期初金额</th>
               <th class="amount">余额</th>
               <th>状态</th>
@@ -475,6 +490,10 @@ onMounted(() => {
                   {{ ACCOUNT_SCOPE_LABELS[account.scope] }}
                 </span>
                 <span v-if="account.ownerUsername" class="owner">{{ account.ownerUsername }}</span>
+              </td>
+              <!-- 币种同样一经创建不可修改：它是金额的计价单位，换币种会让既有余额变成另一个数 -->
+              <td>
+                <span class="badge badge-currency">{{ account.currencyCode }}</span>
               </td>
               <!-- 期初金额一经创建不可修改（已落成一笔期初交易），故只读呈现 -->
               <td class="amount">{{ formatAmount(account.initialBalance) }}</td>
@@ -537,7 +556,7 @@ onMounted(() => {
               </td>
             </tr>
             <tr v-if="!accountsStore.loading && tabAccounts.length === 0">
-              <td class="empty" colspan="8">
+              <td class="empty" colspan="9">
                 {{ showInactive ? `暂无${activeTypeLabel}` : `暂无启用的${activeTypeLabel}` }}
               </td>
             </tr>
@@ -580,7 +599,11 @@ onMounted(() => {
           <label class="field">
             <span class="label">归属范围</span>
             <select v-model="newScope" :disabled="pendingId !== null">
-              <option v-for="option in ACCOUNT_SCOPE_OPTIONS" :key="option.value" :value="option.value">
+              <option
+                v-for="option in ACCOUNT_SCOPE_OPTIONS"
+                :key="option.value"
+                :value="option.value"
+              >
                 {{ option.label }}
               </option>
             </select>
@@ -588,8 +611,25 @@ onMounted(() => {
           <label class="field">
             <span class="label">账户类型</span>
             <select v-model="newType" :disabled="pendingId !== null">
-              <option v-for="option in ACCOUNT_TYPE_OPTIONS" :key="option.value" :value="option.value">
+              <option
+                v-for="option in ACCOUNT_TYPE_OPTIONS"
+                :key="option.value"
+                :value="option.value"
+              >
                 {{ option.label }}
+              </option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="label">币种</span>
+            <select v-model="newCurrencyCode" :disabled="pendingId !== null">
+              <option v-if="currenciesStore.currencies.length === 0" value="">暂无可用币种</option>
+              <option
+                v-for="currency in currenciesStore.currencies"
+                :key="currency.id"
+                :value="currency.code"
+              >
+                {{ currency.code }} {{ currency.name }}
               </option>
             </select>
           </label>
@@ -605,7 +645,8 @@ onMounted(() => {
         </div>
 
         <p class="dialog-hint">
-          类型与期初金额一经保存不可修改；期初金额非 0 时后端会同时落成一笔期初交易。
+          类型、币种与期初金额一经保存不可修改；期初金额非 0 时后端会同时落成一笔期初交易。
+          只有币种相同的账户之间才能记账，故币种请按该账户实际使用的货币选择。
           账本账户由系统在期初入账时自动创建，不接受手工建立，也不在本列表呈现。
         </p>
 
@@ -618,12 +659,7 @@ onMounted(() => {
           >
             {{ pendingId === NEW_ID ? '保存中…' : '保存' }}
           </button>
-          <button
-            type="button"
-            class="ghost"
-            :disabled="pendingId !== null"
-            @click="closeCreate"
-          >
+          <button type="button" class="ghost" :disabled="pendingId !== null" @click="closeCreate">
             取消
           </button>
         </div>
@@ -644,7 +680,7 @@ onMounted(() => {
       >
         <h2 id="account-edit-title" class="dialog-title">修改账户</h2>
         <p class="dialog-subtitle">
-          只有名称可以修改：账户类型、归属范围与期初金额一经创建即不可变更。
+          只有名称可以修改：账户类型、归属范围、币种与期初金额一经创建即不可变更。
         </p>
 
         <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
@@ -678,6 +714,10 @@ onMounted(() => {
           <div class="readonly-row">
             <dt>账户类型</dt>
             <dd>{{ ACCOUNT_TYPE_LABELS[editTarget.type] }}</dd>
+          </div>
+          <div class="readonly-row">
+            <dt>币种</dt>
+            <dd>{{ editTarget.currencyCode }}</dd>
           </div>
           <div class="readonly-row">
             <dt>期初金额</dt>
@@ -932,6 +972,13 @@ onMounted(() => {
 .badge-active {
   border-color: var(--color-border-hover);
   opacity: 0.8;
+}
+
+/* 币种用等宽字呈现：CNY / USD 三个字母要竖着对齐才好扫读 */
+.badge-currency {
+  border-color: var(--color-border-hover);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
 }
 
 .badge-inactive {

@@ -72,6 +72,25 @@ public sealed class Account
     public AccountType Type { get; set; }
 
     /// <summary>
+    /// 币种代码（ISO 4217，对应 <see cref="Currency.Code"/>），**创建后不可修改**。
+    /// </summary>
+    /// <remarks>
+    /// 币种是账户的**计价单位**：既有流水都按它记账，中途改币种等于给历史金额换一套计价单位
+    /// （一笔「100」在人民币下是一百元，在美元下是一百美元，改动不会让任何一笔明细变多或变少，
+    /// 只会让它们集体改变含义）。需要换币种时应停用后重新创建。
+    /// <para>
+    /// **本列同时是交易约束的依据**：一笔交易的两个账户币种必须相同
+    /// （见 <c>TransactionService.RecordIncomeExpenseAsync</c>），判定即比对本列。
+    /// </para>
+    /// <para>
+    /// 存**代码**而非币种主键：代码是币种对外的稳定标识（<see cref="Currency.Code"/> 不可改），
+    /// 而主键是库内实现细节；存代码让账户行自解释，排查数据时不必再回查币种表。
+    /// </para>
+    /// </remarks>
+    [SugarColumn(ColumnName = "currency_code", Length = 8)]
+    public string CurrencyCode { get; set; } = string.Empty;
+
+    /// <summary>
     /// 期初金额，即该账户建立时已有的金额。
     /// 单位「元」，两位小数；负债账户允许为负。建议业务侧以「分」为单位存储，避免浮点误差。
     /// </summary>

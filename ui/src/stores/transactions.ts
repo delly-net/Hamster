@@ -4,8 +4,9 @@
  * 交易归属且仅归属一个账套，请求由 `api/http.ts` 自动附带 `X-Account-Set-Id`，此处不做账套判断。
  * 目标账户的可见性完全由后端判定：本 store 不做任何本地过滤，篡改本地状态只会拿到 404。
  *
- * **一笔交易由借贷两条等额反向的明细构成**（收入：目标账户借方 + 系统账本账户贷方；支出反之），
- * 对手方是该账套的系统账本账户——它对任何人不呈现，故本模块不提供也不接收对手方参数。
+ * **一笔交易由借贷两条等额反向的明细构成**（收入：收入账户借方 + 对手方贷方；支出反之）。
+ * 对手方可以由用户指定——不给就是该账套内**该币种**的系统账本账户，语义是「款项来自/去往账套之外」；
+ * 给了则是一笔两个真实账户之间的转账。指向账本账户时它对任何人不呈现，故本模块只上报用户填的那个。
  * 「方向 → 账户余额」的换算唯一发生在后端 `TransactionService.SumSignedAmountsAsync`，
  * 前端不折算带符号金额，只如实上报「收入还是支出 + 金额」。
  */
@@ -36,7 +37,7 @@ export const TRANSACTION_TYPE_OPTIONS: {
 export interface RecordTransactionPayload {
   /** 交易类型：`Income` 收入 / `Expense` 支出。 */
   type: RecordableTransactionType
-  /** 目标账户主键；收入使其余额增加、支出使其减少。 */
+  /** 主账户主键；收入（收入账户）使其余额增加、支出（支出账户）使其减少。 */
   accountId: number
   /** 金额，**必须大于 0**（方向由 `type` 表达，不用金额符号）。 */
   amount: number
@@ -46,9 +47,29 @@ export interface RecordTransactionPayload {
   summary: string
   /** 备注；无备注时传 `null`。 */
   remark: string | null
+  /**
+   * 币种代码，必填。**须与两个账户的币种一致**，后端会因此校验并把不一致拒成 400。
+   *
+   * 账户上已经带了币种，此处仍要上报：币种是这笔金额的组成部分（「100」离开单位没有意义），
+   * 让它由用户显式选定，比在提交时从账户里悄悄取一个更清楚。
+   */
+  currencyCode: string
+  /**
+   * 对手方账户主键；用户没有从候选中选定任何账户时为 `null`。
+   *
+   * 与 {@link counterpartyName} 二者**至多传一个**：两者皆空即「未指定对手方」，
+   * 后端落回该币种的系统账本账户。
+   */
+  counterpartyAccountId: number | null
+  /**
+   * 对手方账户名（候选之外的手工输入）；未填或已从候选中选定时为 `null`。
+   *
+   * 命不中既有可见账户时后端会**自动创建为个人往来账户**（期初金额 0）。
+   */
+  counterpartyName: string | null
 }
 
-/** 记账成功后的交易（后端只回传「记了哪一笔」，不含明细与对手方）。 */
+/** 记账成功后的交易（后端只回传「记了哪一笔」，不含明细）。 */
 export interface RecordedTransaction {
   id: number
   accountSetId: number
@@ -58,10 +79,18 @@ export interface RecordedTransaction {
   occurredAt: string
   summary: string
   remark: string | null
-  /** 本次记账的目标账户主键。 */
+  /** 本次记账的主账户主键。 */
   accountId: number
-  /** 目标账户名称。 */
+  /** 主账户名称。 */
   accountName: string
+  /** 本次记账的币种代码。 */
+  currencyCode: string
+  /**
+   * 对手方账户名称；**未指定对手方（落到系统账本账户）时为 `null`**。
+   *
+   * 账本账户对任何人不呈现，后端不会把它的名字回传。
+   */
+  counterpartyName: string | null
   /** 落库时间（UTC，ISO 8601）。 */
   createdAt: string
 }
@@ -75,8 +104,8 @@ export const useTransactionsStore = defineStore('transactions', () => {
   /**
    * 记一笔收入或支出。
    *
-   * @throws 未选择账套时后端返回 400；字段非法返回 400；目标账户不可见返回 404；
-   * 令牌失效或网络异常时抛出 `ApiError`。
+   * @throws 未选择账套时后端返回 400；字段非法或**两个账户币种不一致**返回 400；
+   * 主账户或对手方账户不可见返回 404；令牌失效或网络异常时抛出 `ApiError`。
    */
   async function record(payload: RecordTransactionPayload): Promise<RecordedTransaction> {
     loading.value = true

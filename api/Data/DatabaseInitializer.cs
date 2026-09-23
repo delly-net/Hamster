@@ -38,13 +38,24 @@ public static class DatabaseInitializer
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
             // 分两次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
             db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
-            db.CodeFirst.InitTables<Transaction, TransactionEntry>();
+            db.CodeFirst.InitTables<Transaction, TransactionEntry, Currency>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency",
                 options.DbTypeLabel);
+
+            // 播种**必须先于账户币种回填**：回填要用默认币种代码，而默认币种正是播种时标出来的
+            var seeded = CurrencySeeder.SeedIfEmpty(db, logger);
+            if (seeded > 0)
+            {
+                logger.LogInformation(
+                    "已写入 {Count} 个常见币种，默认币种为 {Code}",
+                    seeded,
+                    CurrencySeeder.DefaultCode);
+            }
 
             BackfillUserFlags(db, options.DbType, logger);
             BackfillAccountFlags(db, options.DbType, logger);
+            BackfillAccountCurrency(db, options.DbType, logger);
         }
         catch (Exception ex)
         {
@@ -100,6 +111,53 @@ public static class DatabaseInitializer
     }
 
     /// <summary>
+    /// 回填既有账户行的币种列。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="dbType">当前数据库类型，决定「不可绑定的空值」如何判定。</param>
+    /// <param name="logger">日志记录器。</param>
+    /// <remarks>
+    /// **既有账户一律回填为默认币种**：<c>currency_code</c> 是随币种绑定才引入的列，
+    /// 升级前存在的账户没有币种信息，而「账户必须有币种」是记账端点的硬约束
+    /// （跨币种无法交易），留空会让这些账户在记账时被自己的校验挡住。
+    /// <para>
+    /// 回填成默认币种而非某个写死的代码：默认币种可由管理员改，回填要跟随当时生效的取值。
+    /// 也正因如此，<see cref="CurrencySeeder.SeedIfEmpty"/> 必须先于本方法执行。
+    /// </para>
+    /// </remarks>
+    private static void BackfillAccountCurrency(ISqlSugarClient db, HamsterDbType dbType, ILogger logger)
+    {
+        const string column = "currency_code";
+        var affected = db.Ado.ExecuteCommand(
+            $"UPDATE {ACCOUNT_TABLE} SET {column} = '{CurrencySeeder.DefaultCode}' " +
+            $"WHERE {UnbindableWhere(dbType, column)}");
+
+        if (affected > 0)
+        {
+            logger.LogInformation(
+                "已把 {Count} 个历史账户的币种回填为默认币种 {Code}",
+                affected,
+                CurrencySeeder.DefaultCode);
+        }
+    }
+
+    /// <summary>
+    /// 拼出「该列取值无法绑定到实体上的非空类型」的判定条件。
+    /// </summary>
+    /// <param name="dbType">当前数据库类型。</param>
+    /// <param name="column">目标列名。</param>
+    /// <returns>可直接嵌入 WHERE 的判定片段。</returns>
+    /// <remarks>
+    /// 待回填的取值有两种形态：<c>NULL</c>（Sqlite 增量加列的实测结果）与空串 <c>''</c>
+    /// （由带 <c>DefaultValue</c> 标注的中间版本升级出的库，实测于 hamster.db）。两者都无法绑定到
+    /// 非空的 <c>bool</c> / <c>string</c>，故一并处理。空串判定仅对 Sqlite 生效：
+    /// PostgreSQL 的 <c>boolean</c> 列不可能是空串，且 <c>boolean = ''</c> 会直接报类型错误。
+    /// </remarks>
+    private static string UnbindableWhere(HamsterDbType dbType, string column) => dbType == HamsterDbType.Sqlite
+        ? $"{column} IS NULL OR {column} = ''"
+        : $"{column} IS NULL";
+
+    /// <summary>
     /// 把指定表的布尔标志列中「无法绑定到非空 <c>bool</c>」的历史取值回填为 <c>false</c>。
     /// </summary>
     /// <param name="db">SqlSugar 客户端。</param>
@@ -112,10 +170,7 @@ public static class DatabaseInitializer
     /// 于是升级前已存在的行在这些列上是 NULL；读回时无法绑定到非空 <c>bool</c>，
     /// 会让整个列表查询抛异常。
     /// <para>
-    /// 待回填的取值有两种形态：<c>NULL</c>（Sqlite 增量加列的实测结果）与空串 <c>''</c>
-    /// （由带 <c>DefaultValue</c> 标注的中间版本升级出的库，实测于 hamster.db）。两者都无法绑定到
-    /// <c>bool</c>，故一并处理。空串判定仅对 Sqlite 生效：PostgreSQL 的 <c>boolean</c> 列不可能是空串，
-    /// 且 <c>boolean = ''</c> 会直接报类型错误。
+    /// 哪些取值算「不可绑定」见 <see cref="UnbindableWhere"/>。
     /// </para>
     /// <para>
     /// 回填用 ANSI 的 <c>false</c> 而非 <c>0</c>，以便 Sqlite 与 PostgreSQL 两种库都能执行。
@@ -130,12 +185,8 @@ public static class DatabaseInitializer
         var affected = 0;
         foreach (var column in columns)
         {
-            var where = dbType == HamsterDbType.Sqlite
-                ? $"{column} IS NULL OR {column} = ''"
-                : $"{column} IS NULL";
-
             affected += db.Ado.ExecuteCommand(
-                $"UPDATE {table} SET {column} = false WHERE {where}");
+                $"UPDATE {table} SET {column} = false WHERE {UnbindableWhere(dbType, column)}");
         }
 
         return affected;

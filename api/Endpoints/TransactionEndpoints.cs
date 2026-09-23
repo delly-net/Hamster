@@ -64,6 +64,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 IUserService users,
                 IAccountSetService accountSets,
                 IAccountService accounts,
+                ICurrencyService currencies,
                 ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
@@ -86,6 +87,13 @@ public sealed class TransactionEndpoints : IEndpoint
                 ValidateText(request.Summary, SUMMARY_MAX_LENGTH, "summary", "摘要", errors);
                 ValidateText(request.Remark, REMARK_MAX_LENGTH, "remark", "备注", errors, required: false);
 
+                // 币种须是**存在的启用币种**：停用币种不接受新记账，
+                // 否则「停用」就挡不住新数据继续引用它（与账户新建同一口径）
+                if (!await currencies.ExistsActiveAsync(request.CurrencyCode, cancellationToken))
+                {
+                    errors["currencyCode"] = ["请选择有效的币种"];
+                }
+
                 // 时间绑成 string 再自行解析：直接绑 DateTime? 时非法输入只会得到框架的空白 400，
                 // 与全站「字段级中文错误」的约定不符；未传则取当前 UTC 时刻（记一笔刚刚发生的账）。
                 var hasOccurredAt = TryParseTime(request.OccurredAt, out var occurredAt, errors);
@@ -105,8 +113,27 @@ public sealed class TransactionEndpoints : IEndpoint
                     return Results.NotFound(new { message = "账户不存在" });
                 }
 
+                // 交易币种必须与目标账户的币种一致——这是「非相同币种账户无法交易」的落点之一。
+                // 前端已按币种过滤候选，此处是防绕过：直接构造请求即可提交任意组合
+                if (!string.Equals(account.CurrencyCode, request.CurrencyCode!.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        ["currencyCode"] = [$"所选账户的币种是 {account.CurrencyCode}，与交易币种不一致"],
+                    });
+                }
+
+                var (counterparty, counterpartyFailure) = await ResolveCounterpartyAsync(
+                    request, accountSet, actor!, account.CurrencyCode, accounts, cancellationToken);
+
+                if (counterpartyFailure is not null)
+                {
+                    return counterpartyFailure;
+                }
+
                 var transaction = await transactions.RecordIncomeExpenseAsync(
                     account,
+                    counterparty,
                     type,
                     request.Amount,
                     hasOccurredAt ? occurredAt : DateTime.UtcNow,
@@ -117,27 +144,128 @@ public sealed class TransactionEndpoints : IEndpoint
 
                 return Results.Created(
                     $"{ApiPathConst.TRANSACTION_GROUP}/{transaction.Id}",
-                    TransactionDto.From(transaction, account));
+                    TransactionDto.From(transaction, account, counterparty));
             })
             .WithName("RecordTransaction")
             .WithSummary("记一笔收入或支出")
             .WithDescription(
                 "在当前账套内记一笔收入或支出，**真实落库**并即时影响所选账户的余额。" +
-                "一笔交易由**借贷两条等额反向的明细**构成：收入记「目标账户借方 + 系统账本账户贷方」，" +
-                "支出记「目标账户贷方 + 系统账本账户借方」，复式配平（借方合计 == 贷方合计）由此天然成立。" +
-                "对手方为该账套的系统账本账户（Ledger 类型，不存在时自动创建），与期初余额同一口径——" +
+                "一笔交易由**借贷两条等额反向的明细**构成：收入记「收入账户借方 + 对手方贷方」，" +
+                "支出记「支出账户贷方 + 对手方借方」，复式配平（借方合计 == 贷方合计）由此天然成立。" +
+                "**对手方由调用方指定**（counterpartyAccountId 或 counterpartyName）：" +
+                "两者皆空即「未指定」，此时落回该账套内**该币种**的系统账本账户（Ledger 类型，不存在时自动创建），" +
+                "语义是「款项来自/去往账套之外」；指定了则是一笔**两个真实账户之间的转账**，账本账户完全不参与。" +
+                "counterpartyName 命不中既有可见账户时会**自动创建为个人往来账户**（期初金额 0，故不写期初分录）。" +
                 "账本账户对任何人不呈现，用户既不需要也无需选择它。" +
                 $"交易类型只能是 {RECORDABLE_TYPE_HINT}，期初余额（OpeningBalance）由系统在账户创建时自动生成，" +
                 "传它会被拒绝。" +
                 "amount **恒为正**：增减由 type 表达，不靠金额符号，故负数金额没有语义。" +
+                "**currencyCode 必填**，须为存在的启用币种，且**须与两个账户的币种一致**——" +
+                "跨币种交易被拒绝（400）：把两种货币的金额裸加总会得到一个没有意义的数。" +
                 "occurredAt 为**业务发生时间**（UTC，可补记往日的收支），省略即取当前时刻；" +
                 "本系统的业务时间一律按 UTC 存储，无时区后缀的输入也按 UTC 解释。" +
-                "目标账户须为当前用户可见的账户：不可见账户与不存在的账户一律返回 404，不泄露存在性。" +
+                "目标账户与对手方账户均须为当前用户可见的账户：不可见账户与不存在的账户一律返回 404，不泄露存在性。" +
                 "账户余额是派生值（全部明细的有符号汇总），记账后无需任何额外操作即已生效；" +
                 "记完的明细可在 `GET /api/entries` 中按时间区间与账户查到。" +
                 "本端点**只有写入**，不提供单笔交易查询：需要逐条明细（含对手方档位）请用 `GET /api/entries`，" +
                 "为本就存在的查询能力再开一个近似端点只会多出一条会漂移的读取路径。");
     }
+
+    /// <summary>
+    /// 解析本次记账的对手方账户。
+    /// </summary>
+    /// <param name="request">记账请求体。</param>
+    /// <param name="accountSet">当前账套。</param>
+    /// <param name="actor">当前操作者。</param>
+    /// <param name="currencyCode">交易币种（已与目标账户核对一致）。</param>
+    /// <param name="accounts">账户服务。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>
+    /// 对手方账户（**为 <c>null</c> 表示「未指定」**，由服务层落回该币种的系统账本账户）
+    /// 与失败响应；成功时失败响应为 <c>null</c>。
+    /// </returns>
+    /// <remarks>
+    /// 三级解析，优先级从高到低：
+    /// <list type="number">
+    ///   <item>给了主键 → 按主键取。<b>主键比名称精确</b>，故与名称同时给出时以它为准。</item>
+    ///   <item>给了名称且命中既有可见账户 → 用它。</item>
+    ///   <item>给了名称但不存在 → **自动创建为个人往来账户**（期初金额 0）。</item>
+    ///   <item>两者皆无 → 「未指定」，返回 <c>null</c>。</item>
+    /// </list>
+    /// 与名解析复用 <see cref="IAccountService.FindVisibleByNameAsync"/> 的可见性口径，
+    /// 不用「按名全库查」——那会按名命中一个用户看不见的账户，并把它直接写进一笔真实交易。
+    /// <para>
+    /// **自动创建前不再单独做重名校验**：<see cref="IAccountService.FindVisibleByNameAsync"/> 的可见集合
+    /// （公共账户 ∪ 本人个人账户）恰好覆盖了「个人账户重名」可能命中的全部行——若该范围内已有同名账户，
+    /// 上一步就已命中并直接返回。再查一次只会让「找到了吗」有两个答案来源。
+    /// </para>
+    /// </remarks>
+    private static async Task<(Account? Account, IResult? Failure)> ResolveCounterpartyAsync(
+        TransactionRequest request,
+        AccountSet accountSet,
+        User actor,
+        string currencyCode,
+        IAccountService accounts,
+        CancellationToken cancellationToken)
+    {
+        if (request.CounterpartyAccountId is { } counterpartyId)
+        {
+            var byId = await accounts.FindVisibleAsync(
+                counterpartyId, accountSet.Id, actor.Id, actor.IsAdmin, cancellationToken);
+
+            if (byId is null)
+            {
+                return (null, Results.NotFound(new { message = "对手方账户不存在" }));
+            }
+
+            return string.Equals(byId.CurrencyCode, currencyCode, StringComparison.OrdinalIgnoreCase)
+                ? (byId, null)
+                : (null, CurrencyMismatch(byId.CurrencyCode, currencyCode, "对手方账户"));
+        }
+
+        var name = request.CounterpartyName?.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            // 未指定对手方：交给服务层落回该币种的系统账本账户
+            return (null, null);
+        }
+
+        var existing = await accounts.FindVisibleByNameAsync(
+            accountSet.Id, actor.Id, actor.IsAdmin, name, cancellationToken);
+
+        if (existing is not null)
+        {
+            return string.Equals(existing.CurrencyCode, currencyCode, StringComparison.OrdinalIgnoreCase)
+                ? (existing, null)
+                : (null, CurrencyMismatch(existing.CurrencyCode, currencyCode, "对手方账户"));
+        }
+
+        // 不存在即创建为**个人往来账户**：期初金额恒为 0，故不会写出期初分录，
+        // 自动创建的账户不会凭空多出一笔期初交易。
+        // 归属范围取 Personal（用户临时输入的对手方，多半只是「这个人/这家店」，不该让全账套共用）
+        var created = await accounts.CreateAsync(
+            accountSet.Id,
+            name,
+            AccountScope.Personal,
+            AccountType.Contact,
+            0,
+            currencyCode,
+            actor.Id,
+            cancellationToken);
+
+        return (created, null);
+    }
+
+    /// <summary>构造「账户币种与交易币种不一致」的字段级错误响应。</summary>
+    /// <param name="actual">账户实际所属的币种代码。</param>
+    /// <param name="expected">交易声明的币种代码。</param>
+    /// <param name="label">出错方在提示中的中文称谓。</param>
+    /// <returns>400 响应。</returns>
+    private static IResult CurrencyMismatch(string actual, string expected, string label) =>
+        Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            ["currencyCode"] = [$"{label}的币种是 {actual}，与交易币种 {expected} 不一致"],
+        });
 
     /// <summary>
     /// 解析本次请求的「操作者 + 当前账套」。
@@ -336,13 +464,28 @@ public sealed class TransactionEndpoints : IEndpoint
 /// </param>
 /// <param name="Summary">交易摘要，必填，128 位以内。</param>
 /// <param name="Remark">备注，可选，256 位以内。</param>
+/// <param name="CurrencyCode">
+/// 交易币种（ISO 4217，如 <c>CNY</c>），必填且须为存在的启用币种。
+/// **须与 <paramref name="AccountId"/> 所属账户的币种一致**（见 <c>Account.CurrencyCode</c>）。
+/// </param>
+/// <param name="CounterpartyAccountId">
+/// 对手方账户主键，可选。用户从候选账户中**选中**时传它。
+/// 与 <paramref name="CounterpartyName"/> 同时给出时**以本字段为准**（主键比名称精确）。
+/// </param>
+/// <param name="CounterpartyName">
+/// 对手方账户名称，可选。用户**手工输入**（未命中候选）时传它；不存在则自动创建为个人往来账户。
+/// 与 <paramref name="CounterpartyAccountId"/> 均为空即「未指定对手方」，此时落回该币种的系统账本账户。
+/// </param>
 public sealed record TransactionRequest(
     string? Type,
     int AccountId,
     decimal Amount,
     string? OccurredAt,
     string? Summary,
-    string? Remark);
+    string? Remark,
+    string? CurrencyCode,
+    int? CounterpartyAccountId,
+    string? CounterpartyName);
 
 /// <summary>交易（对外暴露）。</summary>
 /// <param name="Id">交易主键。</param>
@@ -353,13 +496,20 @@ public sealed record TransactionRequest(
 /// <param name="Remark">备注；无备注时为 <c>null</c>。</param>
 /// <param name="AccountId">本次记账的目标账户主键（用户选定的那个账户）。</param>
 /// <param name="AccountName">目标账户名称。</param>
+/// <param name="CurrencyCode">交易币种代码，恒为大写。</param>
+/// <param name="CounterpartyName">
+/// 对手方账户名称；**未指定对手方**（落系统账本账户）时为 <c>null</c>。
+/// </param>
 /// <param name="CreatedAt">落库时间（UTC，ISO 8601）。</param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
 /// <para>
-/// 不含明细与对手方：本 DTO 只描述「记了哪一笔」。对手方恒为该账套的系统账本账户，
-/// 它不对任何用户呈现，把它放进响应只会多一个用户无法理解也无法操作的字段；
-/// 需要逐条明细（含对手方档位）请用 <c>GET /api/entries</c>。
+/// 不含明细：本 DTO 只描述「记了哪一笔」；需要逐条明细（含对手方档位）请用 <c>GET /api/entries</c>。
+/// </para>
+/// <para>
+/// <see cref="CounterpartyName"/> 仅在与账本账户配对时才是 <c>null</c>：账本账户是系统内部账户、
+/// 不对任何用户呈现，把它放进响应只会多一个用户无法理解也无法操作的字段；
+/// 而用户指定了来源/目标账户时，对手方是**他自己填的那个账户**，回传名称才让「记成了哪一笔」完整。
 /// </para>
 /// </remarks>
 public sealed record TransactionDto(
@@ -371,13 +521,18 @@ public sealed record TransactionDto(
     string? Remark,
     int AccountId,
     string AccountName,
+    string CurrencyCode,
+    string? CounterpartyName,
     DateTime CreatedAt)
 {
     /// <summary>由实体构造 DTO。</summary>
     /// <param name="transaction">交易实体。</param>
     /// <param name="account">本次记账的目标账户（调用方已取得，避免为取名再查一次库）。</param>
+    /// <param name="counterparty">
+    /// 对手方账户；**为 <c>null</c> 或为系统账本账户时，出参的对手方名称为 <c>null</c>**。
+    /// </param>
     /// <returns>交易 DTO。</returns>
-    public static TransactionDto From(Transaction transaction, Account account) => new(
+    public static TransactionDto From(Transaction transaction, Account account, Account? counterparty = null) => new(
         transaction.Id,
         transaction.AccountSetId,
         transaction.Type.ToString(),
@@ -388,5 +543,9 @@ public sealed record TransactionDto(
         transaction.Remark,
         account.Id,
         account.Name,
+        account.CurrencyCode,
+        // 账本账户与非系统账户在这里是同一行代码：账本账户对用户不可见，回传它的名称
+        // 等于泄露一个界面上不存在的账户。判据是 IsSystem 而非类型，与账本识别口径一致
+        counterparty is { IsSystem: false } ? counterparty.Name : null,
         DateTime.SpecifyKind(transaction.CreatedAt, DateTimeKind.Utc));
 }

@@ -2,9 +2,18 @@
 /**
  * 收支记账表单：被「收入」与「支出」两个入口页共用，`mode` 决定记的是哪一种。
  *
- * 两个入口的记账逻辑完全相同（拉账户、校验、提交、提示、时间换算），差异只有标题与提交的类型，
- * 故收敛在一个组件里；两个页面各自是独立文件，使路由切换必然重新挂载——
+ * 两个入口的记账逻辑完全相同（拉币种与账户、校验、提交、提示、时间换算），差异只有几处文案与
+ * 提交的类型，故收敛在一个组件里；两个页面各自是独立文件，使路由切换必然重新挂载——
  * 否则同一组件被两条路由复用时实例会被复用，用户已填的金额与摘要会残留到另一种记账上。
+ *
+ * 表单按「币种 → 主账户 → 对手方账户」的顺序自上而下填写，三者是联动的：
+ * - **币种在最前**：它是其余字段的筛选条件，先定币种才能给出该币种的账户候选。
+ *   换币种会清空两个账户选择——留着上一个币种选好的账户，提交必然撞上后端的跨币种校验。
+ * - **主账户**（收入账户 / 支出账户）：必须从候选中选定，**不接受不存在的名字**
+ *   （`freeText: false`）——记到不存在的账户上没有意义。它是这笔钱的落点。
+ * - **对手方账户**（来源账户 / 目标账户）：可留空，也可输入一个不存在的名字
+ *   （`freeText: true`）。留空表示「款项来自/去往账套之外」，后端会落到该币种的系统账本账户；
+ *   填了不存在的名字则由后端自动创建为个人往来账户。
  *
  * 账户候选只取**启用**的账户：停用账户不应再记新账（已停用账户上的历史明细照常可在
  * 「账目明细」页查到，该页用 `includeInactive: true`，口径不同属刻意）。
@@ -12,12 +21,11 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
+import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { useAccountsStore } from '@/stores/accounts'
-import {
-  useTransactionsStore,
-  type RecordableTransactionType,
-} from '@/stores/transactions'
+import { useCurrenciesStore } from '@/stores/currencies'
+import { useTransactionsStore, type RecordableTransactionType } from '@/stores/transactions'
 
 const props = defineProps<{
   /** 记账类型：`Income` 收入 / `Expense` 支出。 */
@@ -26,6 +34,7 @@ const props = defineProps<{
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
+const currenciesStore = useCurrenciesStore()
 const transactionsStore = useTransactionsStore()
 
 /** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
@@ -34,7 +43,17 @@ const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
 const errorMessage = ref('')
 const notice = ref('')
 
-const selectedAccountId = ref<number | string>('')
+/** 选定的币种代码；为空串表示币种字典尚未加载或一个币种都没有。 */
+const selectedCurrencyCode = ref('')
+
+/** 主账户：文本与主键分开持有，理由见 `AccountSearchSelect` 的说明。 */
+const primaryAccountId = ref<number | null>(null)
+const primaryAccountText = ref('')
+
+/** 对手方账户（收入页为「来源账户」，支出页为「目标账户」）。 */
+const counterpartyAccountId = ref<number | null>(null)
+const counterpartyAccountText = ref('')
+
 /** 金额草稿。**声明为 `string`**：输入框用 `type="text"`，v-model 不转型，恒为字符串。 */
 const draftAmount = ref('')
 const draftOccurredAt = ref('')
@@ -47,8 +66,37 @@ const hasAccountSet = computed(() => accountSets.currentId !== null)
 /** 记账类型的中文名，用于按钮与提示文案。 */
 const modeLabel = computed(() => (props.mode === 'Income' ? '收入' : '支出'))
 
-/** 账户候选：当前账套内我可见的**启用**账户（已由后端排除账本账户）。 */
-const accountOptions = computed(() => accountsStore.accounts)
+/**
+ * 主账户的字段名：收入页叫「收入账户」，支出页叫「支出账户」。
+ *
+ * 名字随方向变而非统一叫「账户」：用户看到「收入账户」就知道这里是钱的**落点**，
+ * 看到「来源账户」就知道那是钱的**来处**，两个框的分工无需额外解释。
+ */
+const primaryLabel = computed(() => `${modeLabel.value}账户`)
+
+/** 对手方账户的字段名：收入页为「来源账户」，支出页为「目标账户」。 */
+const counterpartyLabel = computed(() => (props.mode === 'Income' ? '来源账户' : '目标账户'))
+
+/** 可用币种；一个都没有时表单无从填起。 */
+const currencyOptions = computed(() => currenciesStore.currencies)
+
+/**
+ * 账户候选：当前账套内我可见的**启用**账户，且**币种与所选币种一致**。
+ *
+ * 按币种过滤是体验层的提前收敛，不是防线：真正的约束是后端的跨币种校验。
+ * 不过滤的话，用户会先选中一个别的币种的账户，提交时才被 400 挡下。
+ */
+const accountOptions = computed(() =>
+  accountsStore.accounts.filter((account) => account.currencyCode === selectedCurrencyCode.value),
+)
+
+/** 主账户字段的提示文案。 */
+const primaryPlaceholder = computed(() =>
+  accountOptions.value.length === 0 ? `当前币种下没有可用账户` : '输入关键词筛选，从候选中选择',
+)
+
+/** 对手方账户字段的提示文案。 */
+const counterpartyPlaceholder = computed(() => '留空即账本账户（账套之外）')
 
 /** 补零到两位。 */
 function pad(value: number): string {
@@ -118,24 +166,55 @@ function parseAmount(raw: unknown): number | null {
   return parsed
 }
 
-/** 拉取记账可选的账户（仅启用）。 */
-async function loadAccounts(): Promise<boolean> {
+/** 拉取币种字典与记账可选的账户（两者都只要启用的）。 */
+async function loadOptions(): Promise<boolean> {
   try {
-    await accountsStore.list(false)
+    // 并发拉取：两者互不依赖（账户的币种过滤在前端做），串行只是白白多等一次往返
+    await Promise.all([currenciesStore.loadActive(), accountsStore.list(false)])
     return true
   } catch (error) {
-    errorMessage.value = error instanceof ApiError ? error.message : '加载账户失败'
+    errorMessage.value = error instanceof ApiError ? error.message : '加载币种与账户失败'
     return false
   }
 }
 
-/** 复位表单：账户回到第一个候选、金额与摘要/备注清空、时间回到此刻。 */
+/**
+ * 复位表单：币种回到默认币种、主账户回到该币种下的第一个候选、对手方清空、时间回到此刻。
+ *
+ * 主账户预填第一个候选而非留空——记账是高频动作，绝大多数时候提交的就是默认那个账户。
+ */
 function resetFields(): void {
-  selectedAccountId.value = accountOptions.value[0]?.id ?? ''
+  selectedCurrencyCode.value = currenciesStore.defaultCode ?? currencyOptions.value[0]?.code ?? ''
+
+  const first = accountOptions.value[0] ?? null
+  primaryAccountId.value = first?.id ?? null
+  primaryAccountText.value = first?.name ?? ''
+
+  counterpartyAccountId.value = null
+  counterpartyAccountText.value = ''
+
   draftAmount.value = ''
   draftOccurredAt.value = nowLocalInput()
   draftSummary.value = ''
   draftRemark.value = ''
+}
+
+/**
+ * 换币种：先落定新币种，再清空两个账户选择。
+ *
+ * 上一个币种下选好的账户在新币种里根本不在候选中，留着它提交必然撞上后端的跨币种校验，
+ * 不如当场清掉，让用户在新币种的候选里重选。
+ *
+ * 用 `:value` + `@change` 而非 `v-model` + `@change`：后者两个监听器的执行顺序不确定，
+ * 而这里「先更新币种、再按新币种清空」是有序的。
+ */
+function onCurrencyChange(event: Event): void {
+  selectedCurrencyCode.value = (event.target as HTMLSelectElement).value
+
+  primaryAccountId.value = null
+  primaryAccountText.value = ''
+  counterpartyAccountId.value = null
+  counterpartyAccountText.value = ''
 }
 
 /**
@@ -152,9 +231,15 @@ async function submit(): Promise<void> {
   errorMessage.value = ''
   notice.value = ''
 
-  const accountId = Number(selectedAccountId.value)
-  if (!Number.isInteger(accountId) || accountId <= 0) {
-    errorMessage.value = '请选择账户'
+  const currencyCode = selectedCurrencyCode.value
+  if (currencyCode.length === 0) {
+    errorMessage.value = '请选择币种'
+    return
+  }
+
+  const accountId = primaryAccountId.value
+  if (accountId === null) {
+    errorMessage.value = `请选择${primaryLabel.value}`
     return
   }
 
@@ -178,6 +263,18 @@ async function submit(): Promise<void> {
 
   const remark = draftRemark.value.trim()
 
+  // 对手方可留空：留空即「款项来自/去往账套之外」，由后端落到该币种的系统账本账户。
+  // 与主账户重合时当场拦下——同一账户自转自的账是两条明细相互抵消的空交易，记了等于没记。
+  if (counterpartyAccountId.value !== null && counterpartyAccountId.value === accountId) {
+    errorMessage.value = `${counterpartyLabel.value}不能与${primaryLabel.value}是同一个账户`
+    return
+  }
+
+  // 两者至多传一个：从候选中选定后用户又改了名字，此时子组件已按新文本清空了 id，
+  // 故此处按「有 id 传 id、否则传名字」取值即可，不会同时送出两个互相矛盾的字段
+  const counterpartyId = counterpartyAccountId.value
+  const counterpartyName = counterpartyAccountText.value.trim()
+
   try {
     const created = await transactionsStore.record({
       type: props.mode,
@@ -186,18 +283,24 @@ async function submit(): Promise<void> {
       occurredAt,
       summary,
       remark: remark.length === 0 ? null : remark,
+      currencyCode,
+      counterpartyAccountId: counterpartyId,
+      counterpartyName:
+        counterpartyId === null && counterpartyName.length > 0 ? counterpartyName : null,
     })
 
     // 记账后清空并可立即接着记下一笔：金额与摘要是逐笔的，沿用上一笔只会导致误提交
     resetFields()
-    notice.value = `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}`
+    notice.value =
+      `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
+      `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）`
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '记账失败'
   }
 }
 
 // 账套切换后账户候选随之改变：重拉账户并复位表单，避免把账记到上一账套的账户上。
-// 未选择账套时清空，避免退出登录后仍残留可见数据。
+// 未选择账套时清空，避免退出登录后仍残留可见数据（币种字典虽是全局的，也一并清掉）。
 watch(
   () => accountSets.currentId,
   async (currentId) => {
@@ -206,11 +309,13 @@ watch(
 
     if (currentId === null) {
       accountsStore.clear()
+      currenciesStore.clear()
       return
     }
 
-    await loadAccounts()
-    resetFields()
+    if (await loadOptions()) {
+      resetFields()
+    }
   },
 )
 
@@ -219,7 +324,7 @@ onMounted(async () => {
     return
   }
 
-  if (await loadAccounts()) {
+  if (await loadOptions()) {
     resetFields()
   }
 })
@@ -235,17 +340,41 @@ onMounted(async () => {
     <template v-else>
       <form class="form" @submit.prevent="submit">
         <div class="field">
-          <label class="label" for="record-account">账户</label>
-          <select id="record-account" v-model="selectedAccountId">
-            <option v-if="accountOptions.length === 0" value="">当前账套内没有可用账户</option>
-            <option v-for="account in accountOptions" :key="account.id" :value="account.id">
-              {{ account.name }}
+          <label class="label" for="record-currency">币种</label>
+          <select id="record-currency" :value="selectedCurrencyCode" @change="onCurrencyChange">
+            <option v-if="currencyOptions.length === 0" value="">暂无可用币种</option>
+            <option v-for="currency in currencyOptions" :key="currency.id" :value="currency.code">
+              {{ currency.code }} {{ currency.name }}
             </option>
           </select>
         </div>
 
         <div class="field">
-          <label class="label" for="record-amount">金额（元）</label>
+          <label class="label" for="record-account">{{ primaryLabel }}</label>
+          <AccountSearchSelect
+            v-model:id="primaryAccountId"
+            v-model:text="primaryAccountText"
+            input-id="record-account"
+            :options="accountOptions"
+            :placeholder="primaryPlaceholder"
+            :free-text="false"
+          />
+        </div>
+
+        <div class="field">
+          <label class="label" for="record-counterparty">{{ counterpartyLabel }}</label>
+          <AccountSearchSelect
+            v-model:id="counterpartyAccountId"
+            v-model:text="counterpartyAccountText"
+            input-id="record-counterparty"
+            :options="accountOptions"
+            :placeholder="counterpartyPlaceholder"
+            :free-text="true"
+          />
+        </div>
+
+        <div class="field">
+          <label class="label" for="record-amount">金额（{{ selectedCurrencyCode || '—' }}）</label>
           <!-- 刻意用 type="text" 而非 type="number"：后者的 v-model 会隐式转型，
                输入有效数字时是 number、清空时是 string，两种类型混在一个 ref 里 -->
           <input
@@ -305,8 +434,10 @@ onMounted(async () => {
       <p v-if="notice" class="notice">{{ notice }}</p>
 
       <p class="hint">
-        一笔{{ modeLabel }}会同时记两条明细——所选账户与系统账本账户各一条、金额相等方向相反，
-        这正是复式记账的配平方式。账本账户为系统内部账户，不在账户列表与筛选列表中呈现。
+        一笔{{ modeLabel }}会同时记两条明细——{{ primaryLabel }}与{{ counterpartyLabel }}各一条、
+        金额相等方向相反，这正是复式记账的配平方式。{{ counterpartyLabel }}可以留空，
+        留空即表示款项来自或去往本账套之外（记入系统账本账户，该账户不在任何列表与筛选器中呈现）；
+        填入一个尚不存在的账户名时，会为你自动创建一个个人往来账户。只有**币种相同**的账户之间才能记账。
         发生时间取业务发生时间，可补记往日的{{ modeLabel }}。
       </p>
     </template>

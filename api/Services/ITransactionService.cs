@@ -28,7 +28,8 @@ public interface ITransactionService
     /// </returns>
     /// <remarks>
     /// 幂等：同一账户重复调用不会写出第二笔期初分录（账户创建与升级回填共用本方法）。
-    /// 账本账户不存在时按需自动创建（每账套至多一个，见 <see cref="Account.IsSystem"/>）。
+    /// 对手方取该账户**所属币种**的账本账户，不存在时按需自动创建
+    /// （每账套每币种至多一个，见 <see cref="Account.IsSystem"/> 与 <see cref="Account.CurrencyCode"/>）。
     /// </remarks>
     Task<bool> RecordOpeningBalanceAsync(
         Account account,
@@ -36,11 +37,20 @@ public interface ITransactionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 记一笔收入或支出——按「目标账户 ± 金额，系统账本账户 ∓ 金额」记两条明细。
+    /// 记一笔收入或支出——按「目标账户 ± 金额，对手方账户 ∓ 金额」记两条明细。
     /// </summary>
     /// <param name="account">
-    /// 目标账户，需已取得主键（即已落库），且必须是当前用户**可见**的账户。
+    /// 目标账户（收入账户 / 支出账户），需已取得主键（即已落库），且必须是当前用户**可见**的账户。
     /// 收入使其余额增加、支出使其减少。
+    /// </param>
+    /// <param name="counterpartyAccount">
+    /// 对手方账户，**可空**：
+    /// <list type="bullet">
+    ///   <item><c>null</c>：用该账户**所属币种**的系统账本账户配平，语义即「款项来自/去往账套之外」。</item>
+    ///   <item>非空：直接用传入的实体。此时这是一笔**两个真实账户之间的转账**，账本账户完全不参与。</item>
+    /// </list>
+    /// 非空时必须是当前用户可见的账户，且**币种须与 <paramref name="account"/> 相同**
+    /// （见下方「不变量」）。
     /// </param>
     /// <param name="type">
     /// 交易类型，仅 <see cref="TransactionType.Income"/> 与 <see cref="TransactionType.Expense"/> 有效
@@ -58,10 +68,16 @@ public interface ITransactionService
     /// 无需额外的配平校验；「方向 → 账户余额」的换算仍只有
     /// <see cref="SumSignedAmountsAsync"/> 一处，故本方法落地后账户余额自动生效。
     /// <para>
-    /// **前置条件**（本方法不重复校验，与 <see cref="IAccountService"/> 的取舍一致）：
+    /// **不变量：跨币种交易无法发生。** 对手方与目标账户的币种必须一致，否则抛 <see cref="ArgumentException"/>。
+    /// 端点层已先判一次并给出 400，此处再判是因为本方法是**唯一写账入口**——
+    /// 把它守在这里，「跨币种交易」在库里就不可能存在，与「配平由等额反向保证」同一性质。
+    /// </para>
+    /// <para>
+    /// **其余前置条件**（本方法不重复校验，与 <see cref="IAccountService"/> 的取舍一致）：
     /// <paramref name="type"/> 须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>、
-    /// <paramref name="amount"/> 须大于 0，且 <paramref name="account"/> 须是
-    /// <c>IAccountService.FindVisibleAsync</c> 取得的实体。这些由端点层拦下并给出 400/404。
+    /// <paramref name="amount"/> 须大于 0，且 <paramref name="account"/> 与
+    /// <paramref name="counterpartyAccount"/> 须是 <c>IAccountService.FindVisibleAsync</c> 取得的实体。
+    /// 这些由端点层拦下并给出 400/404。
     /// </para>
     /// <para>
     /// **本服务刻意不注入 <see cref="IAccountService"/>**：后者已注入本服务
@@ -70,12 +86,13 @@ public interface ITransactionService
     /// <see cref="IAccountService"/> 的方向刚好相反，勿将判定挪进来。
     /// </para>
     /// <para>
-    /// 对手方为该账套的系统账本账户（见 <see cref="Account.IsSystem"/>），不存在时按需自动创建，
-    /// 与期初余额同一口径。
+    /// 对手方为空时取该账套内**该币种**的系统账本账户（见 <see cref="Account.IsSystem"/>），
+    /// 不存在时按需自动创建，与期初余额同一口径。一个账套内每个币种各有一个账本账户。
     /// </para>
     /// </remarks>
     Task<Transaction> RecordIncomeExpenseAsync(
         Account account,
+        Account? counterpartyAccount,
         TransactionType type,
         decimal amount,
         DateTime occurredAt,

@@ -58,6 +58,33 @@ public interface IAccountService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 在指定账套内按**名称**查询当前用户可见的账户（不区分大小写）。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="name">账户名称（调用方需保证已 Trim 且非空）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>可见时返回账户实体；否则返回 <c>null</c>。</returns>
+    /// <remarks>
+    /// 供记账端点把用户手工输入的「来源账户/目标账户」解析成既有账户——**按名查找复用
+    /// <see cref="FindVisibleAsync"/> 的同一可见性条件**，否则会出现「按名找到了自己看不见的账户」
+    /// 这种比泄露存在性更糟的结果：它会被直接写进一笔真实交易。
+    /// <para>
+    /// 账户名称**不做全局唯一约束**（见 <see cref="Account.Name"/> 的说明：两个用户各有一个
+    /// 「我的钱包」是合法用法），故同名的可见账户理论上可能不止一个。此处按
+    /// 「公共账户优先、同档主键升序」取第一个，是**刻意的确定性选择**而非「随便挑一个」：
+    /// 用户键入一个公共账户名，期望的多半是那个公共账户，而不是自己恰好同名的个人账户。
+    /// </para>
+    /// </remarks>
+    Task<Account?> FindVisibleByNameAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string name,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 判断同一账套、同一归属范围内是否已存在同名账户（不区分大小写）。
     /// </summary>
     /// <param name="accountSetId">账套主键。</param>
@@ -83,6 +110,9 @@ public interface IAccountService
     /// <param name="scope">归属范围。</param>
     /// <param name="type">账户类型。</param>
     /// <param name="initialBalance">期初金额。</param>
+    /// <param name="currencyCode">
+    /// 币种代码（调用方需保证是**存在的启用币种**）。一经创建不可修改，见 <see cref="Account.CurrencyCode"/>。
+    /// </param>
     /// <param name="creatorUserId">
     /// 创建者主键。个人账户的归属人一律取该值，**忽略调用方传入的任何归属人**，
     /// 否则可伪造出「归属他人的个人账户」。
@@ -105,6 +135,7 @@ public interface IAccountService
         AccountScope scope,
         AccountType type,
         decimal initialBalance,
+        string currencyCode,
         int creatorUserId,
         CancellationToken cancellationToken = default);
 

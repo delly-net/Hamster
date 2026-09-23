@@ -103,6 +103,7 @@ public sealed class AccountEndpoints : IEndpoint
                 IUserService users,
                 IAccountSetService accountSets,
                 IAccountService accounts,
+                ICurrencyService currencies,
                 ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
@@ -129,6 +130,13 @@ public sealed class AccountEndpoints : IEndpoint
 
                 ValidateBalance(request.InitialBalance, errors);
 
+                // 币种须是**存在的启用币种**：停用币种不接受新绑定，否则「停用」就挡不住新数据继续引用它。
+                // 此处只判存在性，不把币种名称回填进错误文案——币种可被管理员改名，嵌进文案的旧名会随之过期
+                if (!await currencies.ExistsActiveAsync(request.CurrencyCode, cancellationToken))
+                {
+                    errors["currencyCode"] = ["请选择有效的币种"];
+                }
+
                 if (errors.Count > 0)
                 {
                     return Results.ValidationProblem(errors);
@@ -148,6 +156,7 @@ public sealed class AccountEndpoints : IEndpoint
                     scope,
                     type,
                     request.InitialBalance,
+                    request.CurrencyCode!,
                     actor!.Id,
                     cancellationToken);
 
@@ -171,8 +180,10 @@ public sealed class AccountEndpoints : IEndpoint
                 "在当前账套内新建账户。个人账户的归属人强制为当前登录者（请求体无需也无法指定归属人）；" +
                 "名称在「账套 + 归属范围」内不区分大小写唯一，重复返回 409。" +
                 $"账户类型只能是 {ASSIGNABLE_TYPE_HINT}：账本账户由系统自动创建，不接受手工指定。" +
-                "期初金额会同时落成一笔期初交易（借/贷各一条明细），对手方为该账套的期初账本账户——" +
-                "不存在时自动创建；期初金额为 0 时不写分录。");
+                "**currencyCode 必填**，须为存在的启用币种（见 GET /api/currencies）；" +
+                "币种是账户的计价单位，**一经创建不可修改**，需要换币种应停用后重新创建。" +
+                "期初金额会同时落成一笔期初交易（借/贷各一条明细），对手方为**该币种**的期初账本账户" +
+                "（每个币种各有一个，不存在时自动创建）；期初金额为 0 时不写分录。");
 
         group.MapPut("/{id:int}", async (
                 int id,
@@ -446,7 +457,16 @@ public sealed class AccountEndpoints : IEndpoint
 /// **不含 <c>Ledger</c>**：账本账户由系统自动创建，传它会被拒绝（见 <c>AccountTypeExtensions.IsUserAssignable</c>）。
 /// </param>
 /// <param name="InitialBalance">期初金额，两位小数以内，负债账户可为负。</param>
-public sealed record AccountRequest(string? Name, string? Scope, string? Type, decimal InitialBalance);
+/// <param name="CurrencyCode">
+/// 币种代码（ISO 4217，如 <c>CNY</c>），必填且须为存在的启用币种（见 <c>GET /api/currencies</c>）。
+/// 大小写不敏感，入库统一大写。
+/// </param>
+public sealed record AccountRequest(
+    string? Name,
+    string? Scope,
+    string? Type,
+    decimal InitialBalance,
+    string? CurrencyCode);
 
 /// <summary>修改账户请求体。</summary>
 /// <param name="Name">账户名称。</param>
@@ -455,6 +475,10 @@ public sealed record AccountRequest(string? Name, string? Scope, string? Type, d
 /// 也刻意不含期初金额：它已落成一笔期初交易，改写它等于篡改既成事实（见更新端点的说明）。
 /// 更刻意不含账户类型：类型是账户的分类身份，既有流水都按它归类，故一经创建同样不可修改；
 /// 字段不在这里，**请求里带上它也不会被读取**。
+/// <para>
+/// 同样不含币种：币种是账户的计价单位，既有流水都按它记账，中途改币种等于给历史金额换一套计价单位
+/// （一笔「100」在人民币下是一百元、在美元下是一百美元）。需要换币种时应停用后重新创建。
+/// </para>
 /// </remarks>
 public sealed record AccountUpdateRequest(string? Name);
 
@@ -471,6 +495,11 @@ public sealed record AccountUpdateRequest(string? Name);
 /// <param name="OwnerUsername">归属人用户名；公共账户为 <c>null</c>。</param>
 /// <param name="InitialBalance">期初金额。创建后不可修改。</param>
 /// <param name="Balance">余额（派生值，只读）。</param>
+/// <param name="CurrencyCode">
+/// 币种代码（如 <c>CNY</c>），**恒为大写**。创建后不可修改。
+/// 前端据此把账户按币种分组/过滤，并用 <c>GET /api/currencies</c> 下发的名称渲染中文标签——
+/// 本 DTO 不回传币种中文名，避免同一份对照表在前后端各存一份。
+/// </param>
 /// <param name="IsSystem">是否为系统自动创建的内置账户（当前即期初账本账户）。</param>
 /// <param name="IsActive">是否启用；<c>false</c> 表示已停用（软删除）。</param>
 /// <param name="CreatedAt">创建时间（UTC）。</param>
@@ -484,6 +513,7 @@ public sealed record AccountDto(
     string? OwnerUsername,
     decimal InitialBalance,
     decimal Balance,
+    string CurrencyCode,
     bool IsSystem,
     bool IsActive,
     DateTime CreatedAt)
@@ -519,6 +549,7 @@ public sealed record AccountDto(
         ownerUsername,
         account.InitialBalance,
         balance,
+        account.CurrencyCode,
         account.IsSystem,
         account.IsActive,
         // 从 Sqlite 读回的时间为 DateTimeKind.Unspecified，显式标记为 UTC，

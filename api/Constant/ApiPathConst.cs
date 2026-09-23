@@ -17,6 +17,16 @@ public static class ApiPathConst
     /// <summary>管理员账套管理端点路由分组前缀（需已激活的管理员身份）。</summary>
     public const string ADMIN_ACCOUNT_SETS_GROUP = "/api/admin/account-sets";
 
+    /// <summary>管理员币种管理端点路由分组前缀（需已激活的管理员身份）。</summary>
+    public const string ADMIN_CURRENCIES_GROUP = "/api/admin/currencies";
+
+    /// <summary>币种查询端点路由分组前缀（任意已登录用户，只读）。</summary>
+    /// <remarks>
+    /// 币种字典本身是全局的，但**不放在管理端**：记账表单与账户新建表单都要用它，
+    /// 而这两处面向所有登录用户。读端点在用户区、写端点在管理区，是刻意的分工。
+    /// </remarks>
+    public const string CURRENCY_GROUP = "/api/currencies";
+
     /// <summary>账套端点路由分组前缀（任意已登录用户）。</summary>
     public const string ACCOUNT_SET_GROUP = "/api/account-sets";
 

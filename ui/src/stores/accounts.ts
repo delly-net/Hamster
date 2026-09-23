@@ -73,6 +73,8 @@ export interface Account {
   initialBalance: number
   /** 余额；**只读派生值**，等于该账户全部交易明细的有符号汇总。 */
   balance: number
+  /** 记账币种代码（如 `CNY`）；创建后不可修改。**只有币种相同的账户之间才能交易**。 */
+  currencyCode: string
   /** 是否为系统自动创建的内置账户（当前即期初账本账户）。 */
   isSystem: boolean
   /** 是否启用；`false` 表示已停用（软删除）。 */
@@ -87,14 +89,17 @@ export interface CreateAccountPayload {
   scope: AccountScope
   type: AccountType
   initialBalance: number
+  /** 记账币种代码；必须是**启用的**币种。先在币种选择框中选定，再填其余字段。 */
+  currencyCode: string
 }
 
 /**
  * 修改账户的入参。
  *
- * **只有名称**：归属范围、归属人、期初金额与账户类型一经创建均不可修改，故都不在其中。
+ * **只有名称**：归属范围、归属人、期初金额、账户类型与币种一经创建均不可修改，故都不在其中。
  * 类型不可改的理由是——类型是账户的分类身份，既有流水都按它归类，换类型等于给历史流水换一套解释。
- * 后端 `PUT` 的请求体同样只有名称，传了类型不会被读取。
+ * 币种不可改的理由同理——它是一切金额的计价单位，换币种会让既有余额变成另一个数。
+ * 后端 `PUT` 的请求体同样只有名称，传了类型与币种不会被读取。
  */
 export interface UpdateAccountPayload {
   name: string
@@ -117,9 +122,7 @@ export const useAccountsStore = defineStore('accounts', () => {
   async function list(includeInactive = false): Promise<Account[]> {
     loading.value = true
     try {
-      const result = await request<Account[]>(
-        `${ACCOUNTS_PATH}?includeInactive=${includeInactive}`,
-      )
+      const result = await request<Account[]>(`${ACCOUNTS_PATH}?includeInactive=${includeInactive}`)
       accounts.value = result
       return result
     } finally {

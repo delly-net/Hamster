@@ -60,6 +60,33 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
     }
 
     /// <inheritdoc />
+    public async Task<Account?> FindVisibleByNameAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = Normalize(name);
+
+        var matched = await db.Queryable<Account>()
+            .Where(account => account.AccountSetId == accountSetId)
+            // 与列表、单条查询同一可见性条件（含账本账户的排除）：
+            // 三处各写一遍迟早漂移，届时「按名找到了看不见的账户」会被直接写进一笔真实交易
+            .Where(account => account.Type != AccountType.Ledger)
+            .WhereIF(!isAdmin, account => account.Scope == AccountScope.Public || account.OwnerUserId == userId)
+            .Where(account => account.Name.ToLower() == normalized)
+            // 公共账户优先于个人账户：用户键入一个公共账户名，期望的多半是那个公共账户，
+            // 而不是自己恰好同名的个人账户。同档再按主键升序，使结果确定而非「随便挑一个」。
+            .OrderBy(account => account.Scope == AccountScope.Public ? 0 : 1)
+            .OrderBy(account => account.Id)
+            .Take(1)
+            .ToListAsync(cancellationToken);
+
+        return matched.FirstOrDefault();
+    }
+
+    /// <inheritdoc />
     public async Task<bool> IsNameTakenAsync(
         int accountSetId,
         AccountScope scope,
@@ -92,6 +119,7 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
         AccountScope scope,
         AccountType type,
         decimal initialBalance,
+        string currencyCode,
         int creatorUserId,
         CancellationToken cancellationToken = default)
     {
@@ -104,6 +132,8 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
             OwnerUserId = scope == AccountScope.Personal ? creatorUserId : null,
             Type = type,
             InitialBalance = NormalizeBalance(initialBalance),
+            // 代码统一大写入库，与 CurrencyService 同一口径（币种表的代码恒为大写，比对才不会漏配）
+            CurrencyCode = currencyCode.Trim().ToUpperInvariant(),
             IsActive = true,
             // 系统账户只能由 TransactionService 在期初入账时创建（期初账本），此处一律为普通账户
             IsSystem = false,

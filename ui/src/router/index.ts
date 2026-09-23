@@ -94,6 +94,14 @@ const router = createRouter({
       meta: { requiresAuth: true, requiresAdmin: true },
     },
     {
+      path: '/admin/currencies',
+      name: 'admin-currencies',
+      // 币种管理（新增/改名/设为默认/停用），仅管理员可见。
+      // 币种是全局字典，与账套无关，故本路由不随当前账套变化
+      component: () => import('../views/CurrencyAdminView.vue'),
+      meta: { requiresAuth: true, requiresAdmin: true },
+    },
+    {
       path: '/reset-password',
       name: 'reset-password',
       // 密码重置落地页：令牌经查询参数传入，**必须免登录**，
