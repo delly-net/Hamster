@@ -9,7 +9,7 @@ agent: general-purpose
 
 # 项目文档整理压缩
 
-此技能用于对 EAZY.RAG 知识库当前项目「仓鼠理财管家」（项目 ID: 5）的项目信息中「执行计划」（executionSpecs）「注意事项」（executionNotes）「依赖关系」（dependencies）三份 Markdown 文档进行整理：读取三份文档，对文本长度超过 5000 字的文档进行优化压缩（整份判定 + 超长条款重点压缩，保留评级高的条款），经用户确认后写回项目信息。
+此技能用于对 EAZY.RAG 知识库当前项目「小仓鼠理财管家」（项目 ID: 5）的项目信息中「执行计划」（executionSpecs）「注意事项」（executionNotes）「依赖关系」（dependencies）三份 Markdown 文档进行整理：读取三份文档，对文本长度超过 5000 字的文档进行优化压缩（整份判定 + 超长条款重点压缩，保留评级高的条款），经用户确认后写回项目信息。
 
 ## 使用方法
 
