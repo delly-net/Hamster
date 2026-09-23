@@ -14,6 +14,10 @@
  * 筛选条件分「草稿」与「已应用」两份：改动输入不立刻发请求（避免边打字边查询），
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
  *
+ * 金额字段（`signedAmount`）缺失时**不允许静默留空**：三列表的全部语义都建立在「空白 vs 有值」上，
+ * 留空会把「字段没取到」呈现成「这行真的没有收支」。故缺失一律换成可见的 {@link AMOUNT_UNAVAILABLE}
+ * 标记并附一行说明（见 `hasAmountAnomaly`）。
+ *
  * 本页不做任何可见性过滤：后端只返回「挂在我可见账户上」的明细，前端过滤只会造出一道假防线。
  * 账户多选的候选含**已停用账户**（软删除后历史明细仍在，漏掉它们会让过去的账凭空消失），
  * 并排除账本账户——它是系统内部账户，后端从不返回它，本页无需为此写过滤逻辑。
@@ -48,6 +52,14 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
 
 /** `YYYY-MM-DD`，`<input type="date">` 的原生取值格式。 */
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
+
+/**
+ * 金额字段缺失时单元格显示的标记文案。
+ *
+ * 取值刻意**不像一个金额、也不像一个正常占位符**（页内其余占位一律是 `—`）：
+ * 它要让人一眼看出「这不是数据，是异常」，而不是被当成空值的另一种写法。
+ */
+const AMOUNT_UNAVAILABLE = '金额异常'
 
 const errorMessage = ref('')
 const notice = ref('')
@@ -86,12 +98,18 @@ const items = computed(() => entriesStore.page?.items ?? [])
 const totalCount = computed(() => entriesStore.page?.total ?? 0)
 const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / ENTRY_PAGE_SIZE)))
 
+/** 本页是否存在金额字段缺失的行；只在真出现异常时才给说明，正常页面上不加噪音。 */
+const hasAmountAnomaly = computed(() => items.value.some((entry) => !hasSignedAmount(entry)))
+
 /**
  * 本页小计：收入合计 / 支出合计 / 净额合计。
  *
  * 口径是**当页可见数据之和**——期初余额行按正负号入列后一并计入（它同样带 `signedAmount`），
  * 故小计恒等于三列本页数据相加，用户核对时不会对不上。支出合计累加的是负数，
  * 呈现时由 {@link formatSigned} 补回 `-` 号。
+ *
+ * 金额字段缺失时 `undefined` 会把合计污染成 `NaN`，小计于是显示 {@link AMOUNT_UNAVAILABLE}——
+ * 这是**刻意保留**的：只要有一行金额不明，这份小计就确实不可信，不该给出一个看着正常的数字。
  */
 const pageTotals = computed(() => {
   let income = 0
@@ -176,6 +194,21 @@ function formatAmount(value: number): string {
 }
 
 /**
+ * 本行的 `signedAmount` 是否是一个可用的数。
+ *
+ * 后端未返回该字段时它是 `undefined`（例如后端进程未按最新代码重建）。
+ * 这个判定**必须挡在分列之前**：`undefined > 0` 与 `undefined < 0` 同为 `false`，
+ * 一漏过去收入、支出两列就会**双双留空**——那看起来像「这些行真的没有收支」，
+ * 而不是「金额没取到」。
+ *
+ * @param entry 一条明细。
+ * @returns 字段存在且为有限数时返回 `true`。
+ */
+function hasSignedAmount(entry: Entry): boolean {
+  return Number.isFinite(entry.signedAmount)
+}
+
+/**
  * 格式化**带符号**金额：正数补 `+`、负数用 `-`，两者共用同一套两位小数口径。
  *
  * 符号手工拼接而非交给 `Intl`（它对正数不出 `+`），且用的是 ASCII 连字符——
@@ -183,11 +216,12 @@ function formatAmount(value: number): string {
  * 符号是金额本身的一部分（本页不再有单独的「方向」列），故 `+` 不能省。
  *
  * @param value 带符号金额（后端 `signedAmount`）。
- * @returns 带正负号的金额文本；无法解析时原样回显。
+ * @returns 带正负号的金额文本；非有限数返回 {@link AMOUNT_UNAVAILABLE} 而非 `String(value)`
+ * ——后者会把 `undefined` / `NaN` 原样渲染进表格，看起来像数据。
  */
 function formatSigned(value: number): string {
   if (!Number.isFinite(value)) {
-    return String(value)
+    return AMOUNT_UNAVAILABLE
   }
 
   return `${value < 0 ? '-' : '+'}${formatAmount(Math.abs(value))}`
@@ -214,18 +248,51 @@ function counterpartyText(entry: Entry): string {
   return COUNTERPARTY_KIND_LABELS[entry.counterpartyKind]
 }
 
-/** 收入列文本：只有正数行有值，其余行留空。 */
+/**
+ * 收入列文本：只有正数行有值，其余行留空。
+ *
+ * 「留空」是这一列的正常语义（这行不是收入），故仅在**金额字段不可用**时才给标记——
+ * 那种情况下「留空」与「没有收入」无法区分，只能显式说明。
+ */
 function incomeText(entry: Entry): string {
+  if (!hasSignedAmount(entry)) {
+    return AMOUNT_UNAVAILABLE
+  }
+
   return entry.signedAmount > 0 ? formatSigned(entry.signedAmount) : ''
 }
 
-/** 支出列文本：只有负数行有值，其余行留空。 */
+/** 支出列文本：只有负数行有值，其余行留空；字段不可用时同 {@link incomeText} 给标记。 */
 function expenseText(entry: Entry): string {
+  if (!hasSignedAmount(entry)) {
+    return AMOUNT_UNAVAILABLE
+  }
+
   return entry.signedAmount < 0 ? formatSigned(entry.signedAmount) : ''
 }
 
-/** 金额单元格的语义色类：正数绿（收入）、负数红（支出）。 */
-function amountClass(value: number): string {
+/**
+ * 金额单元格的语义色类。
+ *
+ * @param value 带符号金额。
+ * @param side 该单元格归属的列：收入列只在正数时着绿，支出列只在负数时着红，净额列两向都着色
+ * （净额是「这一行的增减合计」，正负两种结果都是它的正常取值）。
+ * @returns 语义色类名；**非有限数返回告警类**——不能让它落进 `expense` 分支
+ * （`NaN < 0` 为 `false`，会被判成收入而着绿，等于把一个缺失值标成正常收入）。
+ */
+function signedCellClass(value: number, side: 'income' | 'expense' | 'net'): string {
+  if (!Number.isFinite(value)) {
+    return 'amount-unknown'
+  }
+
+  if (side === 'income') {
+    return value > 0 ? 'income' : ''
+  }
+
+  if (side === 'expense') {
+    return value < 0 ? 'expense' : ''
+  }
+
   return value < 0 ? 'expense' : 'income'
 }
 
@@ -474,6 +541,14 @@ onMounted(() => {
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
       <p v-if="notice" class="notice">{{ notice }}</p>
 
+      <!-- 金额字段缺失时必须说明标记的含义：三列表的空白本身是语义，
+           缺字段却留空会让异常看起来像「这些行真的没有收支」 -->
+      <p v-if="hasAmountAnomaly" class="amount-warning">
+        收入/支出/净额列显示【{{ AMOUNT_UNAVAILABLE }}】，表示后端未返回金额字段 signedAmount
+        ——通常是后端服务未按最新代码重新构建启动。此时既无法判定这些行是收入还是支出，
+        【本页小计】也随之不可信。请重启后端服务后重新查询。
+      </p>
+
       <table class="table">
         <thead>
           <tr>
@@ -495,9 +570,13 @@ onMounted(() => {
             <td class="occurred">{{ formatDateTime(entry.occurredAt) }}</td>
             <td class="name">{{ entry.accountName }}</td>
             <!-- 收入/支出各占一列，同一行只有一列有值：金额的增减不再靠「借/贷」标签表达 -->
-            <td class="amount income">{{ incomeText(entry) }}</td>
-            <td class="amount expense">{{ expenseText(entry) }}</td>
-            <td class="amount" :class="amountClass(entry.signedAmount)">
+            <td class="amount" :class="signedCellClass(entry.signedAmount, 'income')">
+              {{ incomeText(entry) }}
+            </td>
+            <td class="amount" :class="signedCellClass(entry.signedAmount, 'expense')">
+              {{ expenseText(entry) }}
+            </td>
+            <td class="amount" :class="signedCellClass(entry.signedAmount, 'net')">
               {{ formatSigned(entry.signedAmount) }}
             </td>
             <td class="counterparty">{{ counterpartyText(entry) }}</td>
@@ -517,9 +596,13 @@ onMounted(() => {
         <tfoot v-if="items.length > 0">
           <tr>
             <td colspan="3" class="subtotal-label">本页小计</td>
-            <td class="amount income">{{ formatSigned(pageTotals.income) }}</td>
-            <td class="amount expense">{{ formatSigned(pageTotals.expense) }}</td>
-            <td class="amount" :class="amountClass(pageTotals.net)">
+            <td class="amount" :class="signedCellClass(pageTotals.income, 'income')">
+              {{ formatSigned(pageTotals.income) }}
+            </td>
+            <td class="amount" :class="signedCellClass(pageTotals.expense, 'expense')">
+              {{ formatSigned(pageTotals.expense) }}
+            </td>
+            <td class="amount" :class="signedCellClass(pageTotals.net, 'net')">
               {{ formatSigned(pageTotals.net) }}
             </td>
             <td colspan="3"></td>
@@ -591,14 +674,18 @@ onMounted(() => {
 }
 
 .error,
-.notice {
+.notice,
+.amount-warning {
   padding: 0.5rem 0.7rem;
   border-radius: var(--radius-control);
   font-size: 13px;
   line-height: 1.7;
 }
 
-.error {
+/* 金额字段缺失说明与 .error 同源：它同样是「需要立刻处理」的告知，
+   只是触发方是后端而非用户操作，故不另立一套配色。 */
+.error,
+.amount-warning {
   border: 1px solid var(--color-danger-border);
   background: var(--color-danger-soft);
   color: var(--color-danger);
@@ -784,6 +871,13 @@ onMounted(() => {
 
 .expense {
   color: var(--color-expense);
+}
+
+/* 金额字段缺失的单元格：复用危险色，但语义与 .expense 完全不同——
+   红色在这里说的是「这个值不可信」，不是「这是一笔支出」。
+   两者共用同一个色令牌是刻意的：全站只有一个红，不再引入第二种告警色。 */
+.amount-unknown {
+  color: var(--color-danger);
 }
 
 /* 小计行：用上边框与底色把它和明细行分开，读作「汇总」而不是「又一条明细」 */
