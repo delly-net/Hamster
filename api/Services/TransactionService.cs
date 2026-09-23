@@ -12,14 +12,23 @@ namespace Hamster.Api.Services;
 /// 账本账户的按需创建是记账流程的内部动作（它的期初金额恒为 0、不需要期初入账），
 /// 走账户服务反而会绕成「创建账户 → 期初入账 → 创建账户」的递归。这里直接写库，
 /// 也因此 <see cref="AccountService"/> 可以放心注入本服务而不会形成循环依赖。
+/// <para>
+/// **反向同理**：用户记账（<see cref="RecordIncomeExpenseAsync"/>）的目标账户由端点层经
+/// <c>IAccountService.FindVisibleAsync</c> 取好后传入，本服务不自行判定可见性——
+/// 一旦在此注入 <see cref="IAccountService"/> 就会与 <see cref="AccountService"/> 形成循环依赖。
+/// </para>
 /// </remarks>
 public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
 {
     /// <summary>
-    /// 期初账本账户的名称。
+    /// 账本账户的初始名称。
     /// 仅用于人工辨认——账户的识别依据是 <see cref="Account.IsSystem"/> 而非名称，
     /// 故用户改名后系统仍认得它，不会另建一个。
     /// </summary>
+    /// <remarks>
+    /// 名称保留「期初」二字是因为它诞生于期初入账；如今收入与支出也以同一账户配平，
+    /// 但该账户**从不出现在任何界面上**，故这个偏窄的名字只在库里可辨，不影响使用。
+    /// </remarks>
     private const string OPENING_LEDGER_NAME = "期初账本";
 
     /// <summary>期初交易的固定摘要。</summary>
@@ -67,8 +76,89 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             CreatedByUserId = createdByUserId,
         };
 
-        // 交易与其明细同事务写入：否则中途失败会留下一笔没有任何明细的「空交易」，
-        // 它既进不了余额汇总，又会让回填的查重判定误以为该账户已经入账。
+        await WriteBalancedTransactionAsync(
+            transaction,
+            account,
+            targetDirection,
+            ledger,
+            ledgerDirection,
+            amount,
+            cancellationToken);
+
+        return true;
+    }
+
+    /// <inheritdoc />
+    public async Task<Transaction> RecordIncomeExpenseAsync(
+        Account account,
+        TransactionType type,
+        decimal amount,
+        DateTime occurredAt,
+        string summary,
+        string? remark,
+        int createdByUserId,
+        CancellationToken cancellationToken = default)
+    {
+        var ledger = await EnsureLedgerAccountAsync(account.AccountSetId, cancellationToken);
+
+        // 收入使目标账户余额增加（借方）、支出使其减少（贷方）；账本账户一律取相反方向。
+        // 方向由交易类型决定而非金额符号：金额恒为正，两条明细等额反向，配平天然成立。
+        var targetDirection = type == TransactionType.Income
+            ? EntryDirection.Debit
+            : EntryDirection.Credit;
+        var ledgerDirection = targetDirection == EntryDirection.Debit
+            ? EntryDirection.Credit
+            : EntryDirection.Debit;
+
+        var transaction = new Transaction
+        {
+            AccountSetId = account.AccountSetId,
+            Type = type,
+            OccurredAt = occurredAt,
+            Summary = summary,
+            Remark = remark,
+            CreatedByUserId = createdByUserId,
+        };
+
+        await WriteBalancedTransactionAsync(
+            transaction,
+            account,
+            targetDirection,
+            ledger,
+            ledgerDirection,
+            Math.Abs(amount),
+            cancellationToken);
+
+        return transaction;
+    }
+
+    /// <summary>
+    /// 写入一笔「交易 + 借贷两条等额反向明细」，并回填交易主键。
+    /// </summary>
+    /// <param name="transaction">待写入的交易；除主键外的字段须已填好。</param>
+    /// <param name="targetAccount">目标账户（用户选定的那个账户）。</param>
+    /// <param name="targetDirection">目标账户的借贷方向。</param>
+    /// <param name="counterpartyAccount">对手方账户（当前恒为系统账本账户）。</param>
+    /// <param name="counterpartyDirection">对手方账户的借贷方向，须与 <paramref name="targetDirection"/> 相反。</param>
+    /// <param name="amount">两条明细的金额（恒为正、且相等）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>
+    /// 期初余额与用户记账两条写入路径共用本方法：两者的差异只在「方向怎么定」，
+    /// 落库动作完全相同，故收敛在此处，避免两份「插交易 + 插两条明细」的代码各自漂移。
+    /// <para>
+    /// **交易与其明细同事务写入**：否则中途失败会留下一笔没有任何明细的「空交易」，
+    /// 它既进不了余额汇总，又会让回填的查重判定误以为该账户已经入账。
+    /// </para>
+    /// </remarks>
+    private async Task WriteBalancedTransactionAsync(
+        Transaction transaction,
+        Account targetAccount,
+        EntryDirection targetDirection,
+        Account counterpartyAccount,
+        EntryDirection counterpartyDirection,
+        decimal amount,
+        CancellationToken cancellationToken)
+    {
         await db.Ado.UseTranAsync(async () =>
         {
             transaction.Id = await db.Insertable(transaction).ExecuteReturnIdentityAsync(cancellationToken);
@@ -78,21 +168,19 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
                 new()
                 {
                     TransactionId = transaction.Id,
-                    AccountId = account.Id,
+                    AccountId = targetAccount.Id,
                     Direction = targetDirection,
                     Amount = amount,
                 },
                 new()
                 {
                     TransactionId = transaction.Id,
-                    AccountId = ledger.Id,
-                    Direction = ledgerDirection,
+                    AccountId = counterpartyAccount.Id,
+                    Direction = counterpartyDirection,
                     Amount = amount,
                 },
             }).ExecuteCommandAsync(cancellationToken);
         });
-
-        return true;
     }
 
     /// <inheritdoc />

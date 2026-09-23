@@ -17,8 +17,9 @@ public enum AccountType
     /// 账本账户：记账用的汇总性账户，本身不代表具体的钱。
     /// </summary>
     /// <remarks>
-    /// **不接受用户手工指定或变更**，也**不在账户列表中呈现**——它只作为期初余额入账的
-    /// 复式对手方存在，由系统按账套按需自动创建（见 <c>TransactionService.EnsureLedgerAccountAsync</c>）。
+    /// **不接受用户手工指定或变更**，也**不在账户列表中呈现**——它只作为复式记账的对手方存在：
+    /// 期初余额、收入与支出都以它配平，由系统按账套按需自动创建
+    /// （见 <c>TransactionService.EnsureLedgerAccountAsync</c>）。
     /// 作为对手方，它照常计入余额汇总与复式配平，只是不出现在界面上。
     /// </remarks>
     Ledger = 1,
@@ -52,7 +53,7 @@ public static class AccountTypeExtensions
     /// <param name="type">账户类型。</param>
     /// <returns>可由用户指定返回 <c>true</c>。</returns>
     /// <remarks>
-    /// <see cref="AccountType.Ledger"/> 返回 <c>false</c>：账本账户由系统在期初入账时按需创建，
+    /// <see cref="AccountType.Ledger"/> 返回 <c>false</c>：账本账户由系统在首次需要对手方时按需创建，
     /// 它承担的是复式配平的对手方角色，每个账套恒只有一个，放开给用户手工建立会破坏该不变量。
     /// </remarks>
     public static bool IsUserAssignable(this AccountType type) => type != AccountType.Ledger;

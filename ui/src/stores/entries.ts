@@ -24,9 +24,10 @@ export type EntryDirection = 'Debit' | 'Credit'
 /**
  * 交易类型。
  *
- * 与后端枚举一一对应，当前只有期初余额一种（其余类型尚无写入路径，故不在契约里占位）。
+ * 与后端枚举一一对应（是枚举的**完整镜像**）：期初余额由系统在账户创建时自动生成，
+ * 收入与支出由用户在「收入」「支出」两个入口手工记账。
  */
-export type TransactionType = 'OpeningBalance'
+export type TransactionType = 'OpeningBalance' | 'Income' | 'Expense'
 
 /**
  * 对手方账户相对当前用户的可见性档位。
@@ -51,6 +52,8 @@ export const ENTRY_DIRECTION_LABELS: Record<EntryDirection, string> = {
  */
 export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
   OpeningBalance: '期初余额',
+  Income: '收入',
+  Expense: '支出',
 }
 
 /**
@@ -58,14 +61,15 @@ export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
  *
  * `Account` 档的文案是空串：该档对手方对当前用户可见，直接呈现 `counterpartyName`，
  * 不需要占位（见 `EntryQueryView.vue` 的 `counterpartyText`）。
- * `Ledger` 显示「期初」而非「账本账户」——账本账户对任何人不呈现，它当前只作为期初入账的
- * 复式对手方存在，用户在明细里看到它时想问的是「这笔钱从哪来」，答案就是「期初」。
+ * `Ledger` 显示「账本」：账本账户对任何人不呈现，它是**全部非期初交易的共同对手方**——
+ * 期初余额记在它身上，收入与支出也记在它身上。故这里只给一个中性词，
+ * 不能再写「期初」：那会把一笔支出的对手方误标成期初。
  * `Hidden` 与 `None` 同为「—」：前者是权限的结论（存在但不可见），后者是数据的问题（没有对手方），
  * 两者都不该给用户任何可辨识信息。
  */
 export const COUNTERPARTY_KIND_LABELS: Record<CounterpartyKind, string> = {
   Account: '',
-  Ledger: '期初',
+  Ledger: '账本',
   Hidden: '—',
   None: '—',
 }

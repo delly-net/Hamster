@@ -34,6 +34,22 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/income',
+      name: 'income',
+      // 记一笔收入（选定账户 + 金额 + 摘要即落表），面向所有登录用户，故不设 requiresAdmin。
+      // **与 /expense 各自独立组件**：共用一个组件时两条路由会复用实例、切换不重新挂载，
+      // 用户已填的金额与摘要会残留到另一种记账上
+      component: () => import('../views/IncomeView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/expense',
+      name: 'expense',
+      // 记一笔支出，与 /income 同构、仅方向相反，故理由同上
+      component: () => import('../views/ExpenseView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/entries',
       name: 'entries',
       // 账目明细查询（按时间区间与账户筛选当前账套内的交易明细），面向所有登录用户，故不设 requiresAdmin

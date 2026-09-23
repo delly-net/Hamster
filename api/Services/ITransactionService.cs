@@ -36,6 +36,55 @@ public interface ITransactionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 记一笔收入或支出——按「目标账户 ± 金额，系统账本账户 ∓ 金额」记两条明细。
+    /// </summary>
+    /// <param name="account">
+    /// 目标账户，需已取得主键（即已落库），且必须是当前用户**可见**的账户。
+    /// 收入使其余额增加、支出使其减少。
+    /// </param>
+    /// <param name="type">
+    /// 交易类型，仅 <see cref="TransactionType.Income"/> 与 <see cref="TransactionType.Expense"/> 有效
+    /// （见 <see cref="TransactionTypeExtensions.IsUserRecordable"/>）。
+    /// </param>
+    /// <param name="amount">金额，单位「元」，**恒为正**（方向由 <paramref name="type"/> 表达，不靠金额符号）。</param>
+    /// <param name="occurredAt">业务发生时间（UTC）。与落库时间刻意分开：可补记往日的收支。</param>
+    /// <param name="summary">交易摘要（调用方需保证已 Trim 且非空）。</param>
+    /// <param name="remark">备注；无备注时传 <c>null</c>。</param>
+    /// <param name="createdByUserId">记账人主键。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>写入后的交易（已取得主键）。</returns>
+    /// <remarks>
+    /// 复式配平（借方合计 == 贷方合计）由两条**等额反向**的明细天然满足，
+    /// 无需额外的配平校验；「方向 → 账户余额」的换算仍只有
+    /// <see cref="SumSignedAmountsAsync"/> 一处，故本方法落地后账户余额自动生效。
+    /// <para>
+    /// **前置条件**（本方法不重复校验，与 <see cref="IAccountService"/> 的取舍一致）：
+    /// <paramref name="type"/> 须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>、
+    /// <paramref name="amount"/> 须大于 0，且 <paramref name="account"/> 须是
+    /// <c>IAccountService.FindVisibleAsync</c> 取得的实体。这些由端点层拦下并给出 400/404。
+    /// </para>
+    /// <para>
+    /// **本服务刻意不注入 <see cref="IAccountService"/>**：后者已注入本服务
+    /// （账户创建时要写期初分录），反向注入会构成循环依赖。可见性判定因此留在端点层，
+    /// 服务层只负责写入——与 <c>EntryQueryService</c> 可以放心依赖
+    /// <see cref="IAccountService"/> 的方向刚好相反，勿将判定挪进来。
+    /// </para>
+    /// <para>
+    /// 对手方为该账套的系统账本账户（见 <see cref="Account.IsSystem"/>），不存在时按需自动创建，
+    /// 与期初余额同一口径。
+    /// </para>
+    /// </remarks>
+    Task<Transaction> RecordIncomeExpenseAsync(
+        Account account,
+        TransactionType type,
+        decimal amount,
+        DateTime occurredAt,
+        string summary,
+        string? remark,
+        int createdByUserId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 批量取账户余额的**有符号汇总**（借方为正、贷方为负之和），用于派生出账户余额。
     /// </summary>
     /// <param name="accountSetId">账套主键；只汇总该账套内的交易。</param>
