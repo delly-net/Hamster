@@ -15,9 +15,11 @@ export interface MenuItem {
 
 export const menuItems: MenuItem[] = [
   { label: '首页', routeName: 'home' },
-  // 收支记账是最高频的日常动作，紧随首页；两者各自独立入口（页内逻辑共用同一表单组件）
+  // 记账是最高频的日常动作，紧随首页；三者各自独立入口（页内逻辑共用同一表单组件）
   { label: '收入', routeName: 'income' },
   { label: '支出', routeName: 'expense' },
+  // 转账与收支同属用户手工记账，紧挨在支出之后
+  { label: '转账', routeName: 'transfer' },
   // 账户属于日常记账入口，面向所有登录用户，故不设 adminOnly
   { label: '账户管理', routeName: 'accounts' },
   // 查账入口，与账户管理同属面向所有登录用户的日常功能

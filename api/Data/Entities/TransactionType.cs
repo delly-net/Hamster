@@ -8,9 +8,9 @@ namespace Hamster.Api.Data.Entities;
 /// 「库里有值、代码里没有产生它的路径」这种无从判断真伪的状态出现。新增交易类型时在此追加，
 /// 并同步落库写入路径与文档。
 /// <para>
-/// 三种取值按「谁能产生它」分成两档，判定见 <see cref="TransactionTypeExtensions.IsUserRecordable"/>：
-/// <see cref="OpeningBalance"/> 由系统在账户创建时自动生成；<see cref="Income"/> 与
-/// <see cref="Expense"/> 由用户经记账端点手工写入。
+/// 四种取值按「谁能产生它」分成两档，判定见 <see cref="TransactionTypeExtensions.IsUserRecordable"/>：
+/// <see cref="OpeningBalance"/> 由系统在账户创建时自动生成；<see cref="Income"/>、
+/// <see cref="Expense"/> 与 <see cref="Transfer"/> 由用户经记账端点手工写入。
 /// </para>
 /// <para>
 /// 显式赋值而非依赖声明顺序：该值直接落库，调整枚举顺序会把既有数据解释成另一种类型。
@@ -32,6 +32,24 @@ public enum TransactionType
 
     /// <summary>支出：钱离开目标账户（目标账户记贷方、系统账本账户记借方）。</summary>
     Expense = 3,
+
+    /// <summary>
+    /// 转账：钱从一个真实账户挪到另一个真实账户。
+    /// </summary>
+    /// <remarks>
+    /// 转出账户记贷方（余额减少）、转入账户记借方（余额增加），**账本账户完全不参与**——
+    /// 钱没有进出账套，只是在账套内换了位置。
+    /// <para>
+    /// 方向与 <see cref="Expense"/> 同向（转出账户即「钱离开的那个账户」），
+    /// 故记账服务里的方向判定无需为它单开分支。
+    /// </para>
+    /// <para>
+    /// 与收支的区别在**账户类型**：只有资金账户与负债账户之间可以转账，判定见
+    /// <c>AccountTypeExtensions.IsTransferAccount</c>。往来账户是应收应付、账本账户是
+    /// 系统内部账户，两者都不作为转账的端点。
+    /// </para>
+    /// </remarks>
+    Transfer = 4,
 }
 
 /// <summary>
@@ -57,7 +75,12 @@ public static class TransactionTypeExtensions
     /// 自动生成，若能再手工记一笔「期初」，两个不变量会同时失效——
     /// 「期初交易金额恒等于账户的期初金额」与「每账户至多一条期初分录」
     /// （后者是 <c>TransactionService.BackfillOpeningBalancesAsync</c> 的幂等判据）。
+    /// <para>
+    /// <see cref="TransactionType.Transfer"/> 返回 <c>true</c>：转账同样由用户在记账端点手工写入，
+    /// 只是请求体形态不同（两个账户都必须指定，不落账本账户）。三种可记账类型共用同一个端点，
+    /// 差异只在端点的额外校验，故这里不把它排除在外。
+    /// </para>
     /// </remarks>
     public static bool IsUserRecordable(this TransactionType type) =>
-        type is TransactionType.Income or TransactionType.Expense;
+        type is TransactionType.Income or TransactionType.Expense or TransactionType.Transfer;
 }

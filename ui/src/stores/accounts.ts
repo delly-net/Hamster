@@ -57,6 +57,18 @@ export const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
   { value: 'Contact', label: ACCOUNT_TYPE_LABELS.Contact },
 ]
 
+/**
+ * 可作为**转账**转出/转入的账户类型（顺序即界面呈现顺序）。
+ *
+ * 与 `ACCOUNT_TYPE_OPTIONS` 的分工是——那者描述「用户可手工建立什么账户」（资金/负债/往来），
+ * 本数组描述「哪些账户之间可以转账」（只有资金与负债）。往来账户记录的是「谁欠谁」而不是
+ * 「钱放在哪」，钱转进转出它并不改变钱的所在，故不能作为转账端点。
+ *
+ * 这是后端 `AccountTypeExtensions.IsTransferAccount` 的前端镜像：后端会拒绝其余类型（400），
+ * 此处少几项只是不让用户先选中再被挡下（与按币种过滤候选同一取舍）。
+ */
+export const TRANSFER_ACCOUNT_TYPES: readonly AccountType[] = ['Fund', 'Liability']
+
 /** 账户（后端不回传内部明细）。 */
 export interface Account {
   id: number

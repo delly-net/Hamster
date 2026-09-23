@@ -13,7 +13,7 @@ namespace Hamster.Api.Services;
 /// 走账户服务反而会绕成「创建账户 → 期初入账 → 创建账户」的递归。这里直接写库，
 /// 也因此 <see cref="AccountService"/> 可以放心注入本服务而不会形成循环依赖。
 /// <para>
-/// **反向同理**：用户记账（<see cref="RecordIncomeExpenseAsync"/>）的目标账户由端点层经
+/// **反向同理**：用户记账（<see cref="RecordUserTransactionAsync"/>）的目标账户由端点层经
 /// <c>IAccountService.FindVisibleAsync</c> 取好后传入，本服务不自行判定可见性——
 /// 一旦在此注入 <see cref="IAccountService"/> 就会与 <see cref="AccountService"/> 形成循环依赖。
 /// </para>
@@ -100,7 +100,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     }
 
     /// <inheritdoc />
-    public async Task<Transaction> RecordIncomeExpenseAsync(
+    public async Task<Transaction> RecordUserTransactionAsync(
         Account account,
         Account? counterpartyAccount,
         TransactionType type,
@@ -125,10 +125,12 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
 
         // 未指定对手方 → 用该账户币种的系统账本账户，语义即「款项来自/去往账套之外」。
         // 指定了对手方 → 直接用：此时这是一笔两个真实账户之间的转账，账本账户完全不参与。
+        // 转账**必然**走「指定了对手方」这一支：它的转入账户是必填的，端点层已拦下两者皆空的情形。
         var counterparty = counterpartyAccount
             ?? await EnsureLedgerAccountAsync(account.AccountSetId, account.CurrencyCode, cancellationToken);
 
-        // 收入使目标账户余额增加（借方）、支出使其减少（贷方）；对手方一律取相反方向。
+        // 收入使目标账户余额增加（借方）、其余类型使其减少（贷方）；对手方一律取相反方向。
+        // 转账与支出同向：转出账户就是「钱离开的那个账户」，记贷方。
         // 方向由交易类型决定而非金额符号：金额恒为正，两条明细等额反向，配平天然成立。
         var targetDirection = type == TransactionType.Income
             ? EntryDirection.Debit
@@ -180,7 +182,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     /// 它既进不了余额汇总，又会让回填的查重判定误以为该账户已经入账。
     /// </para>
     /// <para>
-    /// **本方法不校验两个账户的币种是否一致**：那是调用方（<see cref="RecordIncomeExpenseAsync"/>）
+    /// **本方法不校验两个账户的币种是否一致**：那是调用方（<see cref="RecordUserTransactionAsync"/>）
     /// 的职责，它在调进来之前已经判过。
     /// </para>
     /// </remarks>

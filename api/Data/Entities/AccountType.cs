@@ -57,4 +57,28 @@ public static class AccountTypeExtensions
     /// 它承担的是复式配平的对手方角色，每个账套恒只有一个，放开给用户手工建立会破坏该不变量。
     /// </remarks>
     public static bool IsUserAssignable(this AccountType type) => type != AccountType.Ledger;
+
+    /// <summary>
+    /// 该类型是否可作为一笔转账的转出账户或转入账户。
+    /// </summary>
+    /// <param name="type">账户类型。</param>
+    /// <returns>可作为转账端点返回 <c>true</c>。</returns>
+    /// <remarks>
+    /// 只有 <see cref="AccountType.Fund"/>（资金账户）与 <see cref="AccountType.Liability"/>（负债账户）
+    /// 返回 <c>true</c>：这两类才是「钱本身」——现金、银行卡、电子钱包，以及信用卡、借款。
+    /// 转账的语义就是把钱在两处「钱」之间挪动，两个端点都必须是钱。
+    /// <para>
+    /// <see cref="AccountType.Contact"/> 返回 <c>false</c>：往来账户是人情往来与应收应付，
+    /// 它记录的是「谁欠谁」而不是「钱放在哪」，钱转进转出它并不改变钱的所在。
+    /// <see cref="AccountType.Ledger"/> 返回 <c>false</c>：它是系统内部账户，对任何用户不呈现，
+    /// 也不接受手工指定（见 <see cref="IsUserAssignable"/>）。
+    /// </para>
+    /// <para>
+    /// 与 <see cref="IsUserAssignable"/> 是同一取舍：规则挂在枚举旁而非端点里，因为它是
+    /// **类型的固有属性**（能不能作为一笔转账的端点），与「谁来校验」无关。端点的校验与错误文案
+    /// 均由此派生，新增枚举取值时不会漏掉落校验，也不会出现「文案说可选、代码其实拒绝」的漂移。
+    /// </para>
+    /// </remarks>
+    public static bool IsTransferAccount(this AccountType type) =>
+        type is AccountType.Fund or AccountType.Liability;
 }

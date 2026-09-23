@@ -3,7 +3,8 @@ using Hamster.Api.Data.Entities;
 namespace Hamster.Api.Services;
 
 /// <summary>
-/// 交易业务服务：期初余额入账、账户余额的汇总派生，以及升级既有数据库时的期初分录回填。
+/// 交易业务服务：期初余额入账、用户手工记账（收入/支出/转账）、账户余额的汇总派生，
+/// 以及升级既有数据库时的期初分录回填。
 /// </summary>
 /// <remarks>
 /// **「明细方向 → 账户余额」的换算收敛在本服务内**（<see cref="SumSignedAmountsAsync"/>），
@@ -37,24 +38,26 @@ public interface ITransactionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 记一笔收入或支出——按「目标账户 ± 金额，对手方账户 ∓ 金额」记两条明细。
+    /// 记一笔用户手工账（收入 / 支出 / 转账）——按「目标账户 ± 金额，对手方账户 ∓ 金额」记两条明细。
     /// </summary>
     /// <param name="account">
-    /// 目标账户（收入账户 / 支出账户），需已取得主键（即已落库），且必须是当前用户**可见**的账户。
-    /// 收入使其余额增加、支出使其减少。
+    /// 目标账户，需已取得主键（即已落库），且必须是当前用户**可见**的账户。
+    /// 收入时它是收入账户（余额增加），支出与转账时它是支出账户 / 转出账户（余额减少）。
     /// </param>
     /// <param name="counterpartyAccount">
     /// 对手方账户，**可空**：
     /// <list type="bullet">
-    ///   <item><c>null</c>：用该账户**所属币种**的系统账本账户配平，语义即「款项来自/去往账套之外」。</item>
+    ///   <item><c>null</c>：用该账户**所属币种**的系统账本账户配平，语义即「款项来自/去往账套之外」。
+    ///   仅收入与支出可以如此（转账必须指定对手方，端点层已拦）。</item>
     ///   <item>非空：直接用传入的实体。此时这是一笔**两个真实账户之间的转账**，账本账户完全不参与。</item>
     /// </list>
     /// 非空时必须是当前用户可见的账户，且**币种须与 <paramref name="account"/> 相同**
     /// （见下方「不变量」）。
     /// </param>
     /// <param name="type">
-    /// 交易类型，仅 <see cref="TransactionType.Income"/> 与 <see cref="TransactionType.Expense"/> 有效
-    /// （见 <see cref="TransactionTypeExtensions.IsUserRecordable"/>）。
+    /// 交易类型，取值须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>
+    /// （<see cref="TransactionType.Income"/> / <see cref="TransactionType.Expense"/> /
+    /// <see cref="TransactionType.Transfer"/>）。
     /// </param>
     /// <param name="amount">金额，单位「元」，**恒为正**（方向由 <paramref name="type"/> 表达，不靠金额符号）。</param>
     /// <param name="occurredAt">业务发生时间（UTC）。与落库时间刻意分开：可补记往日的收支。</param>
@@ -67,6 +70,13 @@ public interface ITransactionService
     /// 复式配平（借方合计 == 贷方合计）由两条**等额反向**的明细天然满足，
     /// 无需额外的配平校验；「方向 → 账户余额」的换算仍只有
     /// <see cref="SumSignedAmountsAsync"/> 一处，故本方法落地后账户余额自动生效。
+    /// <para>
+    /// **三种类型共用本方法**：收支与转账的落库动作完全相同（交易 + 两条等额反向明细），
+    /// 差异只在「方向怎么定」与「对手方是谁」。转账与支出同向——转出账户记贷方，
+    /// 与「钱离开的那个账户记贷方」这条规则一致，故无需为它单开分支。
+    /// 转账的两个账户都必须是资金账户或负债账户，该判定在端点层
+    /// （<c>AccountTypeExtensions.IsTransferAccount</c>），本方法不重复校验。
+    /// </para>
     /// <para>
     /// **不变量：跨币种交易无法发生。** 对手方与目标账户的币种必须一致，否则抛 <see cref="ArgumentException"/>。
     /// 端点层已先判一次并给出 400，此处再判是因为本方法是**唯一写账入口**——
@@ -90,7 +100,7 @@ public interface ITransactionService
     /// 不存在时按需自动创建，与期初余额同一口径。一个账套内每个币种各有一个账本账户。
     /// </para>
     /// </remarks>
-    Task<Transaction> RecordIncomeExpenseAsync(
+    Task<Transaction> RecordUserTransactionAsync(
         Account account,
         Account? counterpartyAccount,
         TransactionType type,

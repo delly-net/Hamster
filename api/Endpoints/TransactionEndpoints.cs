@@ -7,7 +7,7 @@ using Hamster.Api.Services;
 namespace Hamster.Api.Endpoints;
 
 /// <summary>
-/// 记账端点（任意已登录用户）：在当前账套内记一笔收入或支出。
+/// 记账端点（任意已登录用户）：在当前账套内记一笔收入、支出或转账。
 /// </summary>
 /// <remarks>
 /// **交易一律挂在账套下**：本端点先解析当前账套（请求头 <c>X-Account-Set-Id</c>），
@@ -20,8 +20,10 @@ namespace Hamster.Api.Endpoints;
 /// 刚好相反，勿把判定挪进服务层。
 /// </para>
 /// <para>
-/// 收入与支出**共用同一个端点**，类型由请求体的 <c>type</c> 区分：两者的落库动作完全相同
-/// （交易 + 借贷两条等额反向明细），差异只在借方向哪边，拆成两个端点只会得到两份近乎相同的代码。
+/// 收入、支出与转账**共用同一个端点**，类型由请求体的 <c>type</c> 区分：三者的落库动作完全相同
+/// （交易 + 借贷两条等额反向明细），差异只在借方向哪边与几处校验，拆成多个端点只会得到几份
+/// 近乎相同的代码。转账在请求体形态上的差异只有一处——<c>counterpartyAccountId</c> 由可选变为必填，
+/// 见 <see cref="ResolveTransferCounterpartyAsync"/>。
 /// </para>
 /// </remarks>
 public sealed class TransactionEndpoints : IEndpoint
@@ -45,6 +47,25 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <summary>交易类型校验失败时的字段错误。</summary>
     private static readonly string[] TYPE_ERROR =
         [$"交易类型只能是 {RECORDABLE_TYPE_HINT}（期初余额由系统自动生成，不接受手工记账）"];
+
+    /// <summary>
+    /// 可作为转账端点的账户类型文本，用于错误提示。
+    /// 由枚举派生而非手写：新增账户类型时提示自动跟上，理由同 <see cref="RECORDABLE_TYPE_HINT"/>。
+    /// </summary>
+    private static readonly string TRANSFER_ACCOUNT_TYPE_HINT =
+        string.Join(" / ", Enum.GetValues<AccountType>().Where(type => type.IsTransferAccount()));
+
+    /// <summary>转账未指定转入账户时的字段错误。</summary>
+    private static readonly string[] TRANSFER_COUNTERPARTY_ERROR =
+        ["转账必须指定转入账户（counterpartyAccountId），不能像收入/支出那样留空落账本账户"];
+
+    /// <summary>转账传了对手方账户名时的字段错误。</summary>
+    private static readonly string[] TRANSFER_NAME_ERROR =
+        ["转账的转入账户必须从候选中选定，不支持按账户名新建——自动创建的是往来账户，而转账只允许 " + TRANSFER_ACCOUNT_TYPE_HINT];
+
+    /// <summary>转出与转入为同一账户时的字段错误。</summary>
+    private static readonly string[] TRANSFER_SAME_ACCOUNT_ERROR =
+        ["转出账户与转入账户不能是同一个账户：两条明细会相互抵消，记了等于没记"];
 
     /// <summary>时间参数格式错误时的字段错误。</summary>
     private static readonly string[] TIME_ERROR =
@@ -78,9 +99,18 @@ public sealed class TransactionEndpoints : IEndpoint
 
                 var errors = new Dictionary<string, string[]>();
 
-                if (!TryResolveType(request.Type, out var type))
+                var hasType = TryResolveType(request.Type, out var type);
+                if (!hasType)
                 {
                     errors["type"] = TYPE_ERROR;
+                }
+
+                // 转账的两端都必须是真实存在的账户，故它不接受按名新建对手方：
+                // 那条路径会自动创建一个 Contact 往来账户，直接绕开「两端都必须是资金/负债账户」的限制。
+                // 在解析账户之前就拦下——这条与账户数据无关，纯请求体形态问题。
+                if (hasType && type == TransactionType.Transfer && !string.IsNullOrWhiteSpace(request.CounterpartyName))
+                {
+                    errors["counterpartyName"] = TRANSFER_NAME_ERROR;
                 }
 
                 ValidateAmount(request.Amount, errors);
@@ -123,15 +153,35 @@ public sealed class TransactionEndpoints : IEndpoint
                     });
                 }
 
-                var (counterparty, counterpartyFailure) = await ResolveCounterpartyAsync(
-                    request, accountSet, actor!, account.CurrencyCode, accounts, cancellationToken);
+                Account? counterparty;
 
-                if (counterpartyFailure is not null)
+                if (hasType && type == TransactionType.Transfer)
                 {
-                    return counterpartyFailure;
+                    // 转账走独立的解析路径：它不接受「留空落账本账户」，也不接受按名新建对手方
+                    var (resolved, transferFailure) = await ResolveTransferCounterpartyAsync(
+                        request, account, accountSet!, actor!.Id, actor.IsAdmin, accounts, cancellationToken);
+
+                    if (transferFailure is not null)
+                    {
+                        return transferFailure;
+                    }
+
+                    counterparty = resolved;
+                }
+                else
+                {
+                    var (resolved, counterpartyFailure) = await ResolveCounterpartyAsync(
+                        request, accountSet!, actor!, account.CurrencyCode, accounts, cancellationToken);
+
+                    if (counterpartyFailure is not null)
+                    {
+                        return counterpartyFailure;
+                    }
+
+                    counterparty = resolved;
                 }
 
-                var transaction = await transactions.RecordIncomeExpenseAsync(
+                var transaction = await transactions.RecordUserTransactionAsync(
                     account,
                     counterparty,
                     type,
@@ -147,11 +197,16 @@ public sealed class TransactionEndpoints : IEndpoint
                     TransactionDto.From(transaction, account, counterparty));
             })
             .WithName("RecordTransaction")
-            .WithSummary("记一笔收入或支出")
+            .WithSummary("记一笔收入、支出或转账")
             .WithDescription(
-                "在当前账套内记一笔收入或支出，**真实落库**并即时影响所选账户的余额。" +
+                "在当前账套内记一笔收入、支出或转账，**真实落库**并即时影响所选账户的余额。" +
                 "一笔交易由**借贷两条等额反向的明细**构成：收入记「收入账户借方 + 对手方贷方」，" +
-                "支出记「支出账户贷方 + 对手方借方」，复式配平（借方合计 == 贷方合计）由此天然成立。" +
+                "支出记「支出账户贷方 + 对手方借方」，转账记「转出账户贷方 + 转入账户借方」，" +
+                "复式配平（借方合计 == 贷方合计）由此天然成立。" +
+                "**type = Transfer 时的专有约束**：counterpartyAccountId **必填**（转账没有「款项来自/去往账套之外」" +
+                "这一说），不接受 counterpartyName（按名自动创建的是往来账户，而转账只允许 " + TRANSFER_ACCOUNT_TYPE_HINT + "）；" +
+                "accountId 与 counterpartyAccountId 的类型都必须满足转账账户限制，否则 400；两者不能是同一个账户；" +
+                "**不支持跨币种转账**，两端币种必须一致（与收支同一口径）。" +
                 "**对手方由调用方指定**（counterpartyAccountId 或 counterpartyName）：" +
                 "两者皆空即「未指定」，此时落回该账套内**该币种**的系统账本账户（Ledger 类型，不存在时自动创建），" +
                 "语义是「款项来自/去往账套之外」；指定了则是一笔**两个真实账户之间的转账**，账本账户完全不参与。" +
@@ -268,6 +323,99 @@ public sealed class TransactionEndpoints : IEndpoint
         });
 
     /// <summary>
+    /// 解析转账的转入账户。
+    /// </summary>
+    /// <param name="request">记账请求体。</param>
+    /// <param name="fromAccount">转出账户（已取得，即请求体的 <c>accountId</c>）。</param>
+    /// <param name="accountSet">当前账套。</param>
+    /// <param name="actorId">当前操作者主键。</param>
+    /// <param name="actorIsAdmin">当前操作者是否系统管理员。</param>
+    /// <param name="accounts">账户服务。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>转入账户与失败响应；成功时失败响应为 <c>null</c>。</returns>
+    /// <remarks>
+    /// **与 <see cref="ResolveCounterpartyAsync"/> 刻意分开**：那条路径支持「留空落该币种系统账本账户」
+    /// 与「按名自动创建个人往来账户」，两者对转账都无意义甚至有害——留空会让转账落成「转给账套之外」，
+    /// 按名新建出来的往来账户则直接绕开「两端都必须是资金/负债账户」的限制。两条路径的准入条件不同，
+    /// 合并成一个方法只会得到一串按类型分支的 if。
+    /// <para>
+    /// 转入账户的可见性口径与转出账户完全一致（<see cref="IAccountService.FindVisibleAsync"/>）：
+    /// 不可见账户与不存在的账户一律返回 404，不泄露存在性（沿用 #35/#38 口径）。
+    /// </para>
+    /// <para>
+    /// 账户类型判定用 <see cref="AccountTypeExtensions.IsTransferAccount"/>：两端的错误文案由它派生，
+    /// 端点里不手写类型清单。
+    /// </para>
+    /// </remarks>
+    private static async Task<(Account? Counterparty, IResult? Failure)> ResolveTransferCounterpartyAsync(
+        TransactionRequest request,
+        Account fromAccount,
+        AccountSet accountSet,
+        int actorId,
+        bool actorIsAdmin,
+        IAccountService accounts,
+        CancellationToken cancellationToken)
+    {
+        var toAccountId = request.CounterpartyAccountId;
+        if (toAccountId is null)
+        {
+            return (null, Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["counterpartyAccountId"] = TRANSFER_COUNTERPARTY_ERROR,
+            }));
+        }
+
+        // 自转自的账是两条明细相互抵消的空交易，记了等于没记（收入/支出只在前端拦，转账后端一并拦）
+        if (toAccountId.Value == fromAccount.Id)
+        {
+            return (null, Results.ValidationProblem(new Dictionary<string, string[]>
+            {
+                ["counterpartyAccountId"] = TRANSFER_SAME_ACCOUNT_ERROR,
+            }));
+        }
+
+        var toAccount = await accounts.FindVisibleAsync(
+            toAccountId.Value, accountSet.Id, actorId, actorIsAdmin, cancellationToken);
+
+        if (toAccount is null)
+        {
+            return (null, Results.NotFound(new { message = "转入账户不存在" }));
+        }
+
+        if (!fromAccount.Type.IsTransferAccount())
+        {
+            return (null, TransferAccountTypeProblem(fromAccount, "accountId", "转出账户"));
+        }
+
+        if (!toAccount.Type.IsTransferAccount())
+        {
+            return (null, TransferAccountTypeProblem(toAccount, "counterpartyAccountId", "转入账户"));
+        }
+
+        // 跨币种转账被拒绝——与收支同一口径：把两种货币的金额裸加总会得到一个没有意义的数。
+        // 前端已按币种过滤两端候选，此处是防绕过：直接构造请求即可提交任意组合
+        if (!string.Equals(toAccount.CurrencyCode, fromAccount.CurrencyCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return (null, CurrencyMismatch(toAccount.CurrencyCode, fromAccount.CurrencyCode, "转入账户"));
+        }
+
+        return (toAccount, null);
+    }
+
+    /// <summary>
+    /// 构造「账户类型不能作为转账端点」的字段级 400。
+    /// </summary>
+    /// <param name="account">类型不合规的账户。</param>
+    /// <param name="field">请求体中该账户对应的字段名（<c>accountId</c> / <c>counterpartyAccountId</c>）。</param>
+    /// <param name="label">该端点的中文称谓（转出账户 / 转入账户）。</param>
+    /// <returns>400 响应。</returns>
+    private static IResult TransferAccountTypeProblem(Account account, string field, string label) =>
+        Results.ValidationProblem(new Dictionary<string, string[]>
+        {
+            [field] = [$"{label}「{account.Name}」的类型是 {account.Type}，转账只允许 {TRANSFER_ACCOUNT_TYPE_HINT}"],
+        });
+
+    /// <summary>
     /// 解析本次请求的「操作者 + 当前账套」。
     /// </summary>
     /// <param name="context">当前 HTTP 上下文。</param>
@@ -323,7 +471,7 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <param name="amount">原始金额。</param>
     /// <param name="errors">按字段聚合的错误字典。</param>
     /// <remarks>
-    /// 收入/支出的方向由交易类型表达、不靠金额符号，故这里**只接受正数**——
+    /// 增减方向由交易类型表达、不靠金额符号，故这里**只接受正数**——
     /// 「−100 的支出」是自相矛盾的输入，应当报错而不是被悄悄解释成一笔收入。
     /// 小数位超过两位则拒绝，避免「提交 1.005 却因入库存两位小数而悄悄变成 1.01」这类无声偏差。
     /// </remarks>
@@ -331,7 +479,7 @@ public sealed class TransactionEndpoints : IEndpoint
     {
         if (amount <= 0)
         {
-            errors["amount"] = ["金额必须大于 0（收入与支出的方向由交易类型表达，不用金额符号）"];
+            errors["amount"] = ["金额必须大于 0（金额恒为正，增减由交易类型表达，不用金额符号）"];
         }
         else if (decimal.Round(amount, 2) != amount)
         {
@@ -453,12 +601,15 @@ public sealed class TransactionEndpoints : IEndpoint
 
 /// <summary>记账请求体。</summary>
 /// <param name="Type">
-/// 交易类型：<c>Income</c>（收入）或 <c>Expense</c>（支出）。
+/// 交易类型：<c>Income</c>（收入）、<c>Expense</c>（支出）或 <c>Transfer</c>（转账）。
 /// **不含 <c>OpeningBalance</c>**：期初余额由系统在账户创建时自动生成，传它会被拒绝
 /// （见 <c>TransactionTypeExtensions.IsUserRecordable</c>）。
 /// </param>
-/// <param name="AccountId">目标账户主键，须为当前用户可见的账户（收入使其余额增加、支出使其减少）。</param>
-/// <param name="Amount">金额，**必须大于 0**，两位小数以内；方向由 <paramref name="Type"/> 表达。</param>
+/// <param name="AccountId">
+/// 主账户主键，须为当前用户可见的账户：收入时它是收入账户（余额增加），
+/// 支出时是支出账户、转账时是**转出账户**（余额减少）。
+/// </param>
+/// <param name="Amount">金额，**必须大于 0**，两位小数以内；增减方向由 <paramref name="Type"/> 表达。</param>
 /// <param name="OccurredAt">
 /// 业务发生时间（ISO 8601，UTC），可补记往日的收支；**省略即取当前时刻**。
 /// </param>
@@ -471,10 +622,19 @@ public sealed class TransactionEndpoints : IEndpoint
 /// <param name="CounterpartyAccountId">
 /// 对手方账户主键，可选。用户从候选账户中**选中**时传它。
 /// 与 <paramref name="CounterpartyName"/> 同时给出时**以本字段为准**（主键比名称精确）。
+/// <para>
+/// <c>type = Transfer</c> 时它**必填且语义为「转入账户」**：转账的两端都是真实账户，
+/// 没有「款项来自/去往账套之外」这一说，故不接受留空；两端类型都须满足
+/// <c>AccountTypeExtensions.IsTransferAccount</c>，且不能是同一个账户。
+/// </para>
 /// </param>
 /// <param name="CounterpartyName">
 /// 对手方账户名称，可选。用户**手工输入**（未命中候选）时传它；不存在则自动创建为个人往来账户。
 /// 与 <paramref name="CounterpartyAccountId"/> 均为空即「未指定对手方」，此时落回该币种的系统账本账户。
+/// <para>
+/// <c>type = Transfer</c> 时**不接受本字段**（400）：按名自动创建的是往来账户，
+/// 而转账只允许资金账户与负债账户，接受它等于绕开该限制。
+/// </para>
 /// </param>
 public sealed record TransactionRequest(
     string? Type,
@@ -490,15 +650,17 @@ public sealed record TransactionRequest(
 /// <summary>交易（对外暴露）。</summary>
 /// <param name="Id">交易主键。</param>
 /// <param name="AccountSetId">所属账套主键。</param>
-/// <param name="Type">交易类型，取值 <c>Income</c> / <c>Expense</c>。</param>
+/// <param name="Type">交易类型，取值 <c>Income</c> / <c>Expense</c> / <c>Transfer</c>。</param>
 /// <param name="OccurredAt">业务发生时间（UTC，ISO 8601）。</param>
 /// <param name="Summary">交易摘要。</param>
 /// <param name="Remark">备注；无备注时为 <c>null</c>。</param>
-/// <param name="AccountId">本次记账的目标账户主键（用户选定的那个账户）。</param>
-/// <param name="AccountName">目标账户名称。</param>
+/// <param name="AccountId">
+/// 本次记账的主账户主键（用户选定的那个账户）：收入/支出时是收入/支出账户，转账时是**转出账户**。
+/// </param>
+/// <param name="AccountName">主账户名称（转账时为转出账户名称）。</param>
 /// <param name="CurrencyCode">交易币种代码，恒为大写。</param>
 /// <param name="CounterpartyName">
-/// 对手方账户名称；**未指定对手方**（落系统账本账户）时为 <c>null</c>。
+/// 对手方账户名称（转账时为**转入账户名称**）；**未指定对手方**（落系统账本账户）时为 <c>null</c>。
 /// </param>
 /// <param name="CreatedAt">落库时间（UTC，ISO 8601）。</param>
 /// <remarks>
@@ -527,9 +689,10 @@ public sealed record TransactionDto(
 {
     /// <summary>由实体构造 DTO。</summary>
     /// <param name="transaction">交易实体。</param>
-    /// <param name="account">本次记账的目标账户（调用方已取得，避免为取名再查一次库）。</param>
+    /// <param name="account">本次记账的主账户（调用方已取得，避免为取名再查一次库）。</param>
     /// <param name="counterparty">
     /// 对手方账户；**为 <c>null</c> 或为系统账本账户时，出参的对手方名称为 <c>null</c>**。
+    /// 转账的对手方是转入账户，必然是一个非系统账户，故名称恒有值。
     /// </param>
     /// <returns>交易 DTO。</returns>
     public static TransactionDto From(Transaction transaction, Account account, Account? counterparty = null) => new(

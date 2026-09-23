@@ -31,9 +31,9 @@ export type EntryDirection = 'Debit' | 'Credit'
  * 交易类型。
  *
  * 与后端枚举一一对应（是枚举的**完整镜像**）：期初余额由系统在账户创建时自动生成，
- * 收入与支出由用户在「收入」「支出」两个入口手工记账。
+ * 收入、支出与转账由用户在「收入」「支出」「转账」三个入口手工记账。
  */
-export type TransactionType = 'OpeningBalance' | 'Income' | 'Expense'
+export type TransactionType = 'OpeningBalance' | 'Income' | 'Expense' | 'Transfer'
 
 /**
  * 对手方账户相对当前用户的可见性档位。
@@ -54,6 +54,9 @@ export const TRANSACTION_TYPE_LABELS: Record<TransactionType, string> = {
   OpeningBalance: '期初余额',
   Income: '收入',
   Expense: '支出',
+  // 转账在明细页落成两条（转出=支出、转入=收入），这条标签是用户区分
+  // 「账户之间的搬运」与「真正的收支」的唯一线索，不可省
+  Transfer: '转账',
 }
 
 /**

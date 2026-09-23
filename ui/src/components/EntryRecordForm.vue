@@ -1,36 +1,79 @@
 <script setup lang="ts">
 /**
- * 收支记账表单：被「收入」与「支出」两个入口页共用，`mode` 决定记的是哪一种。
+ * 记账表单：被「收入」「支出」「转账」三个入口页共用，`mode` 决定记的是哪一种。
  *
- * 两个入口的记账逻辑完全相同（拉币种与账户、校验、提交、提示、时间换算），差异只有几处文案与
- * 提交的类型，故收敛在一个组件里；两个页面各自是独立文件，使路由切换必然重新挂载——
- * 否则同一组件被两条路由复用时实例会被复用，用户已填的金额与摘要会残留到另一种记账上。
+ * 三个入口的记账逻辑完全相同（拉币种与账户、校验、提交、提示、时间换算），差异只有几处文案、
+ * 账户候选范围与「对手方是否必填」，故收敛在一个组件里；三个页面各自是独立文件，
+ * 使路由切换必然重新挂载——否则同一组件被多条路由复用时实例会被复用，
+ * 用户已填的金额与摘要会残留到另一种记账上。
  *
  * 表单按「币种 → 主账户 → 对手方账户」的顺序自上而下填写，三者是联动的：
  * - **币种在最前**：它是其余字段的筛选条件，先定币种才能给出该币种的账户候选。
  *   换币种会清空两个账户选择——留着上一个币种选好的账户，提交必然撞上后端的跨币种校验。
- * - **主账户**（收入账户 / 支出账户）：必须从候选中选定，**不接受不存在的名字**
- *   （`freeText: false`）——记到不存在的账户上没有意义。它是这笔钱的落点。
- * - **对手方账户**（来源账户 / 目标账户）：可留空，也可输入一个不存在的名字
+ * - **主账户**（收入账户 / 支出账户 / 转出账户）：必须从候选中选定，**不接受不存在的名字**
+ *   （`freeText: false`）——记到不存在的账户上没有意义。
+ * - **对手方账户**（来源账户 / 目标账户 / 转入账户）：可留空，也可输入一个不存在的名字
  *   （`freeText: true`）。留空表示「款项来自/去往账套之外」，后端会落到该币种的系统账本账户；
  *   填了不存在的名字则由后端自动创建为个人往来账户。
- *
- * 账户候选只取**启用**的账户：停用账户不应再记新账（已停用账户上的历史明细照常可在
- * 「账目明细」页查到，该页用 `includeInactive: true`，口径不同属刻意）。
- * 账本账户不在候选中——它是系统内部账户，后端从不返回它，本组件无需为此写过滤。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
-import { useAccountsStore } from '@/stores/accounts'
+import { TRANSFER_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCurrenciesStore } from '@/stores/currencies'
 import { useTransactionsStore, type RecordableTransactionType } from '@/stores/transactions'
 
 const props = defineProps<{
-  /** 记账类型：`Income` 收入 / `Expense` 支出。 */
+  /** 记账类型：`Income` 收入 / `Expense` 支出 / `Transfer` 转账。 */
   mode: RecordableTransactionType
 }>()
+
+/** 是否在记一笔转账。转账的几处差异都由它分支。 */
+const isTransfer = computed(() => props.mode === 'Transfer')
+
+/**
+ * 各记账类型的文案与账户角色。
+ *
+ * 用查找表而非嵌套三元表达式：类型从两种涨到三种后，三元表达式会退化成
+ * 「A ? x : B ? y : z」这类读不出对应关系的式子，而这张表把「哪种记账用哪套词」摊平了，
+ * 新增类型只需加一行、漏加时 TypeScript 会因 `Record` 缺键当场报错。
+ */
+const MODE_META: Record<
+  RecordableTransactionType,
+  {
+    /** 记账类型的中文名，用于按钮与提示文案。 */
+    label: string
+    /** 主账户的字段名。 */
+    primaryLabel: string
+    /** 对手方账户的字段名。 */
+    counterpartyLabel: string
+    /** 摘要输入框的占位示例。 */
+    summaryPlaceholder: string
+  }
+> = {
+  Income: {
+    label: '收入',
+    primaryLabel: '收入账户',
+    counterpartyLabel: '来源账户',
+    summaryPlaceholder: '如：工资',
+  },
+  Expense: {
+    label: '支出',
+    primaryLabel: '支出账户',
+    counterpartyLabel: '目标账户',
+    summaryPlaceholder: '如：午餐',
+  },
+  Transfer: {
+    label: '转账',
+    primaryLabel: '转出账户',
+    counterpartyLabel: '转入账户',
+    summaryPlaceholder: '如：还信用卡',
+  },
+}
+
+/** 当前记账类型的文案与账户角色。 */
+const meta = computed(() => MODE_META[props.mode])
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
@@ -64,30 +107,36 @@ const draftRemark = ref('')
 const hasAccountSet = computed(() => accountSets.currentId !== null)
 
 /** 记账类型的中文名，用于按钮与提示文案。 */
-const modeLabel = computed(() => (props.mode === 'Income' ? '收入' : '支出'))
+const modeLabel = computed(() => meta.value.label)
 
 /**
- * 主账户的字段名：收入页叫「收入账户」，支出页叫「支出账户」。
+ * 主账户的字段名：收入页叫「收入账户」，支出页叫「支出账户」，转账页叫「转出账户」。
  *
  * 名字随方向变而非统一叫「账户」：用户看到「收入账户」就知道这里是钱的**落点**，
- * 看到「来源账户」就知道那是钱的**来处**，两个框的分工无需额外解释。
+ * 看到「转出账户」就知道这里是钱的**来处**，两个框的分工无需额外解释。
  */
-const primaryLabel = computed(() => `${modeLabel.value}账户`)
+const primaryLabel = computed(() => meta.value.primaryLabel)
 
-/** 对手方账户的字段名：收入页为「来源账户」，支出页为「目标账户」。 */
-const counterpartyLabel = computed(() => (props.mode === 'Income' ? '来源账户' : '目标账户'))
+/** 对手方账户的字段名：收入页为「来源账户」，支出页为「目标账户」，转账页为「转入账户」。 */
+const counterpartyLabel = computed(() => meta.value.counterpartyLabel)
 
 /** 可用币种；一个都没有时表单无从填起。 */
 const currencyOptions = computed(() => currenciesStore.currencies)
 
 /**
- * 账户候选：当前账套内我可见的**启用**账户，且**币种与所选币种一致**。
+ * 账户候选：当前账套内我可见的**启用**账户，且**币种与所选币种一致**；
+ * 转账时**还要求类型是资金账户或负债账户**。
  *
- * 按币种过滤是体验层的提前收敛，不是防线：真正的约束是后端的跨币种校验。
- * 不过滤的话，用户会先选中一个别的币种的账户，提交时才被 400 挡下。
+ * 两处过滤都是体验层的提前收敛，不是防线：真正的约束是后端的跨币种校验与
+ * `AccountTypeExtensions.IsTransferAccount` 校验。不过滤的话，用户会先选中一个
+ * 别的币种或往来类型的账户，提交时才被 400 挡下。
  */
 const accountOptions = computed(() =>
-  accountsStore.accounts.filter((account) => account.currencyCode === selectedCurrencyCode.value),
+  accountsStore.accounts.filter(
+    (account) =>
+      account.currencyCode === selectedCurrencyCode.value &&
+      (!isTransfer.value || TRANSFER_ACCOUNT_TYPES.includes(account.type)),
+  ),
 )
 
 /** 主账户字段的提示文案。 */
@@ -95,8 +144,18 @@ const primaryPlaceholder = computed(() =>
   accountOptions.value.length === 0 ? `当前币种下没有可用账户` : '输入关键词筛选，从候选中选择',
 )
 
-/** 对手方账户字段的提示文案。 */
-const counterpartyPlaceholder = computed(() => '留空即账本账户（账套之外）')
+/**
+ * 对手方账户字段的提示文案。
+ *
+ * 转账下不再是「可留空」——两个真实账户之间才有转账，没有「账套之外」这一说。
+ */
+const counterpartyPlaceholder = computed(() =>
+  isTransfer.value
+    ? accountOptions.value.length === 0
+      ? '当前币种下没有可用账户'
+      : '输入关键词筛选，从候选中选择'
+    : '留空即账本账户（账套之外）',
+)
 
 /** 补零到两位。 */
 function pad(value: number): string {
@@ -263,7 +322,13 @@ async function submit(): Promise<void> {
 
   const remark = draftRemark.value.trim()
 
-  // 对手方可留空：留空即「款项来自/去往账套之外」，由后端落到该币种的系统账本账户。
+  // 转账的两个端点都是真实账户，没有「账套之外」这一说，故转入账户必须选定（后端同样会拒）
+  if (isTransfer.value && counterpartyAccountId.value === null) {
+    errorMessage.value = `请选择${counterpartyLabel.value}`
+    return
+  }
+
+  // 收支的对手方可留空：留空即「款项来自/去往账套之外」，由后端落到该币种的系统账本账户。
   // 与主账户重合时当场拦下——同一账户自转自的账是两条明细相互抵消的空交易，记了等于没记。
   if (counterpartyAccountId.value !== null && counterpartyAccountId.value === accountId) {
     errorMessage.value = `${counterpartyLabel.value}不能与${primaryLabel.value}是同一个账户`
@@ -285,15 +350,22 @@ async function submit(): Promise<void> {
       remark: remark.length === 0 ? null : remark,
       currencyCode,
       counterpartyAccountId: counterpartyId,
+      // 转账恒不传名字（后端拒绝非空取值）：上面已保证此时 id 非空，这一层是防止
+      // 将来放宽「转入账户必填」时，这里会悄悄开始按名创建往来账户、绕开账户类型限制
       counterpartyName:
-        counterpartyId === null && counterpartyName.length > 0 ? counterpartyName : null,
+        !isTransfer.value && counterpartyId === null && counterpartyName.length > 0
+          ? counterpartyName
+          : null,
     })
 
     // 记账后清空并可立即接着记下一笔：金额与摘要是逐笔的，沿用上一笔只会导致误提交
     resetFields()
-    notice.value =
-      `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
-      `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）`
+    // 转账提示读作「转出 A → 转入 B」：两个账户都是用户自己选的，方向和起止点必须一眼看清；
+    // 收支则用「主账户（对手方）」的写法，对手方留空时呈现后端落的系统账本账户
+    notice.value = isTransfer.value
+      ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}`
+      : `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
+        `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）`
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '记账失败'
   }
@@ -363,13 +435,15 @@ onMounted(async () => {
 
         <div class="field">
           <label class="label" for="record-counterparty">{{ counterpartyLabel }}</label>
+          <!-- 转账的转入账户必须从候选中选定（freeText: false）：转账两端都是真实账户，
+               不存在的名字会被后端创建为往来账户，而转账只允许资金与负债账户 -->
           <AccountSearchSelect
             v-model:id="counterpartyAccountId"
             v-model:text="counterpartyAccountText"
             input-id="record-counterparty"
             :options="accountOptions"
             :placeholder="counterpartyPlaceholder"
-            :free-text="true"
+            :free-text="!isTransfer"
           />
         </div>
 
@@ -400,7 +474,7 @@ onMounted(async () => {
             type="text"
             maxlength="128"
             autocomplete="off"
-            :placeholder="mode === 'Income' ? '如：工资' : '如：午餐'"
+            :placeholder="meta.summaryPlaceholder"
           />
         </div>
 
@@ -433,7 +507,15 @@ onMounted(async () => {
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
       <p v-if="notice" class="notice">{{ notice }}</p>
 
-      <p class="hint">
+      <p v-if="isTransfer" class="hint">
+        一笔转账会同时记两条明细——{{ primaryLabel }}与{{ counterpartyLabel }}各一条、
+        金额相等方向相反，这正是复式记账的配平方式。两个账户都必须从候选中选定，
+        且只允许资金账户与负债账户：往来账户记的是「谁欠谁」而不是「钱放在哪」，
+        钱转进转出它并不改变钱的所在。转账也不支持跨币种，只有币种相同的账户之间才能转账。
+        发生时间取业务发生时间，可补记往日的转账。
+      </p>
+
+      <p v-else class="hint">
         一笔{{ modeLabel }}会同时记两条明细——{{ primaryLabel }}与{{ counterpartyLabel }}各一条、
         金额相等方向相反，这正是复式记账的配平方式。{{ counterpartyLabel }}可以留空，
         留空即表示款项来自或去往本账套之外（记入系统账本账户，该账户不在任何列表与筛选器中呈现）；

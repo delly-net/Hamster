@@ -40,17 +40,20 @@ ui/
     │   ├── appConfig.ts     # 运行时配置加载
     │   ├── appInfo.ts       # 产品名 / 版本号 / 简介 / 技术栈 / 许可（「用户设置」的关于区块）
     │   └── menu.ts          # 左侧功能菜单配置（新增菜单项只改这里）
-    ├── components/          # 通用组件（AccountSetPicker / EntryRecordForm 收支记账表单 + openapi/ 调试面板组件）
+    ├── components/          # 通用组件（AccountSetPicker / AccountSearchSelect 账户搜索选择
+    │                        #          / EntryRecordForm 记账表单 + openapi/ 调试面板组件）
     ├── views/               # 页面组件（HomeView / LoginView / OpenApiView / UserAdminView
-    │                        #          / AccountSetAdminView / AccountView / IncomeView / ExpenseView
+    │                        #          / AccountSetAdminView / CurrencyAdminView / AccountView
+    │                        #          / IncomeView / ExpenseView / TransferView
     │                        #          / EntryQueryView / SettingsView / ResetPasswordView）
     ├── router/index.ts      # 路由表、布局 meta 与登录 / 管理员守卫
     └── stores/
         ├── auth.ts          # 认证状态（注册 / 登录 / 登出 / 恢复）
         ├── accountSets.ts   # 账套状态（我可访问的账套 / 当前账套 / 管理侧增删改与关联用户）
         ├── accounts.ts      # 账户状态（当前账套内的账户列表 / 新建 / 修改 / 停用启用）
+        ├── currencies.ts    # 币种状态（全局字典：列表 / 管理侧增删改与启用停用）
         ├── entries.ts       # 账目明细状态（查询条件 / 分页结果 / 交易类型与对手方档位标签）
-        ├── transactions.ts  # 收支记账状态（记一笔收入或支出）
+        ├── transactions.ts  # 记账状态（记一笔收入 / 支出 / 转账）
         └── users.ts         # 用户管理状态（列表 / 激活停用 / 重置链接 / 删除）
 ```
 
@@ -109,7 +112,7 @@ ui/
 | 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
 | header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
 | header 右侧 | 已登录时依次为**用户名 → 当前账套名 +【切换】→【退出登录】**；未登录时仅显示「登录 / 注册」入口 |
-| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理）仅管理员渲染；「首页」「收入」「支出」「账户管理」「账目明细」与末尾的「用户设置」面向所有登录用户。收支记账是最高频的日常动作，故紧随首页 |
+| 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理、币种管理）仅管理员渲染；「首页」「收入」「支出」「转账」「账户管理」「账目明细」与末尾的「用户设置」面向所有登录用户。记账是最高频的日常动作，故「收入」「支出」「转账」三个入口紧随首页 |
 | 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
 | 内容区宽度 | 页面**铺满** `.app-main` 的可用宽度，内边距统一由 `.app-main` 提供，页面自身不再限宽居中 |
 | 窄屏（<1024px） | 侧栏收起为抽屉，由 header 内汉堡按钮开合；路由跳转 / `Esc` / 点击遮罩均可关闭 |
@@ -233,24 +236,28 @@ ui/
 - **序号列是行号不是 Id**：同用户管理页，取行下标 +1，停用账户后不会断号；**按当前页签的列表计数**，切换页签后从 1 重新开始。
 - **未选账套时的 400 是预期行为**：后端对不带 `X-Account-Set-Id` 的请求返回 400「请先选择账套」，这正是页面在无账套时不发请求的原因。
 
-## 收入 `/income` 与 支出 `/expense`
+## 收入 `/income`、支出 `/expense` 与 转账 `/transfer`
 
-面向**所有登录用户**的两个记账入口（[`src/views/IncomeView.vue`](src/views/IncomeView.vue) / [`src/views/ExpenseView.vue`](src/views/ExpenseView.vue) + [`src/components/EntryRecordForm.vue`](src/components/EntryRecordForm.vue) + [`src/stores/transactions.ts`](src/stores/transactions.ts)），路由只标 `requiresAuth`——**不带** `requiresAdmin`，菜单项同样不设 `adminOnly`。两个页面各是一层壳（标题 + 说明 + 表单），**记账逻辑全在共用的 `EntryRecordForm` 里**，`mode` 决定记的是哪一种。
+面向**所有登录用户**的三个记账入口（[`src/views/IncomeView.vue`](src/views/IncomeView.vue) / [`src/views/ExpenseView.vue`](src/views/ExpenseView.vue) / [`src/views/TransferView.vue`](src/views/TransferView.vue) + [`src/components/EntryRecordForm.vue`](src/components/EntryRecordForm.vue) + [`src/stores/transactions.ts`](src/stores/transactions.ts)），路由只标 `requiresAuth`——**不带** `requiresAdmin`，菜单项同样不设 `adminOnly`。三个页面各是一层壳（标题 + 说明 + 表单），**记账逻辑全在共用的 `EntryRecordForm` 里**，`mode` 决定记的是哪一种。
 
 | 环节 | 行为 |
 |---|---|
 | 未选择账套 | 只显示「请先切换账套」的提示，**不渲染表单**——交易必然落在某个账套内 |
 | 跟随账套切换 | `watch` 账套 store 的 `currentId`：重拉账户候选并**复位表单**，避免把账记到上一账套的账户上；未选择时清空账户 |
-| 账户候选 | `accountsStore.list(false)`——**仅启用账户**（停用账户不应再记新账，其历史明细照常可在「账目明细」页查到，该页口径含停用账户，两者不同属刻意）。默认选中第一个候选 |
+| 账户角色 | 收入页为「收入账户 + 来源账户」、支出页为「支出账户 + 目标账户」、转账页为「**转出账户 + 转入账户**」。文案全部取自 `MODE_META` 查找表，**转账页的两端都是必填的真实账户**——收入/支出的对手方可以留空或输入新名字，转账不行 |
+| 账户候选 | `accountsStore.list(false)`——**仅启用账户**（停用账户不应再记新账，其历史明细照常可在「账目明细」页查到，该页口径含停用账户，两者不同属刻意）。候选**先按所选币种过滤**（同一笔交易的两个账户必须同币种），默认选中第一个候选。**转账下候选再按类型过滤为资金账户与负债账户**（`TRANSFER_ACCOUNT_TYPES`），且两个下拉都**不接受候选项之外的名字**（`:free-text="false"`） |
+| 币种 | 表单最上面的下拉，默认选中字典的第一项；**换币种会清空两个账户选择**——留着上一币种选好的账户，提交必然撞上后端的跨币种校验 |
 | 金额 | `type="text"` + `inputmode="decimal"`，**刻意不用 `type="number"`**（见下）。`parseAmount` 用 `Number()` + `Number.isFinite` 而非 `parseFloat`，并要求 `> 0` |
 | 发生时间 | `<input type="datetime-local">`，默认**此刻**（本地时区拼装）。提交前经 `toUtcIso` 折成 UTC 的 ISO 文本 |
-| 提交 | 前端先校验账户 / 金额 / 时间 / 摘要，不完整则**不发请求**；成功后**复位表单**并提示「已记录一笔收入/支出：摘要 账户名」，可立即接着记下一笔 |
+| 提交 | 前端先校验币种 / 主账户 / 金额 / 时间 / 摘要 / 对手方，不完整则**不发请求**；成功后**复位表单**并提示「已记录一笔收入/支出：摘要 账户名」或「已记录一笔转账：摘要 转出 转出账户 → 转入 转入账户」，可立即接着记下一笔 |
 | 重置 | 【重置】把账户回到第一个候选、金额与摘要/备注清空、时间回到此刻 |
 | 提示位 | `error`（`ApiError.message`）与 `notice`（记账成功回执） |
 
 设计约定：
 
-- **两个入口各自独立组件，不共用同一个组件文件**：Vue 在两条路由指向**同一个组件**时会复用实例、切换不重新挂载，`/expense` 里填了一半的金额与摘要会残留到 `/income` 上。两个薄壳文件使切换必然重新挂载，共用的表单组件只承载逻辑不承载路由身份。
+- **三个入口各自独立组件，不共用同一个组件文件**：Vue 在任意两条路由指向**同一个组件**时会复用实例、切换不重新挂载，`/expense` 里填了一半的金额与摘要会残留到 `/income` 上。三个薄壳文件使切换必然重新挂载，共用的表单组件只承载逻辑不承载路由身份。
+- **类型多了之后文案改成查找表**：`MODE_META` 按 `mode` 一次性给出按钮名、两个账户的字段名与摘要占位符。三元表达式在两种类型时还能读，涨到三种就会退化成「A ? x : B ? y : z」；查找表则是「哪种记账用哪套词」的平铺陈述，**新增类型时漏加一行会被 TypeScript 的 `Record` 当场拦下**。收入/支出两档的取值逐字未变。
+- **转账的两个账户都必填、都不能按名新建**：转账的两个端点都是真实账户，没有「款项来自/去往账套之外」这一说，故留空无从落账；而按名新建出来的是往来账户，会绕开「只允许资金/负债账户」的限制。前端把对手方下拉切成 `:free-text="false"` 且不为空，后端另有四条专有校验兜底（见根 README 的端点契约）。
 - **金额输入必须是 `type="text"`**：`type="number"` 上的 `v-model` 会隐式转型（有效数字是 `number`、清空时是 `string`），一个 ref 里混着两种类型，`trim()` 之类的字符串操作会直接抛错。改用 `type="text"` + `inputmode="decimal"`：移动端照样弹数字键盘，而 `v-model` 恒为字符串。
 - **`Number()` 而不是 `parseFloat`**：`parseFloat('12abc')` 会悄悄返回 `12`，把明显非法的输入当成合法金额提交。`Number()` 返回 `NaN`，配 `Number.isFinite` 一次拦下。
 - **时间默认值与换算都必须走本地时间**：默认值用 `getFullYear` / `getMonth` / `getDate` / `getHours` / `getMinutes` 拼 `YYYY-MM-DDTHH:mm`，**不得**用 `toISOString().slice(0, 16)`（那是 UTC 时刻，东八区整体前移八小时）；提交时拆段后用 `new Date(y, m - 1, d, h, min)` 构造再由 `toISOString()` 折成 UTC，**不得**直接 `new Date('2026-09-23T10:00')`（按 UTC 解释该字符串，同样错位八小时）。
@@ -278,12 +285,12 @@ ui/
 
 设计约定：
 
-- **一行是一条明细，不是一笔交易**：一笔交易由借贷两条明细构成，当两侧都落在所选账户上时就会呈现**两行**。把同笔交易合并成一行需要引入「净额」概念，而那与「查明细」的目的相反。
+- **一行是一条明细，不是一笔交易**：一笔交易由借贷两条明细构成，当两侧都落在所选账户上时就会呈现**两行**。把同笔交易合并成一行需要引入「净额」概念，而那与「查明细」的目的相反。**一笔转账正是这种「两侧都可见」的典型**：它落成「转出（支出列）+ 转入（收入列）」两行，形状与一笔支出加一笔收入无异，**摘要旁的「转账」类型标签是唯一的区分线索**，故该标签不能省。
 - **金额按收入/支出分列，带符号金额由后端派生**：后端在明细 DTO 上回传 `signedAmount`（`amount` 按 `direction` 取符号：借方为正、贷方为负），前端只做格式化与分列——**不自行折算符号**。换算的定义在后端的 `EntryDirectionExtensions.SignedAmount`，与账户余额汇总 `SumSignedAmountsAsync` 共用同一处；在列表里再算一次就是第二个语义源。
 - **「借/贷」不呈现给用户**：复式记账是数据的组织方式，不是普通人读账的方式。`direction` 仍由接口如实回传（账本的底层事实），但页面上没有方向列，增减由收入/支出两列与金额的正负号直接表达。
 - **收入绿是语义色，不来自品牌色板**：`--color-income` 表达的是「金额正号」，与主题色无关；支出红直接复用 `--color-danger`，全站因此仍只有一个红。两者均在 `base.css` 亮/暗两套中齐备（暗色下绿色提亮以保证对比度）。
 - **不做任何可见性过滤**：后端只返回「挂在我可见账户上」的明细，账户多选的候选也由后端过滤（他人在个人账户根本不在列表里）。本页**不做任何本地过滤**——前端的可见性只是体验层，篡改本地状态只会拿到一批 400 / 403。
-- **账本账户不出现在账户多选里**：它是系统内部账户（每账套恰一个，由系统在首次需要对手方时自动创建），后端从不返回它，故本页无需为此写过滤或禁用逻辑。它在明细里作为**期初余额、收入、支出共同的对手方**出现，显示为「账本」。
+- **账本账户不出现在账户多选里**：它是系统内部账户（每账套恰一个，由系统在首次需要对手方时自动创建），后端从不返回它，故本页无需为此写过滤或禁用逻辑。它在明细里作为**期初余额、收入、支出共同的对手方**出现，显示为「账本」；**转账不写账本账户**（它的对手方是另一个真实账户），故一笔转账的两行对手方都是 `Account` 档。
 - **对手方分档呈现，前端不给「回退到 Id」的分支**：`Account` 档直接用 `counterpartyName`；`Ledger` 显示「账本」；`Hidden` 与 `None` 显示「—」。后端对不可见对手方**连主键都不回传**，故前端也不存在任何「拿到 Id 再想办法」的路径。`Ledger` 的标签曾是「期初」，收入/支出落地后改成了「账本」——同一个账户现在也是每一笔收支的对手方，再叫「期初」会把一笔支出标成期初。
 - **日期默认值必须用本地时间拼装**：`getFullYear` / `getMonth` / `getDate` 拼 `YYYY-MM-DD`，**不得**用 `toISOString().slice(0, 10)`（那是 UTC 日期，东八区在本地 08:00 之前会整体前移一天）；日期 → UTC 也**不得**直接 `new Date('2026-09-01')`（按 UTC 解释，区间整体错位），必须拆三段用 `new Date(y, m - 1, d, ...)` 构造。
 - **筛选候选含已停用账户**：账户是软删除，停用账户上仍有历史明细（后端也按 `includeInactive: true` 取可见账户集）。若候选漏掉它们，那些明细将永远无法被筛出来，而数据其实还在库里。

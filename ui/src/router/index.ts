@@ -50,6 +50,15 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/transfer',
+      name: 'transfer',
+      // 记一笔转账（转出账户 + 转入账户 + 金额 + 摘要即落表），面向所有登录用户，故不设 requiresAdmin。
+      // 与 /income、/expense **各自独立组件**，理由同上面两条：共用组件会让路由切换复用实例、
+      // 已填的金额与摘要残留到另一种记账上
+      component: () => import('../views/TransferView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/entries',
       name: 'entries',
       // 账目明细查询（按时间区间与账户筛选当前账套内的交易明细），面向所有登录用户，故不设 requiresAdmin
