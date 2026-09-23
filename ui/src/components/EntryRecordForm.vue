@@ -7,6 +7,10 @@
  * 使路由切换必然重新挂载——否则同一组件被多条路由复用时实例会被复用，
  * 用户已填的金额与摘要会残留到另一种记账上。
  *
+ * 颜色也随类型走：根元素标 `data-entry-mode`，`base.css` 的类型主题色别名层据此把
+ * `--entry-color*`（绿/红/蓝）折好，提交按钮与成功提示直接取用。故本组件没有一处
+ * 「哪种 mode 用哪种颜色」的分支——颜色定义只有一个地方，就是 `base.css`。
+ *
  * 表单按「币种 → 主账户 → 对手方账户」的顺序自上而下填写，三者是联动的：
  * - **币种在最前**：它是其余字段的筛选条件，先定币种才能给出该币种的账户候选。
  *   换币种会清空两个账户选择——留着上一个币种选好的账户，提交必然撞上后端的跨币种校验。
@@ -403,7 +407,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="record">
+  <section class="record" :data-entry-mode="mode">
     <!-- 未选定账套：交易必然落在某个账套内，此时不渲染表单 -->
     <p v-if="!hasAccountSet" class="hint">
       当前未选择账套，请先点击右上角的【切换】选择账套后再记一笔{{ modeLabel }}。
@@ -608,11 +612,12 @@ onMounted(async () => {
   color: var(--color-danger);
 }
 
-/* 提示态复用主色：全站只有 danger 一种语义色，不额外引入绿色 */
+/* 提示色随记账类型走：收/支/转账各有自己的语义色（见 base.css 的类型主题色别名层），
+   再复用主色会让「刚记了一笔支出」的确认框与「记了一笔收入」长得一模一样 */
 .notice {
-  border: 1px solid var(--color-accent);
-  background: var(--color-accent-soft);
-  color: var(--color-accent-strong);
+  border: 1px solid var(--entry-color, var(--color-accent));
+  background: var(--entry-color-soft, var(--color-accent-soft));
+  color: var(--entry-color-strong, var(--color-accent-strong));
 }
 
 .hint {
@@ -642,13 +647,16 @@ onMounted(async () => {
   color: var(--color-accent-strong);
 }
 
-/* 实心主色按钮：与账户页的「新增」、明细页的「查询」同源 */
+/* 实心按钮，但**按记账类型着色**而非品牌主色：绿=收入 / 红=支出 / 蓝=转账。
+   颜色经 --entry-color 由 base.css 的类型主题色别名层提供（根元素已标 data-entry-mode），
+   故三个页面共用同一个组件、样式里却没有一处 mode 分支；
+   文字色仍取 --color-accent-contrast（亮色白字 / 暗色深棕字），三个色值下对比度均已核对。 */
 .submit {
   display: inline-flex;
   align-items: center;
   padding: 0.5rem 1rem;
-  border: 1px solid var(--color-accent);
-  background: var(--color-accent);
+  border: 1px solid var(--entry-color, var(--color-accent));
+  background: var(--entry-color, var(--color-accent));
   color: var(--color-accent-contrast);
   font-size: 13px;
   font-weight: 600;
@@ -659,9 +667,11 @@ onMounted(async () => {
     background-color: var(--color-accent-soft);
   }
 
+  /* hover 用显式的 -strong 令牌而非 filter/color-mix：亮色下要更深、暗色下要更亮，
+     同一段 CSS 算不出方向相反的两个结果 */
   .submit:not(:disabled):hover {
-    border-color: var(--color-accent-strong);
-    background: var(--color-accent-strong);
+    border-color: var(--entry-color-strong, var(--color-accent-strong));
+    background: var(--entry-color-strong, var(--color-accent-strong));
   }
 }
 

@@ -3,9 +3,13 @@
  * 琥珀橙底 #F9BC72、条纹焦糖橙 #E89B52、腹部奶油 #FDF3E3、全身描边深暖棕 #5A3A22。
  * 亮/暗两套语义令牌均由此派生；页面样式一律引用语义令牌，不再出现硬编码色值。
  *
- * 例外是收支语义色（--color-income / --color-expense）：它们表达的是「金额正负号」，
- * 与品牌无关——收入绿不能是橙色、支出红也不该跟着主题色走，故不由上方原生色板派生，
- * 而是按语义直接取自通用绿/红。支出红复用危险色，全站因此仍只有一个红。
+ * 例外是收支与转账语义色（--color-income / --color-expense / --color-transfer）：
+ * 它们表达的是「金额正负号」与「账户间的搬运」，与品牌无关——收入绿不能是橙色、
+ * 支出红也不该跟着主题色走，故不由上方原生色板派生，而是按语义直接取自通用绿/红/蓝。
+ * 支出红复用危险色，全站因此仍只有一个红。
+ *
+ * 这三色除了给金额着色，还充当三条记账页（/income、/expense、/transfer）的**类型主题色**：
+ * 页面根元素标 data-entry-mode，由下方别名层折成 --entry-color*，供标题、提交按钮与成功提示取用。
  */
 :root {
   /* 原生色板（亮色取样） */
@@ -56,10 +60,22 @@
   --color-danger-border: rgba(192, 57, 43, 0.35);
 
   /* 收支语义色：收入（+）为绿、支出（−）为红。支出红直接复用危险色（同砖红，不引入第二个红），
-     故这里只新增收入的绿——它是全站第一个非 Logo 派生的颜色，理由见文件头。 */
+     故这里只新增收入的绿——它是全站第一个非 Logo 派生的颜色，理由见文件头。
+     -soft 是浅底（提示条背景），-strong 是深一档的同色（实心按钮 hover）：
+     亮色下 hover 要「更深」、暗色下要「更亮」，方向相反，故两套都显式声明，
+     不用 filter/color-mix 现场算。 */
   --color-income: #1f8a4c;
   --color-income-soft: rgba(31, 138, 76, 0.12);
+  --color-income-strong: #176b3a;
   --color-expense: var(--color-danger);
+  --color-expense-soft: var(--color-danger-soft);
+  --color-expense-strong: #9e2f24;
+
+  /* 转账语义色：蓝。转账既不是收入也不是支出，而是账户之间的搬运，
+     借用任一收支色都会把「搬运」误读成「进出账」，故另立一色。 */
+  --color-transfer: #2b6cb0;
+  --color-transfer-soft: rgba(43, 108, 176, 0.12);
+  --color-transfer-strong: #235a94;
 
   /* 视觉强化令牌：渐变页底、圆角与柔和阴影 */
   --gradient-page: linear-gradient(160deg, #fffbf4 0%, #fdeedc 55%, #fbe3c8 100%);
@@ -95,16 +111,52 @@
     --color-danger-soft: rgba(232, 131, 111, 0.14);
     --color-danger-border: rgba(232, 131, 111, 0.4);
 
-    /* 收支语义色必须在此重新声明：暗色底上的绿要提亮才够对比度，沿用亮色值会偏暗发灰 */
+    /* 收支与转账语义色必须在此重新声明：暗色底上的绿/红/蓝都要提亮才够对比度，
+       沿用亮色值会偏暗发灰；-strong 在暗色下同样取更亮的一档（hover 要变亮而非变暗） */
     --color-income: #5cc98a;
     --color-income-soft: rgba(92, 201, 138, 0.16);
+    --color-income-strong: #7ed9a3;
     --color-expense: var(--color-danger);
+    --color-expense-soft: var(--color-danger-soft);
+    --color-expense-strong: #f0a08f;
+    --color-transfer: #6fa8ff;
+    --color-transfer-soft: rgba(111, 168, 255, 0.16);
+    --color-transfer-strong: #9cc4ff;
 
     /* 渐变页底必须在此重新声明，否则暗色下会残留亮色奶油渐变 */
     --gradient-page: linear-gradient(160deg, #241b15 0%, #2a1f17 55%, #33251a 100%);
     --shadow-card: 0 18px 40px -22px rgba(0, 0, 0, 0.8), 0 2px 6px rgba(0, 0, 0, 0.3);
     --shadow-control: 0 1px 2px rgba(0, 0, 0, 0.35);
   }
+}
+
+/*
+ * 记账类型主题色：三条记账页（/income、/expense、/transfer）在根元素标 data-entry-mode，
+ * 把本类型的颜色折成 --entry-color*，供页面标题、提交按钮与成功提示取用。
+ *
+ * 只做**别名**、不新增色值：收入绿与支出红就是金额正负号用的那两个绿红（按钮与明细金额列同色），
+ * 转账蓝是上面新立的语义色。这样「哪种类型用哪套色」全站只有这一个定义点——
+ * 页面与表单都不写 mode 分支，将来加第四种记账类型只需在此补一条规则。
+ *
+ * 取用处一律写 `var(--entry-color, <兜底>)`：元素不在带 data-entry-mode 的子树里时
+ * （组件被单拎出来复用），退回品牌主色，与引入本层之前的表现一致。
+ */
+[data-entry-mode='Income'] {
+  --entry-color: var(--color-income);
+  --entry-color-soft: var(--color-income-soft);
+  --entry-color-strong: var(--color-income-strong);
+}
+
+[data-entry-mode='Expense'] {
+  --entry-color: var(--color-expense);
+  --entry-color-soft: var(--color-expense-soft);
+  --entry-color-strong: var(--color-expense-strong);
+}
+
+[data-entry-mode='Transfer'] {
+  --entry-color: var(--color-transfer);
+  --entry-color-soft: var(--color-transfer-soft);
+  --entry-color-strong: var(--color-transfer-strong);
 }
 
 *,

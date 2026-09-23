@@ -10,7 +10,7 @@ import EntryRecordForm from '@/components/EntryRecordForm.vue'
 </script>
 
 <template>
-  <main class="transfer">
+  <main class="transfer" data-entry-mode="Transfer">
     <header class="head">
       <h1 class="title">转账</h1>
       <p class="subtitle">
@@ -44,7 +44,9 @@ import EntryRecordForm from '@/components/EntryRecordForm.vue'
 .title {
   font-size: 20px;
   font-weight: 600;
-  color: var(--color-heading);
+  /* 标题随记账类型着色（蓝）：--entry-color 由本元素上的 data-entry-mode 经 base.css 别名层折出，
+     兜底仍取标题色，故页面脱离记账类型上下文时表现不变 */
+  color: var(--entry-color, var(--color-heading));
 }
 
 .subtitle {
