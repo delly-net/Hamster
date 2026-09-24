@@ -6,5 +6,5 @@ git pull
 echo "[==========编译代码==========]"
 mkdir -p /project/delly-net/publish/hamster-api/files
 cd /project/delly-net/Hamster/api
-/usr/bin/dotnet build EazyRag.Api.csproj -c Release -r linux-musl-x64 -p:IsPackable=false -o /project/delly-net/publish/hamster-api/files
+/usr/bin/dotnet build Hamster.Api.csproj -c Release -r linux-musl-x64 -p:IsPackable=false -o /project/delly-net/publish/hamster-api/files
 echo "[==========编译完成==========]"
