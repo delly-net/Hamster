@@ -119,6 +119,7 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
         AccountScope scope,
         AccountType type,
         decimal initialBalance,
+        DateTime? openingAt,
         string currencyCode,
         int creatorUserId,
         CancellationToken cancellationToken = default)
@@ -146,8 +147,9 @@ public sealed class AccountService(ISqlSugarClient db, ITransactionService trans
         {
             account.Id = await db.Insertable(account).ExecuteReturnIdentityAsync(cancellationToken);
 
-            // 期初金额为 0 时本调用不写任何分录（无信息量），账户照常建立
-            await transactions.RecordOpeningBalanceAsync(account, creatorUserId, cancellationToken);
+            // 期初金额为 0 时本调用不写任何分录（无信息量），账户照常建立，期初时间也随之无落点；
+            // 非 0 时 openingAt 即那笔期初分录的业务时刻（未指定则由 RecordOpeningBalanceAsync 退回建档时刻）
+            await transactions.RecordOpeningBalanceAsync(account, creatorUserId, openingAt, cancellationToken);
         });
 
         return account;

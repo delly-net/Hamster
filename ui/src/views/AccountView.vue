@@ -16,9 +16,14 @@
  * 可见性/权限（前端过滤只会造出假防线），而按类型分组是展示分组，一行数据都没被丢掉。
  *
  * 新建与修改统一走弹窗（【新增】/【编辑】→ 表单 →【保存】落表），不再有行内编辑。
- * 修改的可编辑字段只有名称：账户类型、归属范围、期初金额与**币种**一经创建均不可修改，
+ * 修改的可编辑字段只有名称：账户类型、归属范围、期初金额、**期初时间**与**币种**一经创建均不可修改，
  * 故在弹窗内一律只读呈现（不给可编辑控件，连禁用的也不给——禁用控件仍会暗示「以后能改」），
  * 只读它们是为了让用户在弹窗内看全账户上下文，而不是让用户以为将来能改。
+ *
+ * 期初时间只在**新建时可选**（`datetime-local`，默认当前时间，提交前转 UTC）：它是这笔期初余额的
+ * 业务时刻，后端直接落成那笔期初交易的 `occurredAt`。本页**不呈现**它——它已经活在账目明细页的
+ * 期初行上，账户表也不存这一列（同一事实两处存储迟早漂移）。期初金额为 0 时不写期初分录，
+ * 期初时间也随之无落点，故不呈现也就不存在「设了却看不到」的困惑。
  *
  * 币种在**新建时必选**：它是一切金额的计价单位，也是记账时的硬约束（跨币种无法交易）。
  * 候选只取启用的币种，初值为系统默认币种（由后端标出，前端不再另算一次回退）。
@@ -66,6 +71,64 @@ const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
   timeStyle: 'short',
 })
 
+/**
+ * 期初时间允许的「未来」容差。
+ *
+ * 输入框默认填**当前时间**，而本机时钟与服务器时钟必有偏差（NTP 校时窗口内的秒级偏差、
+ * 用户手工改过系统时间都会造成），严格的「晚于此刻即拒」会让「默认值直接提交」偶发失败。
+ * 后端 `AccountEndpoints.OPENING_AT_FUTURE_TOLERANCE` 是同一口径的另一份声明，改这里必须同步改那处。
+ */
+const OPENING_AT_FUTURE_TOLERANCE_MS = 5 * 60 * 1000
+
+/** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
+const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+
+/** 补零到两位，供拼 `datetime-local` 的取值文本。 */
+function pad(value: number): string {
+  return String(value).padStart(2, '0')
+}
+
+/**
+ * 当前本地时间，格式与 `<input type="datetime-local">` 的取值一致。
+ *
+ * 与 `EntryRecordForm.vue` 的同名函数逐字相同：记账页与账户页的期初时间用**同一个控件、
+ * 同一套时区口径**，两处实现分头持有是既有模式（同 `AccountSearchSelect` 与
+ * `CategorySearchSelect` 的兄弟关系），不是遗漏的重复。
+ */
+function nowLocalInput(): string {
+  const now = new Date()
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`
+}
+
+/**
+ * 把 `datetime-local` 的本地时间文本转成 UTC 的 ISO 8601 时刻。
+ *
+ * 按 `YYYY-MM-DDTHH:mm` 拆段后用 `new Date(y, m - 1, d, h, min)` 构造——**这是本地时间**，
+ * 再由 `toISOString()` 折成 UTC。直接 `new Date('2026-09-24T16:30')` 会按 UTC 解释该字符串，
+ * 东八区下整体错位八小时。
+ *
+ * @param value 本地时间文本。
+ * @returns UTC 时刻的 ISO 文本；文本不合法时返回 `null`。
+ */
+function toUtcIso(value: string): string | null {
+  const matched = DATE_TIME_PATTERN.exec(value)
+  if (matched === null) {
+    return null
+  }
+
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  const day = Number(matched[3])
+  const hour = Number(matched[4])
+  const minute = Number(matched[5])
+  if (![year, month, day, hour, minute].every(Number.isFinite)) {
+    return null
+  }
+
+  const at = new Date(year, month - 1, day, hour, minute, 0, 0)
+  return Number.isNaN(at.getTime()) ? null : at.toISOString()
+}
+
 const errorMessage = ref('')
 const notice = ref('')
 
@@ -96,6 +159,8 @@ const newScope = ref<AccountScope>('Personal')
 const newType = ref<AccountType>('Fund')
 /** 期初金额：输入框是 `type="number"`，v-model 会自动把值转成 number（空串除外），故此处必须是联合类型。 */
 const newInitialBalance = ref<string | number>('0')
+/** 期初时间：`<input type="datetime-local">` 的本地时间文本（`YYYY-MM-DDTHH:mm`），提交时转 UTC。 */
+const newOpeningAt = ref('')
 /** 新建账户的币种代码；创建后不可修改。 */
 const newCurrencyCode = ref('')
 
@@ -206,6 +271,9 @@ async function openCreate(): Promise<void> {
   // 类型默认取当前页签——「新增时自动调整账户类型」这个要求就落在这一行
   newType.value = activeType.value
   newInitialBalance.value = '0'
+  // 期初时间默认当前时间：多数账户就是「从今天开始记」，改选是少数情况（与记账页的发生时间同一口径）。
+  // 它与期初金额是一对——「截至某时刻，该账户余额为 X」，故两项相邻呈现。
+  newOpeningAt.value = nowLocalInput()
   // 币种初值取系统默认币种：绝大多数账户都用它，改选是少数情况
   newCurrencyCode.value = currenciesStore.defaultCode ?? currenciesStore.currencies[0]?.code ?? ''
   errorMessage.value = ''
@@ -249,6 +317,20 @@ async function createAccount(): Promise<void> {
     return
   }
 
+  // 期初时间先转 UTC 再校验：比较的是时刻本身，与它写在哪个时区无关。
+  // 容差与后端同一口径（见 `OPENING_AT_FUTURE_TOLERANCE_MS`），否则会出现
+  // 「前端放行、后端 400」这种用户无从理解的失败。
+  const openingAt = toUtcIso(newOpeningAt.value)
+  if (openingAt === null) {
+    errorMessage.value = '请填写有效的期初时间'
+    return
+  }
+
+  if (new Date(openingAt).getTime() > Date.now() + OPENING_AT_FUTURE_TOLERANCE_MS) {
+    errorMessage.value = '期初时间不能晚于当前时间'
+    return
+  }
+
   // 先记下归属范围的中文标签：下面的回调会把 newScope 复位前先用于提示文案
   const scopeLabel = ACCOUNT_SCOPE_LABELS[newScope.value]
   // 类型要在 await 之前取得：它既要生成提示文案，还要决定落表后停在哪个页签
@@ -263,6 +345,7 @@ async function createAccount(): Promise<void> {
       scope: newScope.value,
       type: createdType,
       initialBalance,
+      openingAt,
       currencyCode: newCurrencyCode.value,
     })
     notice.value = `已新建${scopeLabel}${typeLabel} ${name}（${createdCurrency}）`
@@ -756,10 +839,17 @@ onMounted(() => {
               :disabled="pendingId !== null"
             />
           </label>
+          <!-- 期初时间与期初金额是一对：「截至某时刻，该账户余额为 X」；提交时转 UTC，不可晚于当前时间 -->
+          <label class="field">
+            <span class="label">期初时间</span>
+            <input v-model="newOpeningAt" type="datetime-local" :disabled="pendingId !== null" />
+          </label>
         </div>
 
         <p class="dialog-hint">
-          类型、币种与期初金额一经保存不可修改；期初金额非 0 时后端会同时落成一笔期初交易。
+          类型、币种、期初金额与期初时间一经保存不可修改；期初金额非 0 时后端会同时落成一笔期初交易，
+          期初时间就是那笔交易的业务时间（在账目明细页可见），不能晚于当前时间。
+          期初金额为 0 时不写期初交易，期初时间也不会留存。
           只有币种相同的账户之间才能记账，故币种请按该账户实际使用的货币选择。
           账本账户由系统在期初入账时自动创建，不接受手工建立，也不在本列表呈现。
         </p>

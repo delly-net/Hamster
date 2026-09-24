@@ -20,6 +20,12 @@ namespace Hamster.Api.Data.Entities;
 /// 若同时存一份余额列，则又多出一条需要同步的路径，迟早出现「余额列忘了同步」的静默错账——
 /// 单一真相比省一次计算重要得多。
 /// </para>
+/// <para>
+/// **同样刻意不存「期初时间」列**：期初时间由用户在建账户时选定，落成那笔期初交易的业务时刻
+/// （<c>occurred_at</c>），已经活在交易表上。另立一列等于同一事实两处存储，理由与不存余额列完全一致；
+/// 代价是期初金额为 0 时不写分录、期初时间随之无落点——零额期初连同它的时间都不含信息，
+/// 与「零额不写分录」是同一取舍。
+/// </para>
 /// </remarks>
 [SugarTable("hamster_account")]
 [SugarIndex("idx_hamster_account_account_set", nameof(AccountSetId), OrderByType.Asc)]

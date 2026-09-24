@@ -328,13 +328,15 @@ public sealed class TransactionEndpoints : IEndpoint
 
         // 不存在即创建为**个人往来账户**：期初金额恒为 0，故不会写出期初分录，
         // 自动创建的账户不会凭空多出一笔期初交易。
-        // 归属范围取 Personal（用户临时输入的对手方，多半只是「这个人/这家店」，不该让全账套共用）
+        // 归属范围取 Personal（用户临时输入的对手方，多半只是「这个人/这家店」，不该让全账套共用）。
+        // 期初时间传 null：期初金额为 0 时期初时间本就没有落点，且这条路径上没有用户可选的期初时间。
         var created = await accounts.CreateAsync(
             accountSet.Id,
             name,
             AccountScope.Personal,
             AccountType.Contact,
             0,
+            null,
             currencyCode,
             actor.Id,
             cancellationToken);

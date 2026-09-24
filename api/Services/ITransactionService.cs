@@ -22,6 +22,9 @@ public interface ITransactionService
     /// <param name="createdByUserId">
     /// 记账人主键；升级回填出来的期初交易没有记账人可考，此时传 <c>null</c>。
     /// </param>
+    /// <param name="occurredAt">
+    /// 期初的业务时刻（UTC）；**未指定时退回账户建档时刻**（<see cref="Account.CreatedAt"/>）。
+    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
     /// 实际写入了一笔期初交易返回 <c>true</c>；因**期初金额为 0** 或**该账户已有期初分录**
@@ -31,10 +34,15 @@ public interface ITransactionService
     /// 幂等：同一账户重复调用不会写出第二笔期初分录（账户创建与升级回填共用本方法）。
     /// 对手方取该账户**所属币种**的账本账户，不存在时按需自动创建
     /// （每账套每币种至多一个，见 <see cref="Account.IsSystem"/> 与 <see cref="Account.CurrencyCode"/>）。
+    /// <para>
+    /// <paramref name="occurredAt"/> 就是「期初时间」的**唯一落点**：账户表不存该列，
+    /// 用户选的期初时间只活在这笔分录的 <c>occurred_at</c> 上（连带 #36「不得引入可漂移重复列」）。
+    /// </para>
     /// </remarks>
     Task<bool> RecordOpeningBalanceAsync(
         Account account,
         int? createdByUserId,
+        DateTime? occurredAt,
         CancellationToken cancellationToken = default);
 
     /// <summary>

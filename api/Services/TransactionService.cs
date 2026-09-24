@@ -47,6 +47,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     public async Task<bool> RecordOpeningBalanceAsync(
         Account account,
         int? createdByUserId,
+        DateTime? occurredAt,
         CancellationToken cancellationToken = default)
     {
         // 零额期初不写分录：零额分录不含信息，只会让「期初 0 的账户」平白多出一笔交易。
@@ -80,9 +81,12 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         {
             AccountSetId = account.AccountSetId,
             Type = TransactionType.OpeningBalance,
-            // 期初的业务时刻即账户建立的时刻（账户表只存 UTC，读回时 Kind 为 Unspecified，
-            // 值与写入时一致；Kind 的统一标记在 DTO 层由 SpecifyKind 完成）
-            OccurredAt = account.CreatedAt,
+            // 期初的业务时刻由调用方指定（账户新建时由用户选），未指定才退回账户建档时刻：
+            // 升级回填的历史账户无处可考「这笔期初是什么时候的余额」，只能取建档时刻。
+            // 账户表刻意**不存**期初时间列——那会让同一事实两处存储、迟早漂移（见 Account 的类头注释）。
+            // （账户表只存 UTC，读回时 Kind 为 Unspecified，值与写入时一致；
+            // Kind 的统一标记在 DTO 层由 SpecifyKind 完成）
+            OccurredAt = occurredAt ?? account.CreatedAt,
             Summary = OPENING_SUMMARY,
             CreatedByUserId = createdByUserId,
         };
@@ -302,8 +306,9 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
                 continue;
             }
 
-            // 回填出来的期初交易没有记账人可考：账户表本身不记创建者
-            if (await RecordOpeningBalanceAsync(account, null, cancellationToken))
+            // 回填出来的期初交易没有记账人可考：账户表本身不记创建者。
+            // 期初时间同样指定不了，传 null 退回账户建档时刻——这正是本次改动前的行为。
+            if (await RecordOpeningBalanceAsync(account, null, null, cancellationToken))
             {
                 written++;
             }

@@ -12,7 +12,9 @@ namespace Hamster.Api.Data.Entities;
 /// <para>
 /// 每笔交易由**借贷两条明细**构成（见 <see cref="EntryDirection"/>）：
 /// 一条记在目标账户、一条记在对手方账户。期初余额的写法见
-/// <c>TransactionService.RecordOpeningBalanceAsync</c>。
+/// <c>TransactionService.RecordOpeningBalanceAsync</c>；
+/// 期初交易的 <see cref="OccurredAt"/> 就是用户在建账户时选定的**期初时间**，
+/// 也是该时间在库里的唯一落点（账户表不存此列，见 <see cref="Account"/> 的类头注释）。
 /// </para>
 /// <para>
 /// 交易归属且仅归属一个账套（<see cref="AccountSetId"/>），与 <see cref="Account"/> 同一约定：

@@ -110,6 +110,10 @@ public interface IAccountService
     /// <param name="scope">归属范围。</param>
     /// <param name="type">账户类型。</param>
     /// <param name="initialBalance">期初金额。</param>
+    /// <param name="openingAt">
+    /// 期初时间（UTC）。它是这笔期初余额的**业务时刻**，随期初分录一并落库；
+    /// 传 <c>null</c> 表示未指定，退回账户建档时刻。
+    /// </param>
     /// <param name="currencyCode">
     /// 币种代码（调用方需保证是**存在的启用币种**）。一经创建不可修改，见 <see cref="Account.CurrencyCode"/>。
     /// </param>
@@ -124,6 +128,11 @@ public interface IAccountService
     /// 两条明细在同一事务内写入（见 <see cref="ITransactionService.RecordOpeningBalanceAsync"/>），
     /// 账本账户不存在时按需自动创建。期初金额为 0 时只建账户、不写分录。
     /// <para>
+    /// <paramref name="openingAt"/> **只在期初金额非 0 时有落点**：期初金额为 0 时不写分录，
+    /// 期初时间也随之无处可落——零额期初连同它的时间都不含信息
+    /// （与「零额不写分录」同一取舍）。账户表本身不存该列，见 <see cref="Account"/> 的类头注释。
+    /// </para>
+    /// <para>
     /// **前置条件**：<paramref name="type"/> 必须可由用户指定
     /// （见 <see cref="AccountTypeExtensions.IsUserAssignable"/>）。本方法不做二次校验——
     /// 「账本账户不接受手工建立」在端点层拦下并给出 400 字段错误，本层不再重复一遍。
@@ -135,6 +144,7 @@ public interface IAccountService
         AccountScope scope,
         AccountType type,
         decimal initialBalance,
+        DateTime? openingAt,
         string currencyCode,
         int creatorUserId,
         CancellationToken cancellationToken = default);

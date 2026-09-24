@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Claims;
 using Hamster.Api.Constant;
 using Hamster.Api.Data.Entities;
@@ -39,6 +40,26 @@ public sealed class AccountEndpoints : IEndpoint
     /// <summary>账户类型校验失败时的字段错误。文案统一在这里写一次，新建与修改两条路径共用。</summary>
     private static readonly string[] TYPE_ERROR =
         [$"账户类型只能是 {ASSIGNABLE_TYPE_HINT}（账本账户由系统自动创建，不接受手工指定）"];
+
+    /// <summary>
+    /// 期初时间允许的「未来」容差。
+    /// </summary>
+    /// <remarks>
+    /// 前端把期初时间默认填成**当前时间**，而本机时钟与服务器时钟必有偏差（NTP 校时窗口内的秒级
+    /// 偏差、用户手工改过系统时间都会造成），严格的「晚于此刻即拒」会让「默认值直接提交」这种
+    /// 最常见用法偶发 400。故留一段容差；真正的笔误（如填成 2030 年）远超容差，仍会被拦下。
+    /// <para>
+    /// 前端 <c>AccountView.vue</c> 的 <c>OPENING_AT_FUTURE_TOLERANCE_MS</c> 是同一口径的另一份声明，
+    /// 改这里必须同步改那处。
+    /// </para>
+    /// </remarks>
+    private static readonly TimeSpan OPENING_AT_FUTURE_TOLERANCE = TimeSpan.FromMinutes(5);
+
+    /// <summary>期初时间解析失败时的字段错误。</summary>
+    private static readonly string[] OPENING_AT_ERROR = ["期初时间格式不正确"];
+
+    /// <summary>期初时间晚于当前时间时的字段错误。</summary>
+    private static readonly string[] OPENING_AT_FUTURE_ERROR = ["期初时间不能晚于当前时间"];
 
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
@@ -130,6 +151,9 @@ public sealed class AccountEndpoints : IEndpoint
 
                 ValidateBalance(request.InitialBalance, errors);
 
+                // 期初时间可选：不传即「未指定」，退回账户建档时刻（与本次改动前的行为一致）
+                var openingAt = ValidateOpeningAt(request.OpeningAt, errors);
+
                 // 币种须是**存在的启用币种**：停用币种不接受新绑定，否则「停用」就挡不住新数据继续引用它。
                 // 此处只判存在性，不把币种名称回填进错误文案——币种可被管理员改名，嵌进文案的旧名会随之过期
                 if (!await currencies.ExistsActiveAsync(request.CurrencyCode, cancellationToken))
@@ -156,6 +180,7 @@ public sealed class AccountEndpoints : IEndpoint
                     scope,
                     type,
                     request.InitialBalance,
+                    openingAt,
                     request.CurrencyCode!,
                     actor!.Id,
                     cancellationToken);
@@ -183,7 +208,9 @@ public sealed class AccountEndpoints : IEndpoint
                 "**currencyCode 必填**，须为存在的启用币种（见 GET /api/currencies）；" +
                 "币种是账户的计价单位，**一经创建不可修改**，需要换币种应停用后重新创建。" +
                 "期初金额会同时落成一笔期初交易（借/贷各一条明细），对手方为**该币种**的期初账本账户" +
-                "（每个币种各有一个，不存在时自动创建）；期初金额为 0 时不写分录。");
+                "（每个币种各有一个，不存在时自动创建）；期初金额为 0 时不写分录。" +
+                "**openingAt 可选**，是这笔期初余额的业务时刻，直接落成那笔期初交易的 occurredAt；" +
+                "不传时取账户创建时刻。它晚于当前时间会被拒绝；期初金额为 0 时不写分录，openingAt 也随之无落点。");
 
         group.MapPut("/{id:int}", async (
                 int id,
@@ -402,6 +429,45 @@ public sealed class AccountEndpoints : IEndpoint
         }
     }
 
+    /// <summary>校验并解析期初时间。空表示「未指定」，此时不报错、返回 <c>null</c>。</summary>
+    /// <param name="raw">请求体中的期初时间文本（ISO 8601，可空）。</param>
+    /// <param name="errors">字段级错误字典。</param>
+    /// <returns>可用的期初时间（UTC）；未指定或非法时返回 <c>null</c>。</returns>
+    /// <remarks>
+    /// 解析口径与 <c>TransactionEndpoints.TryParseTime</c> **同构**：<c>InvariantCulture</c> +
+    /// <c>AdjustToUniversal | AssumeUniversal</c>，即不带时区后缀的文本按 UTC 解释。
+    /// 本助手与它各自持有一份是既有模式（同 <c>TryResolveType</c>）——两条业务线的错误字段名不同，
+    /// 强行合并只会让「错误落在哪个字段」这件事绕一圈。
+    /// </remarks>
+    private static DateTime? ValidateOpeningAt(string? raw, Dictionary<string, string[]> errors)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        if (!DateTime.TryParse(
+                raw,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                out var parsed))
+        {
+            errors["openingAt"] = OPENING_AT_ERROR;
+            return null;
+        }
+
+        // 期初是账户记账的起点。未来时间的期初会让账户「当下余额就已经是期初金额」
+        // ——余额是全部明细的有符号汇总、与业务时间无关，故未来期初没有任何「还没发生」的缓冲，
+        // 语义上直接相悖。见 OPENING_AT_FUTURE_TOLERANCE 关于容差的说明。
+        if (parsed > DateTime.UtcNow + OPENING_AT_FUTURE_TOLERANCE)
+        {
+            errors["openingAt"] = OPENING_AT_FUTURE_ERROR;
+            return null;
+        }
+
+        return parsed;
+    }
+
     /// <summary>按**名称**解析账户类型，并确认该类型可由用户指定。</summary>
     /// <param name="raw">原始类型文本。</param>
     /// <param name="type">解析结果。</param>
@@ -461,12 +527,24 @@ public sealed class AccountEndpoints : IEndpoint
 /// 币种代码（ISO 4217，如 <c>CNY</c>），必填且须为存在的启用币种（见 <c>GET /api/currencies</c>）。
 /// 大小写不敏感，入库统一大写。
 /// </param>
+/// <param name="OpeningAt">
+/// 期初时间（ISO 8601，可空）。它是这笔期初余额的**业务时刻**，落为期初交易的 <c>occurredAt</c>。
+/// 不传或传空串表示「未指定」，退回账户创建时刻（与新增本字段前的行为一致）；
+/// 解析口径与记账端点的 <c>occurredAt</c> 一致（无时区后缀按 UTC 解释）；
+/// 晚于当前时间超过容差会被拒绝（见 <c>OPENING_AT_FUTURE_TOLERANCE</c>）。
+/// </param>
+/// <remarks>
+/// <see cref="OpeningAt"/> **只在期初金额非 0 时有落点**：期初金额为 0 时不写期初分录，
+/// 期初时间也随之无处可落。账户表刻意不存「期初时间」列——它已经活在期初分录的
+/// <c>occurred_at</c> 上，另立一列就是同一事实两处存储（见 <c>Account</c> 的类头注释）。
+/// </remarks>
 public sealed record AccountRequest(
     string? Name,
     string? Scope,
     string? Type,
     decimal InitialBalance,
-    string? CurrencyCode);
+    string? CurrencyCode,
+    string? OpeningAt);
 
 /// <summary>修改账户请求体。</summary>
 /// <param name="Name">账户名称。</param>

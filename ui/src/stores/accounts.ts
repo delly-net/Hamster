@@ -101,6 +101,14 @@ export interface CreateAccountPayload {
   scope: AccountScope
   type: AccountType
   initialBalance: number
+  /**
+   * 期初时间（UTC ISO 8601）。
+   *
+   * 它是这笔期初余额的**业务时刻**，后端直接落成那笔期初交易的 `occurredAt`。
+   * 账户表不存这一列——期初时间只活在期初分录上，另立一列就是同一事实两处存储。
+   * 期初金额为 0 时不写期初分录，该值也随之无落点。
+   */
+  openingAt: string
   /** 记账币种代码；必须是**启用的**币种。先在币种选择框中选定，再填其余字段。 */
   currencyCode: string
 }
