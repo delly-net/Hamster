@@ -24,6 +24,16 @@
  * 候选只取启用的币种，初值为系统默认币种（由后端标出，前端不再另算一次回退）。
  *
  * 停用即软删除（数据行保留、可重新启用），故按钮文案统一用「停用」而非「删除」。
+ *
+ * 窄屏（<1024px）呈现为卡片流：与表格是同一份 `tabAccounts` 的**双呈现**，由文末唯一的 1023px
+ * 媒体查询用 `display` 切换（断点值与 `App.vue` 逐字一致，页面级不得自建断点或改用 `matchMedia`）。
+ * 这里的 `display: none` 与「用 CSS 隐藏代替删除多余字段」不是一回事：后者删掉也不影响信息完整性，
+ * 属死代码；前者隐藏的是**断点不适用时的整块呈现**，是双呈现的定义。前提是任一时刻恰有一份进入
+ * 无障碍树，故宽窄两份不能同时可见。
+ *
+ * 卡片与明细页卡片的三处取舍差异：**序号不呈现**（它只是表格里的行计数）、**操作列一个都不能少**
+ * （表格在窄屏整块隐藏，卡片底部就是手机上唯一的管理入口）、**期初金额必须呈现**（它与余额只在
+ * 账户还没有流水时才相等，是两个独立信息，故余额放主位、期初降为次要标注）。
  */
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
@@ -562,6 +572,110 @@ onMounted(() => {
             </tr>
           </tbody>
         </table>
+
+        <!--
+          窄屏（<1024px）的卡片流：与上面的表格是**同一份 tabAccounts 的双呈现**，默认 display:none，
+          由文末的 1023px 媒体查询启用（同时把表格整块隐藏）。宽窄两处必须同步改。
+
+          与账目明细的卡片有两处刻意不同：
+          - **不呈现序号**（沿用明细页口径：序号只是表格里的行计数，本页的序号还只是「按当前页签从
+            1 重排」的行号，摆在卡片里更像账户编号）。
+          - **期初金额必须呈现**：它与余额只在账户还没有任何流水时才相等，是两个独立信息，
+            故卡片把余额放主位、期初降为次要标注，而不是像明细页那样「三个金额只留一个」。
+        -->
+        <ul class="cards">
+          <li v-for="account in tabAccounts" :key="account.id" class="card">
+            <div class="card-head">
+              <span class="card-account">
+                <span class="card-name">{{ account.name }}</span>
+                <span
+                  class="badge"
+                  :class="account.isActive ? 'badge-active' : 'badge-inactive'"
+                >
+                  {{ account.isActive ? '已启用' : '已停用' }}
+                </span>
+              </span>
+              <!-- 余额是卡片的视觉主位：与宽屏 .balance 同一处强调（主色 + 加粗） -->
+              <span class="card-balance">{{ formatAmount(account.balance) }}</span>
+            </div>
+
+            <!-- 归属 / 币种 / 期初金额 / 创建时间同属「要读得到、又不抢余额视线」的上下文，排一行 -->
+            <p class="card-meta">
+              <span class="card-scope">
+                <span class="badge" :class="account.scope === 'Public' ? 'badge-public' : ''">
+                  {{ ACCOUNT_SCOPE_LABELS[account.scope] }}
+                </span>
+                <span v-if="account.ownerUsername" class="owner">{{ account.ownerUsername }}</span>
+              </span>
+              <span class="badge badge-currency">{{ account.currencyCode }}</span>
+              <span class="card-initial">期初 {{ formatAmount(account.initialBalance) }}</span>
+              <span class="card-created">{{ formatDateTime(account.createdAt) }}</span>
+            </p>
+
+            <!--
+              卡片底部就是宽屏的「操作」列：表格在窄屏是整块隐藏的，这里就是手机上唯一的管理入口，
+              故编辑/停用/启用/确认停用/取消一个都不能少，二次确认同样是就地切换。
+            -->
+            <div class="actions card-actions">
+              <button
+                type="button"
+                class="ghost"
+                :disabled="pendingId !== null"
+                @click="openEdit(account)"
+              >
+                编辑
+              </button>
+
+              <!-- 停用为软删除，需二次确认；启用无需确认 -->
+              <template v-if="account.isActive">
+                <template v-if="confirmingId === account.id">
+                  <button
+                    type="button"
+                    class="danger"
+                    :disabled="pendingId !== null"
+                    @click="toggleActive(account)"
+                  >
+                    确认停用
+                  </button>
+                  <button
+                    type="button"
+                    class="ghost"
+                    :disabled="pendingId !== null"
+                    @click="confirmingId = null"
+                  >
+                    取消
+                  </button>
+                </template>
+                <button
+                  v-else
+                  type="button"
+                  class="danger"
+                  :disabled="pendingId !== null"
+                  @click="confirmingId = account.id"
+                >
+                  停用
+                </button>
+              </template>
+              <button
+                v-else
+                type="button"
+                class="ghost"
+                :disabled="pendingId !== null"
+                @click="toggleActive(account)"
+              >
+                启用
+              </button>
+            </div>
+          </li>
+
+          <!-- 空态与表格空态行共用同一条件与同一文案表达式，两处不得各自表述 -->
+          <li
+            v-if="!accountsStore.loading && tabAccounts.length === 0"
+            class="card card-empty"
+          >
+            {{ showInactive ? `暂无${activeTypeLabel}` : `暂无启用的${activeTypeLabel}` }}
+          </li>
+        </ul>
       </div>
     </template>
 
@@ -1003,6 +1117,101 @@ onMounted(() => {
   opacity: 0.6;
 }
 
+/*
+ * 窄屏卡片流：**默认不呈现**（宽屏走表格），由文末的 1023px 媒体查询启用。
+ * display: none 在这里是断点级的双呈现手段、不是死代码——理由见文件头与模板注释。
+ */
+.cards {
+  display: none;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 卡片与表格同源：同一套边框/圆角/底色/投影令牌，只是把「行」换成「块」 */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+/* 账户名一段占弹性空间：空间不足时截断，不去挤右侧的余额 */
+.card-account {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.card-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 余额是卡片主位：复用宽屏 .balance 的主色 + 加粗，等宽便于纵向比大小 */
+.card-balance {
+  flex: none;
+  color: var(--color-accent-strong);
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 归属 / 币种 / 期初 / 时间：排一行，窄屏放不下时整体换行，不截断其中任何一项 */
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/* 徽标本身带语义色，故不整行压暗；只把两处纯文本的次要信息降一档 */
+.card-initial,
+.card-created {
+  opacity: 0.75;
+}
+
+.card-created {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card-empty {
+  align-items: center;
+  padding: 1.5rem;
+  font-size: 13px;
+  text-align: center;
+  opacity: 0.6;
+}
+
+/* 卡片底部的操作区：与宽屏「操作」列同一组按钮，上边框把它与卡片信息分开 */
+.card-actions {
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--color-border);
+}
+
 /* 遮罩层级高于窄屏抽屉与遮罩（z-index 19/20）：弹窗必须盖住侧栏 */
 .mask {
   position: fixed;
@@ -1142,5 +1351,35 @@ onMounted(() => {
 .submit:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/*
+ * 窄屏：账户改卡片流，表格整块让位。
+ *
+ * 断点值与 `App.vue` 完全一致（1023px）且**必须**一致：全站只有这一个断点，页面级适配另起一套
+ * 会让「侧栏收成抽屉」与「账户换呈现」在中间地带错位。侧栏抽屉的开合、当前页「账户管理」的自动
+ * 高亮、跳转后自动收起，一概由 `App.vue` 独担，**本页不得复制任何相关逻辑**，否则就是第二个真源。
+ *
+ * 仅切换呈现：页头、页签条、「显示已停用」开关与两个弹窗在宽窄两档下完全共用。
+ */
+@media (max-width: 1023px) {
+  .table {
+    display: none;
+  }
+
+  .cards {
+    display: flex;
+  }
+
+  /*
+   * 卡片里的按钮是窄屏下唯一需要「点」的元素（宽屏还有整行表格作上下文，这里只有一块卡片），
+   * 故只在断点内放大到触控友好尺寸；宽屏按钮尺寸逐字不变，PC 端观感零改动。
+   */
+  .card .ghost,
+  .card .danger {
+    min-height: 2.25rem;
+    padding: 0.5rem 0.9rem;
+    font-size: 13px;
+  }
 }
 </style>
