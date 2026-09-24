@@ -151,10 +151,7 @@ function choose(account: Account): void {
       <li v-for="row in rows" :key="row.account.id">
         <button type="button" class="option" @mousedown.prevent="choose(row.account)">
           <span class="option-name">{{ row.account.name }}</span>
-          <span class="option-meta">
-            {{ ACCOUNT_SCOPE_LABELS[row.account.scope] }}
-            <template v-if="row.account.ownerUsername"> · {{ row.account.ownerUsername }}</template>
-          </span>
+          <span class="option-meta">{{ ACCOUNT_SCOPE_LABELS[row.account.scope] }}</span>
           <!-- 余额排在候选行的最右侧并等宽呈现：同一浮层里各项余额因此纵向对齐，
                一眼能比出哪个账户钱多（选转出账户/支出账户时正是要看这个）。
                余额非有限数时不渲染这一段，而不是留个占位标记，理由见 `balanceText` -->
@@ -218,7 +215,7 @@ function choose(account: Account): void {
 .option {
   display: flex;
   align-items: baseline;
-  /* 弹性空间全部让给账户名（见 .option-name）：归属与余额依次靠右，故不用 space-between，
+  /* 弹性空间全部让给账户名（见 .option-name）：归属范围与余额依次靠右，故不用 space-between，
      否则夹在中间的那段会被推到行中央 */
   gap: 0.75rem;
   width: 100%;
@@ -233,7 +230,7 @@ function choose(account: Account): void {
   cursor: pointer;
 }
 
-/* 超长账户名用省略号截断，而不是把右侧的归属与余额挤出容器 */
+/* 超长账户名用省略号截断，而不是把右侧的归属范围与余额挤出容器 */
 .option-name {
   flex: 1 1 auto;
   min-width: 0;
@@ -243,6 +240,12 @@ function choose(account: Account): void {
   font-weight: 600;
 }
 
+/* 只呈现归属范围，**不呈现归属人用户名**（`account.ownerUsername`）：
+   单用户下每行都是同一个名字、零区分度，多用户下候选又已按可见性过滤过
+   （他人个人账户根本不在候选里），那个名字与「这笔钱记到哪」无关——
+   识别归属人的需求在账户管理页满足（那里照常显示）。
+   一行要塞下账户名 + 归属范围 + 余额三段，浮层宽度又被输入框锁死，
+   省下的横向空间全部还给账户名 */
 .option-meta {
   flex: none;
   font-size: 12px;
