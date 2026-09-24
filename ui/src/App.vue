@@ -113,6 +113,11 @@ async function handleLogout(): Promise<void> {
         <span class="brand-name">{{ productName }}</span>
       </div>
 
+      <!--
+        header 右侧账号区：**仅宽屏呈现**。窄屏（<1024px）下整块转移到抽屉菜单底部的
+        `.drawer-account`（见下方 `aside`），两处是同一份信息的双呈现，
+        结构一一对应，增删字段必须同时修改。
+      -->
       <div class="account">
         <template v-if="auth.isAuthenticated">
           <!-- 身份在前、账套在后：用户名是「谁在用」，账套是「在哪个账套里操作」 -->
@@ -148,6 +153,35 @@ async function handleLogout(): Promise<void> {
             {{ item.label }}
           </RouterLink>
         </nav>
+
+        <!--
+          抽屉账号区：**仅窄屏呈现**，与 header 右侧的 `.account` 是同一份信息的双呈现
+          （宽屏走 header，窄屏走这里），两处模板一一对应，增删字段必须同时修改。
+          置于菜单之后属刻意取舍：功能菜单是高频操作、优先靠上，账号信息收尾，
+          与宽屏 header「用户名 → 账套 → 退出登录」自左向右收尾的语义一致。
+          上边框即「功能菜单 ｜ 账号区」两段之间的分割线。
+        -->
+        <div class="drawer-account">
+          <template v-if="auth.isAuthenticated">
+            <span class="account-name">{{ auth.user?.username ?? '已登录' }}</span>
+
+            <span v-if="accountSets.current" class="account-set">
+              <span class="account-set-name" :title="accountSets.current.remark ?? ''">
+                {{ accountSets.current.name }}
+              </span>
+              <!-- 复用宽屏的同一个选择弹窗：其遮罩 z-index(30) 高于抽屉(20)，无需先收起抽屉 -->
+              <button type="button" class="switch-set" @click="accountSets.openPicker()">切换</button>
+            </span>
+            <!-- 一个账套都没关联：仅提示，不显示名称与切换按钮 -->
+            <span v-else-if="accountSets.emptyNotice" class="account-set-empty">
+              {{ accountSets.emptyNotice }}
+            </span>
+
+            <button type="button" class="logout" @click="handleLogout">退出登录</button>
+          </template>
+          <!-- 窄屏 header 的账号区已整体让位，未登录访客的登录入口只能落在这里 -->
+          <RouterLink v-else class="login-link" to="/login">登录 / 注册</RouterLink>
+        </div>
       </aside>
 
       <!-- 窄屏抽屉遮罩：仅在展开时渲染，点击收起 -->
@@ -210,6 +244,15 @@ async function handleLogout(): Promise<void> {
   align-items: center;
   gap: 0.6rem;
   font-size: 13px;
+}
+
+/*
+ * 抽屉账号区与 header 的 `.account` 同源异形：共用 `.account-name` / `.account-set` /
+ * `.switch-set` / `.logout` / `.login-link` 等类名与样式，差异只在容器——
+ * 宽屏整块不渲染，窄屏才在抽屉底部展开为纵向堆叠（见文末窄屏媒体查询）。
+ */
+.drawer-account {
+  display: none;
 }
 
 .account-set {
@@ -381,7 +424,33 @@ async function handleLogout(): Promise<void> {
     display: flex;
   }
 
-  /* 窄屏 header 一行要放下品牌、用户名、账套与两个按钮，账套名进一步让位 */
+  /*
+   * header 右侧账号区整体让位：窄屏一行塞不下「品牌 + 用户名 + 账套名 + 两个按钮」，
+   * 挤出来的只有账套名的字数。故用户名、账套信息与退出登录下沉到抽屉的
+   * `.drawer-account`，header 只留品牌。
+   */
+  .account {
+    display: none;
+  }
+
+  /* 抽屉内的账号区：纵向堆叠 + 吸底。flex 列是 `margin-top: auto` 生效的前提 */
+  .drawer-account {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    /* 吸底：菜单短时账号区落在抽屉底部，成为一条稳定的「页脚」 */
+    margin-top: auto;
+    padding-top: 0.75rem;
+    /* 这条上边框即「功能菜单 ｜ 账号区」两段之间的分割线 */
+    border-top: 1px solid var(--color-border);
+  }
+
+  /* 抽屉内【退出登录】占满整行，作为账号区的收尾动作 */
+  .drawer-account .logout {
+    width: 100%;
+  }
+
+  /* 账套名与【切换】在抽屉里同行，抽屉仅 200px 宽，账套名仍需限宽让位给按钮 */
   .account-set-name {
     max-width: 6rem;
   }
@@ -392,6 +461,8 @@ async function handleLogout(): Promise<void> {
     bottom: 0;
     left: 0;
     z-index: 20;
+    display: flex;
+    flex-direction: column;
     transform: translateX(-100%);
     transition: transform 0.25s ease;
     box-shadow: var(--shadow-card);
@@ -399,6 +470,11 @@ async function handleLogout(): Promise<void> {
 
   .app-sidebar.open {
     transform: none;
+  }
+
+  /* 菜单不参与伸缩，长菜单由侧栏自身的 overflow-y 滚动，账号区不被压缩 */
+  .menu {
+    flex: none;
   }
 
   .app-main {

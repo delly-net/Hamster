@@ -167,7 +167,9 @@ A regular user's login experience follows how many account sets they can reach:
 | two or more | A **selection dialog opens first** and cannot be dismissed until an account set is chosen (it offers "log out" as an escape) |
 
 Once selected, the header shows the current account set plus a **Switch** button, placed just
-before **Log out**.
+before **Log out**. On narrow screens (<1024px) the whole account block — username, account set
+and **Log out** — moves into the bottom of the drawer menu, below a divider that separates it
+from the navigation items (see the UI layout docs).
 
 The current account set travels on every request as the `X-Account-Set-Id` header and is
 validated per request against the user's links — it is deliberately **not** part of the JWT.
