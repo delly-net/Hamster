@@ -11,9 +11,9 @@ cd /project/delly-net/Hamster/api
 
 echo "[==========更新前端依赖==========]"
 cd /project/delly-net/Hamster/ui
-npm install
+pnpm install
 echo "[==========编译前端代码==========]"
-npm run build
+pnpm build
 echo "[==========复制前端文件==========]"
 mkdir -p /project/delly-net/publish/hamster-ui/files
 rm -rf /project/delly-net/publish/hamster-ui/files/*
