@@ -9,6 +9,9 @@
 		<!-- 框架骨架阶段不强制要求所有公共成员填写 XML 注释 -->
 		<NoWarn>$(NoWarn);CS1591</NoWarn>
 		<RootNamespace>Hamster.Api</RootNamespace>
+		<AssemblyName>hamster</AssemblyName>
+		<ApplicationIcon>Hamster.ico</ApplicationIcon>
+		<AssemblyTitle>小仓鼠理财管家</AssemblyTitle>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -23,6 +26,10 @@
 		<Content Remove="logs\**" />
 		<EmbeddedResource Remove="logs\**" />
 		<None Remove="logs\**" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Content Include="Hamster.ico" />
 	</ItemGroup>
 
 </Project>
