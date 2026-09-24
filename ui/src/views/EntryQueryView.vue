@@ -23,6 +23,25 @@
  * 本页不做任何可见性过滤：后端只返回「挂在我可见账户上」的明细，前端过滤只会造出一道假防线。
  * 账户多选的候选含**已停用账户**（软删除后历史明细仍在，漏掉它们会让过去的账凭空消失），
  * 并排除账本账户——它是系统内部账户，后端从不返回它，本页无需为此写过滤逻辑。
+ *
+ * **窄屏（<1024px）呈现为卡片流**，表格只在宽屏呈现：10 列表格在手机上必须左右拖动才看得见金额，
+ * 等于「查得到但读不了」。两份 DOM 并存，由 `display` 在 `App.vue` 定的 1023px 断点上切换
+ * ——断点值全站只有这一个，页面级适配不得另起第二套，也不得改用 `matchMedia` 侦测。
+ *
+ * 这里的 `display: none` 是**双呈现手段，不是死代码**，与「禁止用 CSS 隐藏代替删除」的既有口径不冲突：
+ * 后者禁止的是把**同一份内容里多余的字段**藏起来（那会留下多余语义与死代码），
+ * 而此处隐藏的是**断点不适用时的整块呈现**——窄屏藏表格、宽屏藏卡片，任一时刻恰有一份进入无障碍树
+ * （`display: none` 的节点已从无障碍树移除），不存在重复朗读。`App.vue` 的 `.account` / `.drawer-account`
+ * 是同一做法的先例。
+ *
+ * **卡片头部只给一个带符号金额**（即该行的净额），不再分收入/支出/净额三格：单行视角下三列并不携带
+ * 三份信息——收入与支出同格只有一个非空，而净额恒等于那个非空值；三列只有**在合计时**才分道扬镳，
+ * 故三项齐备的只有宽屏 `<tfoot>` 与窄屏汇总条（同取自 {@link pageTotals}）。同理卡片**不呈现序号**：
+ * 序号是页内行号，无表头可参照时它既不参与定位也不参与计数。
+ *
+ * 「收入 / 支出」文字标签由金额正负派生（见 {@link sideText}），**不取自 `direction`**：它只是把窄屏下
+ * 丢失的「金额在哪一列」这一层信息补回来，与宽屏「按符号分列」同一口径；写成 `direction` 分支等于把
+ * 「借/贷」放回页面，也会与既有口径分叉。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
@@ -282,6 +301,33 @@ function expenseText(entry: Entry): string {
   }
 
   return entry.signedAmount < 0 ? formatSigned(entry.signedAmount) : ''
+}
+
+/**
+ * 窄屏卡片头部的收支标签：该行算收入还是支出。
+ *
+ * 它**与宽屏的两列同源**——判据是 `signedAmount` 的正负，即 {@link incomeText} / {@link expenseText}
+ * 分列所依据的同一个符号，故不构成第二个语义源。窄屏没有列头，「金额落在哪一列」这一层信息随之丢失，
+ * 而这个标签把它补回来；金额本身仍带 `+` / `-` 号，是色彩之外的第二条通道。
+ *
+ * **不得改写成 `entry.direction` 分支**：那等于把「借/贷」放回页面（本页刻意弱化复式记账），
+ * 且会与「按符号分列」的既有口径分叉成两个真源。
+ *
+ * @param entry 一条明细。
+ * @returns `收入` / `支出`；零值与金额字段不可用时返回**空串**——零值行在宽屏两列下同样两列皆空，
+ * 口径一致；而字段不可用时既不知道是收入、也不知道是支出，说成「收入」就是把缺失值标成正常数据
+ * （同 #44 的口径：异常必须显式呈现，由 {@link formatSigned} 给出标记）。
+ */
+function sideText(entry: Entry): string {
+  if (!hasSignedAmount(entry)) {
+    return ''
+  }
+
+  if (entry.signedAmount > 0) {
+    return '收入'
+  }
+
+  return entry.signedAmount < 0 ? '支出' : ''
 }
 
 /**
@@ -620,6 +666,74 @@ onMounted(() => {
           </tr>
         </tfoot>
       </table>
+
+      <!--
+        窄屏（<1024px）的卡片流：与上面的表格是同一份 `items` 的双呈现，默认 display:none，
+        由文末的 1023px 媒体查询启用（同时把表格整块隐藏）。两处必须同步改：
+        卡片不呈现序号，且金额只给一格（理由见文件头注释）。
+      -->
+      <ul class="cards">
+        <li v-for="entry in items" :key="entry.id" class="card">
+          <div class="card-head">
+            <span class="card-side">
+              <!-- 收支标签由金额正负派生，与宽屏两列同源；零值/字段缺失时为空串 -->
+              <span class="card-side-text">{{ sideText(entry) }}</span>
+              <!-- 交易类型与宽屏一样是背景信息：一笔转账正是靠它区别于真实收支 -->
+              <span class="card-type">{{ transactionTypeLabel(entry.transactionType) }}</span>
+            </span>
+            <!-- 金额是卡片的视觉主位：带符号 + 按符号着色（净额口径），字段缺失走金额异常告警 -->
+            <span class="card-amount" :class="signedCellClass(entry.signedAmount, 'net')">
+              {{ formatSigned(entry.signedAmount) }}
+            </span>
+          </div>
+
+          <!-- 账户 → 对手方：「钱从哪来、到哪去」的对照，宽屏下它们是两列 -->
+          <p class="card-account">
+            <span class="card-account-name">{{ entry.accountName }}</span>
+            <span class="card-arrow" aria-hidden="true">→</span>
+            <span class="card-counterparty">{{ counterpartyText(entry) }}</span>
+          </p>
+
+          <p class="card-summary">{{ entry.summary }}</p>
+
+          <p class="card-meta">
+            <span class="card-time">{{ formatDateTime(entry.occurredAt) }}</span>
+            <span class="card-category">分类：{{ categoryText(entry) }}</span>
+            <span class="card-remark">备注：{{ entry.remark || '—' }}</span>
+          </p>
+        </li>
+
+        <!-- 空态与表格空态行共用同一 emptyText，两处文案不得各自表述 -->
+        <li v-if="items.length === 0" class="card card-empty">{{ emptyText }}</li>
+      </ul>
+
+      <!--
+        窄屏的本页小计：与宽屏 <tfoot> 同源同值（同一 pageTotals / formatSigned / signedCellClass），
+        同样只在有数据时渲染。三项缺一不可——收入/支出/净额只有在**合计**时才互不相等。
+      -->
+      <section v-if="items.length > 0" class="totals">
+        <p class="totals-title">本页小计</p>
+        <div class="totals-grid">
+          <div class="total">
+            <span class="total-label">收入</span>
+            <span class="total-value" :class="signedCellClass(pageTotals.income, 'income')">
+              {{ formatSigned(pageTotals.income) }}
+            </span>
+          </div>
+          <div class="total">
+            <span class="total-label">支出</span>
+            <span class="total-value" :class="signedCellClass(pageTotals.expense, 'expense')">
+              {{ formatSigned(pageTotals.expense) }}
+            </span>
+          </div>
+          <div class="total">
+            <span class="total-label">净额</span>
+            <span class="total-value" :class="signedCellClass(pageTotals.net, 'net')">
+              {{ formatSigned(pageTotals.net) }}
+            </span>
+          </div>
+        </div>
+      </section>
 
       <div class="pager">
         <button
@@ -1015,5 +1129,187 @@ onMounted(() => {
 .submit:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/*
+ * 窄屏卡片流与汇总条：**默认不呈现**（宽屏走表格），由文末的 1023px 媒体查询启用。
+ * display: none 在这里是断点级的双呈现手段、不是死代码——理由见文件头注释。
+ */
+.cards,
+.totals {
+  display: none;
+}
+
+.cards {
+  flex-direction: column;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* 卡片与表格同源：同一套边框/圆角/底色/投影令牌，只是把「行」换成「块」 */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
+}
+
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.card-side {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.card-side-text {
+  font-size: 13px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+
+/* 交易类型与宽屏一样弱化：它是明细的背景信息，不抢金额与摘要的视觉重心 */
+.card-type {
+  font-size: 12px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+
+/* 金额是卡片的视觉主位：字号明显大于正文，等宽便于纵向比对大小 */
+.card-amount {
+  flex: none;
+  font-size: 16px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card-account {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* 账户名占弹性空间：空间不足时截断，不去挤右侧的对手方 */
+.card-account-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-arrow,
+.card-counterparty {
+  flex: none;
+}
+
+/* 摘要允许换行、不截断：它是这一行唯一的自由文本，截断等于丢信息 */
+.card-summary {
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+/* 时间 / 分类 / 备注同属「每行都要读得到、又都不抢金额视线」的次要信息，排一行 */
+.card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.2rem 0.6rem;
+  font-size: 12.5px;
+  line-height: 1.6;
+  opacity: 0.75;
+}
+
+.card-time {
+  font-variant-numeric: tabular-nums;
+}
+
+.card-empty {
+  align-items: center;
+  padding: 1.5rem;
+  font-size: 13px;
+  text-align: center;
+  opacity: 0.6;
+}
+
+/* 汇总条：底色 + 上边框把它读作「汇总」而不是「又一张卡片」，与表格 <tfoot> 同源 */
+.totals {
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-mute);
+  box-shadow: var(--shadow-card);
+}
+
+.totals-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+/* 三项等宽平分：窄屏下并排比上下堆叠省一半高度，数字小也能对齐比对 */
+.totals-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+  margin-top: 0.45rem;
+}
+
+.total {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.total-label {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.total-value {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * 窄屏：明细改卡片流，表格整块让位。
+ *
+ * 断点值与 `App.vue` 完全一致（1023px）且**必须**一致：全站只有这一个断点，页面级适配另起一套
+ * 会让「侧栏收成抽屉」与「明细换呈现」在中间地带错位。侧栏抽屉的开合、当前页「账目明细」的自动高亮、
+ * 跳转后自动收起，一概由 `App.vue` 独担，**本页不得复制任何相关逻辑**，否则就是第二个真源。
+ *
+ * 仅切换呈现：筛选区、账户多选面板、分页器与全部金额口径在宽窄两档下完全共用。
+ */
+@media (max-width: 1023px) {
+  .table {
+    display: none;
+  }
+
+  .cards {
+    display: flex;
+  }
+
+  .totals {
+    display: block;
+  }
 }
 </style>
