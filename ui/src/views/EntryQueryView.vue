@@ -11,6 +11,13 @@
  *
  * 「借/贷」这一层刻意不呈现给用户：复式记账是数据的组织方式，不是普通人读账的方式。
  *
+ * **符号只在净额列出现**：收入列与支出列一律显示为正数（{@link formatUnsigned} 取绝对值），
+ * 两列靠列头 + 语义色（收入绿 / 支出红）区分方向；只有净额列用 {@link formatSigned} 带 `+` / `-`
+ * ——它是一格里同时容纳正负两种结果的列，符号是它的方向通道。本页小计的收入/支出两项
+ * （宽屏 `<tfoot>` 与窄屏汇总条）与明细行**同列同口径**，否则同一列上下会出现两种写法。
+ * 这只是**呈现约定**（去符号发生在「已判定属于哪一列」之后的格式化环节），
+ * 数据口径未动：分列判据仍是后端 `signedAmount` 的正负，符号也仍由后端唯一定义。
+ *
  * 筛选条件分「草稿」与「已应用」两份：改动输入不立刻发请求（避免边打字边查询），
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
  *
@@ -127,7 +134,8 @@ const hasAmountAnomaly = computed(() => items.value.some((entry) => !hasSignedAm
  *
  * 口径是**当页可见数据之和**——期初余额行按正负号入列后一并计入（它同样带 `signedAmount`），
  * 故小计恒等于三列本页数据相加，用户核对时不会对不上。支出合计累加的是负数，
- * 呈现时由 {@link formatSigned} 补回 `-` 号。
+ * 但呈现与明细行同口径：收入/支出两项由 {@link formatUnsigned} 取绝对值（与同列明细一致），
+ * 只有净额合计由 {@link formatSigned} 保留符号。
  *
  * 金额字段缺失时 `undefined` 会把合计污染成 `NaN`，小计于是显示 {@link AMOUNT_UNAVAILABLE}——
  * 这是**刻意保留**的：只要有一行金额不明，这份小计就确实不可信，不该给出一个看着正常的数字。
@@ -232,9 +240,12 @@ function hasSignedAmount(entry: Entry): boolean {
 /**
  * 格式化**带符号**金额：正数补 `+`、负数用 `-`，两者共用同一套两位小数口径。
  *
- * 符号手工拼接而非交给 `Intl`（它对正数不出 `+`），且用的是 ASCII 连字符——
- * 让「收入 +100.00 / 支出 -50.00」在等宽字体下纵向对齐。
- * 符号是金额本身的一部分（本页不再有单独的「方向」列），故 `+` 不能省。
+ * 符号手工拼接而非交给 `Intl`（它对正数不出 `+`），且用的是 ASCII 连字符，
+ * 让一列里的正负金额在等宽字体下纵向对齐。
+ *
+ * **只有净额列用它**（以及窄屏卡片那个等同于净额的金额）：净额是唯一「一格容纳正负两种结果」
+ * 的位置，符号是它表达方向的通道。收入/支出两列改用 {@link formatUnsigned}——那两列的方向
+ * 已由列头与本列语义色表达，再补符号是重复。
  *
  * @param value 带符号金额（后端 `signedAmount`）。
  * @returns 带正负号的金额文本；非有限数返回 {@link AMOUNT_UNAVAILABLE} 而非 `String(value)`
@@ -246,6 +257,29 @@ function formatSigned(value: number): string {
   }
 
   return `${value < 0 ? '-' : '+'}${formatAmount(Math.abs(value))}`
+}
+
+/**
+ * 格式化**不带符号**金额：一律取绝对值，与 {@link formatSigned} 共用同一套两位小数口径。
+ *
+ * 供**收入列与支出列**使用：这两列的列头已经说明了方向，同一行又只有一列有值，
+ * 再补一个 `+` / `-` 就是第三遍重复——方向由「落在哪一列」+「本列的语义色」表达即可
+ * （见 {@link signedCellClass}）。**净额列不得改用它**：净额是唯一在一格里同时容纳
+ * 正负两种结果的列，符号是它表达方向的主要通道。
+ *
+ * 负号只是被**显示**掉了，不是被抹掉：金额本身仍取自后端带符号的 `signedAmount`，
+ * 分列判据也仍是它的正负（见 {@link incomeText} / {@link expenseText}）。
+ *
+ * @param value 带符号金额。
+ * @returns 绝对值文本；非有限数返回 {@link AMOUNT_UNAVAILABLE}——**判定必须先于 `Math.abs()`**，
+ * 否则 `Math.abs(undefined)` 得到 `NaN` 并被渲染成 `NaN` 文本（同 #44 的加固口径）。
+ */
+function formatUnsigned(value: number): string {
+  if (!Number.isFinite(value)) {
+    return AMOUNT_UNAVAILABLE
+  }
+
+  return formatAmount(Math.abs(value))
 }
 
 /** 格式化 ISO 时间；无法解析时原样回显。 */
@@ -285,22 +319,31 @@ function categoryText(entry: Entry): string {
  *
  * 「留空」是这一列的正常语义（这行不是收入），故仅在**金额字段不可用**时才给标记——
  * 那种情况下「留空」与「没有收入」无法区分，只能显式说明。
+ *
+ * 有值时**去符号显示为正数**（{@link formatUnsigned}）：本列的列头已经写明是收入，
+ * 方向由列头与绿色共同表达，「+」不携带新信息。分列判据仍是 `signedAmount > 0`——
+ * 去符号只发生在「已判定属于本列」之后的格式化环节。
  */
 function incomeText(entry: Entry): string {
   if (!hasSignedAmount(entry)) {
     return AMOUNT_UNAVAILABLE
   }
 
-  return entry.signedAmount > 0 ? formatSigned(entry.signedAmount) : ''
+  return entry.signedAmount > 0 ? formatUnsigned(entry.signedAmount) : ''
 }
 
-/** 支出列文本：只有负数行有值，其余行留空；字段不可用时同 {@link incomeText} 给标记。 */
+/**
+ * 支出列文本：只有负数行有值，其余行留空；字段不可用时同 {@link incomeText} 给标记。
+ *
+ * 同样**去符号显示为正数**：列头已说明方向，红色是第二条通道；金额库里本就是恒正的，
+ * 这里的 `-` 只是复式符号的前缀，抹掉它反而是回到「这行花了多少钱」的本来读法。
+ */
 function expenseText(entry: Entry): string {
   if (!hasSignedAmount(entry)) {
     return AMOUNT_UNAVAILABLE
   }
 
-  return entry.signedAmount < 0 ? formatSigned(entry.signedAmount) : ''
+  return entry.signedAmount < 0 ? formatUnsigned(entry.signedAmount) : ''
 }
 
 /**
@@ -624,7 +667,8 @@ onMounted(() => {
             <td class="row-index">{{ index + 1 }}</td>
             <td class="occurred">{{ formatDateTime(entry.occurredAt) }}</td>
             <td class="name">{{ entry.accountName }}</td>
-            <!-- 收入/支出各占一列，同一行只有一列有值：金额的增减不再靠「借/贷」标签表达 -->
+            <!-- 收入/支出各占一列，同一行只有一列有值：金额的增减不再靠「借/贷」标签表达。
+                 两列均显示为正数（无 +/-），方向由列头与语义色表达；符号只留给下面的净额列 -->
             <td class="amount" :class="signedCellClass(entry.signedAmount, 'income')">
               {{ incomeText(entry) }}
             </td>
@@ -653,11 +697,12 @@ onMounted(() => {
         <tfoot v-if="items.length > 0">
           <tr>
             <td colspan="3" class="subtotal-label">本页小计</td>
+            <!-- 收入/支出两列与明细行同口径：去符号显示正数（同列上下不得有两种写法），净额仍带符号 -->
             <td class="amount" :class="signedCellClass(pageTotals.income, 'income')">
-              {{ formatSigned(pageTotals.income) }}
+              {{ formatUnsigned(pageTotals.income) }}
             </td>
             <td class="amount" :class="signedCellClass(pageTotals.expense, 'expense')">
-              {{ formatSigned(pageTotals.expense) }}
+              {{ formatUnsigned(pageTotals.expense) }}
             </td>
             <td class="amount" :class="signedCellClass(pageTotals.net, 'net')">
               {{ formatSigned(pageTotals.net) }}
@@ -708,8 +753,9 @@ onMounted(() => {
       </ul>
 
       <!--
-        窄屏的本页小计：与宽屏 <tfoot> 同源同值（同一 pageTotals / formatSigned / signedCellClass），
-        同样只在有数据时渲染。三项缺一不可——收入/支出/净额只有在**合计**时才互不相等。
+        窄屏的本页小计：与宽屏 <tfoot> 同源同值（同一 pageTotals / signedCellClass，收入/支出用
+        formatUnsigned、净额用 formatSigned，与宽屏逐处对应），同样只在有数据时渲染。
+        三项缺一不可——收入/支出/净额只有在**合计**时才互不相等。
       -->
       <section v-if="items.length > 0" class="totals">
         <p class="totals-title">本页小计</p>
@@ -717,13 +763,13 @@ onMounted(() => {
           <div class="total">
             <span class="total-label">收入</span>
             <span class="total-value" :class="signedCellClass(pageTotals.income, 'income')">
-              {{ formatSigned(pageTotals.income) }}
+              {{ formatUnsigned(pageTotals.income) }}
             </span>
           </div>
           <div class="total">
             <span class="total-label">支出</span>
             <span class="total-value" :class="signedCellClass(pageTotals.expense, 'expense')">
-              {{ formatSigned(pageTotals.expense) }}
+              {{ formatUnsigned(pageTotals.expense) }}
             </span>
           </div>
           <div class="total">

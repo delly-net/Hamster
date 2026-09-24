@@ -275,16 +275,23 @@ async function loadOptions(): Promise<boolean> {
 }
 
 /**
- * 复位表单：币种回到默认币种、主账户回到该币种下的第一个候选、对手方清空、时间回到此刻。
+ * 复位表单：币种回到默认币种、**主账户留空**、对手方清空、时间回到此刻。
  *
- * 主账户预填第一个候选而非留空——记账是高频动作，绝大多数时候提交的就是默认那个账户。
+ * **账户一律不预填第一个候选**（初始打开、提交成功后、点【重置】三处同此口径，均由本函数达成）。
+ * 账户是「这笔钱记到哪」的决定性信息，预填一个用户没有选过的账户，等于把一个默认值伪装成
+ * 已经做过的决定——不察的人会把账记到并非本意的账户上，且这类错误在明细里与正常记账无从区分。
+ * 空账户不会漏网：`submit()` 的「请选择{主账户}」在校验链里先于发请求，字段名还随记账类型变
+ * （收入账户 / 支出账户 / 转出账户），用户点提交立刻知道缺什么；而 `AccountSearchSelect` 在
+ * 关键词为空时列出**全部**候选，聚焦即见，清空并未削弱可发现性。
+ *
+ * 币种与账户两者口径不同**属刻意**：币种是账户候选的筛选前提（候选先按币种过滤），
+ * 它本身不决定这笔钱记到哪，故仍回到默认币种。
  */
 function resetFields(): void {
   selectedCurrencyCode.value = currenciesStore.defaultCode ?? currencyOptions.value[0]?.code ?? ''
 
-  const first = accountOptions.value[0] ?? null
-  primaryAccountId.value = first?.id ?? null
-  primaryAccountText.value = first?.name ?? ''
+  primaryAccountId.value = null
+  primaryAccountText.value = ''
 
   counterpartyAccountId.value = null
   counterpartyAccountText.value = ''
