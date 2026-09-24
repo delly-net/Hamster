@@ -272,6 +272,62 @@ be used to probe for other people's accounts); 409 when the name repeats within 
 "account set + scope"; 400 for a numeric or unknown `scope` / `type`, since both travel as
 **strings**.
 
+##### Categories
+
+A **category** answers "what was this posting for" (meals, salary, card repayment). It belongs to
+exactly one account set — the list is filtered by the current account set, exactly like accounts —
+so each account set keeps its own vocabulary: "Dining" can cover a different range of spending in
+each one.
+
+There is deliberately **no user-side / admin-side split** (unlike currencies): a category is a
+dictionary the whole account set shares, and maintaining it takes no system administrator. Splitting
+it would leave an ordinary user looking at a category they created themselves and being unable to
+rename it.
+
+Categories do **not** distinguish income / expense / transfer. A category is "what the money was
+for", while the direction of the movement already lives on the transaction's `type`. Tying a
+category to a type would force the same name to be created once per type and would make a shopping
+refund — one category used on income and expense alike — impossible to record. That is also why the
+**`GET` / `POST` endpoints take no type parameter at all**: there is no type dimension to filter on.
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/categories?includeInactive=false` | Bearer | Categories in the current account set, oldest first. `includeInactive=true` also returns deactivated ones |
+| `POST /api/categories` | Bearer | Create (201); body `{ name }`, at most 32 characters |
+| `PUT /api/categories/{id}` | Bearer | Rename only (204) — the body is just `{ name }`; the account set is immutable and **not on the request record**, so sending one has no effect |
+| `POST /api/categories/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
+| `POST /api/categories/{id}/activate` | Bearer | Reactivate (204) |
+
+Failure contract: 400 without the account-set header (categories always live inside one), or for an
+invalid `name`; 403 when the account set is unknown or not yours; 404 when the category does not
+exist or belongs to another account set; 409 when the name repeats within the same account set.
+Names are matched **case-insensitively** after trimming, so "餐饮" and " 餐饮 " are the same name
+and cannot both exist.
+
+Categories are **never physically deleted, only deactivated** (soft delete), for the same reason
+accounts are: transactions hang off them, so deleting one would orphan historical rows. A
+deactivated category is hidden from the default list and is **no longer offered** when recording new
+postings; its **name is still returned** by the entry query, because history has to keep reading
+correctly.
+
+**A category hangs on the transaction, not on the entry** (see `hamster_transaction.category_id`).
+It describes "why this posting happened", which is a property of the act of recording. A transfer
+posts two entries, so a category on the entry would make one transfer ask for two categories — while
+a transfer's category ("card repayment") is naturally about the whole thing. One consequence worth
+knowing: **both entry rows of one transaction carry the same category.**
+
+Storing the **primary key** rather than the name is what makes renaming safe: history keeps pointing
+at the same row and therefore displays the new name, instead of splitting one category into two
+across the books.
+
+**Categories are deliberately neither seeded nor backfilled.** Seeding would mean inventing a
+vocabulary every account set must then go and delete, and it is not idempotent in practice — a
+category the user deleted comes back on the next startup, making the management page's own edits
+look ineffective (unlike currencies, where "everyone needs these few" is a real consensus). An empty
+dictionary plus **create-on-type while recording** covers "usable out of the box". Backfilling
+`category_id` is unnecessary for the same structural reason: it is a nullable `int`, so NULL on a
+pre-existing row is precisely the legitimate value — "unclassified".
+
 ##### Transactions and entries
 
 Bookkeeping is **double-entry**: **every transaction carries two entries, one debit and one
@@ -279,7 +335,7 @@ credit**, and total debits always equal total credits. The data lives in two tab
 
 | Table | Contents |
 |---|---|
-| `hamster_transaction` | Transaction header: account set, type, timestamp, summary, remark, who posted it |
+| `hamster_transaction` | Transaction header: account set, type, timestamp, summary, remark, **category**, who posted it |
 | `hamster_transaction_entry` | Transaction entry: parent transaction, account, direction, amount |
 
 An entry's direction is a **`direction` enum plus a positive amount**, not a signed amount:
@@ -363,7 +419,7 @@ single-transaction read endpoint:
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `POST /api/transactions` | Bearer | Record one income, expense or transfer (201). Body `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName }`: `type` is `Income` / `Expense` / `Transfer` (as a **string** — a number or `OpeningBalance` is a 400); `amount` must be `> 0` with at most two decimals; `occurredAt` is an ISO 8601 timestamp taken as the **business time** (back-dating is allowed); `summary` is required (≤128), `remark` optional (≤256); `currencyCode` is required and **must match both accounts**; leaving both `counterpartyAccountId` and `counterpartyName` empty means "no counterparty", and when both are given the **primary key wins** (it is more precise than a name). Returns the persisted transaction (with `id` / `accountName` / `counterpartyName`) |
+| `POST /api/transactions` | Bearer | Record one income, expense or transfer (201). Body `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName, categoryId, categoryName }`: `type` is `Income` / `Expense` / `Transfer` (as a **string** — a number or `OpeningBalance` is a 400); `amount` must be `> 0` with at most two decimals; `occurredAt` is an ISO 8601 timestamp taken as the **business time** (back-dating is allowed); `summary` is required (≤128), `remark` optional (≤256); `currencyCode` is required and **must match both accounts**; leaving both `counterpartyAccountId` and `counterpartyName` empty means "no counterparty", and when both are given the **primary key wins** (it is more precise than a name); leaving both `categoryId` and `categoryName` empty means "unclassified". Returns the persisted transaction (with `id` / `accountName` / `counterpartyName` / `categoryName`) |
 
 The endpoint writes **both entries at once**, equal amounts and opposite directions, with the
 direction derived from `type` (see the table above) — which is why `amount` is always positive.
@@ -377,6 +433,31 @@ counterparty comes from one of four places:
 | By name, found | `counterpartyName` matches an existing visible account | The same — the name is only a lookup, nothing is created |
 | By name, created | `counterpartyName` matches nothing visible | An **Contact** account is auto-created (personal, opening balance 0, so no opening entry) and handled as above |
 | Ledger account | Both empty | "The money came from / went outside the account set" |
+
+The **category is optional** and comes from one of three places, resolved by the same
+"primary key wins, otherwise by name" rule:
+
+| Category | Trigger | Meaning |
+|---|---|---|
+| By primary key | `categoryId` names a category in the current account set | Attached as given |
+| By name, found | `categoryName` matches one **in the current account set — including deactivated ones** | The same; the name is only a lookup, nothing is created |
+| By name, created | `categoryName` matches nothing | A category is **auto-created** in the current account set and attached |
+| None | Both empty | "Unclassified" — a legitimate state, not a missing value |
+
+Matching against **deactivated** categories too is deliberate: typing an exact name means you want
+*that* category, and silently creating a live twin beside a disabled one would split the history
+that the disabled row still carries. The difference from the counterparty is that creating on demand
+here is the *point* of the feature — a bookkeeper who types a new category expects it to exist — and
+it applies to **all three types including transfers**, unlike the counterparty's create-by-name,
+which a transfer forbids (a name-created counterparty is a Contact account, which would let a
+transfer's counterparty walk around the "Fund/Liability only" restriction; a category has no such
+restriction to walk around).
+
+The category is resolved **after every validation gate**, not before: resolution can create a row,
+so a request that is destined to be refused must not leave a trace in the category table.
+
+**A transfer carries one category**, not two — the category lives on the transaction header, so both
+of its entries share it.
 
 **A transfer only ever takes the first branch**: both of its accounts are real, so there is no
 "outside the account set" to fall back on. Beyond `type` it adds exactly four validations (every
@@ -395,9 +476,18 @@ through (or merely ignoring the field) would let a transfer's counterparty walk 
 
 Failure contract: 400 without the account-set header, or for an invalid `type` / `amount` /
 `occurredAt` / text, or when **the two accounts disagree on currency** (including a `currencyCode`
-that does not match them), or on any of the four transfer-specific validations above; **404 when an
-account is invisible, missing, or belongs to another account set** (all three answer alike so the
-endpoint cannot be used to probe for other people's accounts). The account set's **system ledger
+that does not match them), or on any of the four transfer-specific validations above, or when a
+`categoryId` **does not exist in the current account set** (a 400 on the `categoryId` field, *not* a
+404 — see below); **404 when an account is invisible, missing, or belongs to another account set**
+(all three answer alike so the endpoint cannot be used to probe for other people's accounts).
+
+The category's failure code **deliberately diverges from the accounts'**: an unresolvable account is
+a 404 so the endpoint cannot be probed for other people's accounts, but a category has **no
+visibility dimension to hide behind** — every category in the account set is visible to everyone in
+it (that is the whole point of the user-side/admin-side merge above). A 404 would therefore be
+protecting nothing, and a 400 is the better answer: it is a body-field error, and it **aggregates**
+with the other field-level errors instead of short-circuiting them, so one request can report "the
+amount is bad *and* the category is bad" at once. The account set's **system ledger
 account cannot be posted to by hand**: it is never returned in any account list, so a caller has no
 way to obtain its primary key.
 
@@ -460,6 +550,16 @@ expense column) and the destination account the debit (the income column), both 
 The two rows look exactly like "one expense plus one income", so the **transaction type label is the
 only thing telling them apart**, and "Transfer" is shown beside the summary. Each row counts toward
 the page subtotal as usual: nothing is merged and nothing is excluded.
+
+Each row also carries `categoryId` + `categoryName`. **They have no visibility tier** — unlike the
+counterparty, a category has nothing to hide: every category in the account set is visible to every
+member of it. Both fields are `null` for an **unclassified** transaction, which is a normal state
+rather than missing data. The **name is supplied by the backend** rather than denormalized onto the
+transaction row, so a rename propagates to past entries automatically (denormalizing would leave
+history on the old name and split one category into two across the report). A **deactivated**
+category's name is still returned: those postings happened, and hiding the label would make history
+unreadable. Because the category is transaction-level, **both entry rows of one transaction carry
+the same pair** — a transfer's two rows share one category.
 
 Failure contract: 400 without the account-set header ("请先选择账套"); the account set unknown or not
 yours → 403; caller not found → 401; a malformed `from` / `to`, `from` later than `to`, `page < 1`, or

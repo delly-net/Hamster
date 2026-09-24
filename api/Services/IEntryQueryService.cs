@@ -71,6 +71,19 @@ public interface IEntryQueryService
 /// <param name="CounterpartyKind">对手方账户的可见性档位。</param>
 /// <param name="CounterpartyAccountId">对手方账户主键；仅 <see cref="CounterpartyKind.Account"/> 时有值。</param>
 /// <param name="CounterpartyName">对手方账户名称；仅 <see cref="CounterpartyKind.Account"/> 时有值。</param>
+/// <param name="CategoryId">交易分类主键；**未分类**时为 <c>null</c>。</param>
+/// <param name="CategoryName">
+/// 交易分类名称；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。
+/// </param>
+/// <remarks>
+/// 分类挂在**交易**上而非明细上（见 <see cref="Transaction.CategoryId"/>），
+/// 故同一笔交易的两条明细会得到同一个分类——这是刻意的：一笔转账只应有一个分类。
+/// <para>
+/// 分类**没有可见性档位**（不像对手方那样分 Account / Ledger / Hidden 三档）：
+/// 分类表没有可见性维度，账套内所有成员看到的是同一份完整字典，
+/// 故这里直接给出主键与名称，不需要「可见 / 不可见」这层区分。
+/// </para>
+/// </remarks>
 public sealed record EntryQueryRow(
     int Id,
     int TransactionId,
@@ -84,7 +97,9 @@ public sealed record EntryQueryRow(
     decimal Amount,
     CounterpartyKind CounterpartyKind,
     int? CounterpartyAccountId,
-    string? CounterpartyName);
+    string? CounterpartyName,
+    int? CategoryId,
+    string? CategoryName);
 
 /// <summary>一页明细。</summary>
 /// <param name="Items">本页明细。</param>

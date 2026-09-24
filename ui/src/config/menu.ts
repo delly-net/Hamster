@@ -22,6 +22,9 @@ export const menuItems: MenuItem[] = [
   { label: '转账', routeName: 'transfer' },
   // 账户属于日常记账入口，面向所有登录用户，故不设 adminOnly
   { label: '账户管理', routeName: 'accounts' },
+  // 分类与账户同属记账的基础字典（记账时要选它），故紧随账户管理；
+  // 同样面向所有登录用户、不设 adminOnly——记账时手工输入即会自动建分类
+  { label: '分类管理', routeName: 'categories' },
   // 查账入口，与账户管理同属面向所有登录用户的日常功能
   { label: '账目明细', routeName: 'entries' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },

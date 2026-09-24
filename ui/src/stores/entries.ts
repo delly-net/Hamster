@@ -13,6 +13,10 @@
  * ——「方向 → 符号」的唯一换算定义在后端的 `EntryDirectionExtensions.SignedAmount`，
  * 前端再算一次就是第二个语义源。`amount` 与 `direction` 仍如实回传，但只作账本的底层事实，
  * 界面按 `signedAmount` 分列呈现。
+ *
+ * **分类挂在交易上**（不是明细上）：一笔交易的两条明细会拿到同一个 `categoryId` / `categoryName`。
+ * 这不是重复，而是「一笔转账只应有一个分类」在明细视图下的如实呈现；未分类时两者均为 `null`，
+ * 那是**正常状态**而不是数据缺失。
  */
 
 import { ref } from 'vue'
@@ -115,6 +119,21 @@ export interface Entry {
   counterpartyAccountId: number | null
   /** 对手方账户名称；**仅 `Account` 档有值**。 */
   counterpartyName: string | null
+  /**
+   * 交易分类主键；**未分类**时为 `null`。
+   *
+   * 分类**没有可见性档位**（不像对手方那样分 `Account` / `Ledger` / `Hidden`）：
+   * 账套内所有成员共用同一份分类字典，没有「他人私有的分类」这一概念，
+   * 故后端直接给出主键与名称，此处也不需要对它做任何遮挡。
+   */
+  categoryId: number | null
+  /**
+   * 交易分类名称；**未分类**时为 `null`。与 `categoryId` 同生同灭。
+   *
+   * 名称由后端随行下发（流水挂的是分类主键），故分类改名后历史明细自动显示新名字。
+   * **已停用分类的名称照常给出**：停用是「不再供新记账选择」，不是「历史上从未用过」。
+   */
+  categoryName: string | null
 }
 
 /** 查询条件；`from` / `to` 均为 **ISO 8601 UTC** 且为闭区间端点。 */

@@ -14,6 +14,8 @@
  * 筛选条件分「草稿」与「已应用」两份：改动输入不立刻发请求（避免边打字边查询），
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
  *
+ * 「分类」列取自交易（不是明细）：同一笔交易的两条明细显示同一个分类，未分类显示 `—`。
+ *
  * 金额字段（`signedAmount`）缺失时**不允许静默留空**：三列表的全部语义都建立在「空白 vs 有值」上，
  * 留空会把「字段没取到」呈现成「这行真的没有收支」。故缺失一律换成可见的 {@link AMOUNT_UNAVAILABLE}
  * 标记并附一行说明（见 `hasAmountAnomaly`）。
@@ -249,6 +251,17 @@ function counterpartyText(entry: Entry): string {
 }
 
 /**
+ * 分类呈现文案：未分类时显示 `—`。
+ *
+ * 分类名由后端随行下发（流水挂的是分类主键，不是名称），故分类改名后此处自动显示新名字；
+ * **已停用分类的名称照常显示**——停用是「不再供新记账选择」，不是「历史上从未用过」。
+ * 未分类（`null`）是**正常状态**（记账时分类可选），不是数据缺失，故用与备注同样的 `—` 占位。
+ */
+function categoryText(entry: Entry): string {
+  return entry.categoryName ?? '—'
+}
+
+/**
  * 收入列文本：只有正数行有值，其余行留空。
  *
  * 「留空」是这一列的正常语义（这行不是收入），故仅在**金额字段不可用**时才给标记——
@@ -452,6 +465,7 @@ onMounted(() => {
           在当前账套内按时间区间与账户（可多选）查询交易明细，按业务发生时间正序排列。
           钱进来记在【收入】列（绿色，带 + 号），钱出去记在【支出】列（红色，带 − 号），
           【净额】列是这一行的增减合计；表格底部给出当页小计。
+          【分类】列是这笔交易的分类（记账时可选，未分类显示 —）。
           一笔交易涉及两个所选账户时会呈现两行。时间取业务发生时间，可补记往日收支。
         </p>
       </div>
@@ -554,6 +568,7 @@ onMounted(() => {
             <th class="amount">净额</th>
             <th>对手方</th>
             <th>摘要</th>
+            <th>分类</th>
             <th>备注</th>
           </tr>
         </thead>
@@ -579,10 +594,12 @@ onMounted(() => {
               <!-- 交易类型是明细的背景信息，弱化呈现，不占一列 -->
               <span class="type">{{ transactionTypeLabel(entry.transactionType) }}</span>
             </td>
+            <!-- 分类是交易级属性：一笔交易的两条明细会显示同一个分类，这不是重复 -->
+            <td class="category">{{ categoryText(entry) }}</td>
             <td class="remark">{{ entry.remark || '—' }}</td>
           </tr>
           <tr v-if="items.length === 0">
-            <td colspan="9" class="empty">{{ emptyText }}</td>
+            <td colspan="10" class="empty">{{ emptyText }}</td>
           </tr>
         </tbody>
         <!-- 小计只统计**当页**：跨页合计会让「本页小计」这个标题名不副实，
@@ -599,7 +616,7 @@ onMounted(() => {
             <td class="amount" :class="signedCellClass(pageTotals.net, 'net')">
               {{ formatSigned(pageTotals.net) }}
             </td>
-            <td colspan="3"></td>
+            <td colspan="4"></td>
           </tr>
         </tfoot>
       </table>
@@ -905,6 +922,12 @@ onMounted(() => {
   font-size: 12px;
   opacity: 0.6;
   white-space: nowrap;
+}
+
+/* 分类与备注同为次要信息，弱化到同一档；未分类的「—」随之一起变淡 */
+.category {
+  white-space: nowrap;
+  opacity: 0.75;
 }
 
 .remark {

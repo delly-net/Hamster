@@ -120,6 +120,11 @@ public sealed class EntryEndpoints : IEndpoint
                 "若对不可见账户报错，这个参数就成了探测他人账户的探针。" +
                 "账本账户对任何人不呈现，故它不作为明细行出现；它只会作为期初分录的对手方，" +
                 "以 counterpartyKind = Ledger 的形式被标记（不给主键与名称）。" +
+                "**categoryId / categoryName 为交易级属性**（分类挂在交易而非明细上）：" +
+                "一笔交易的两条明细会拿到同一个分类，**未分类**时两者均为 null——" +
+                "分类是可选的，null 是正常的，不是数据缺失。" +
+                "分类名由后端随行下发（分类改名后历史明细自动显示新名字），" +
+                "**已停用分类的名称照常给出**：停用是「不再供新记账选择」，不是「历史上从未用过」。" +
                 "**账户筛选项请直接用 `GET /api/accounts?includeInactive=true`**：" +
                 "明细页的筛选需要含已停用账户（软删除的账户上仍有历史明细），该参数已经提供该能力，" +
                 "不另设一套平行接口。");
@@ -236,10 +241,19 @@ public sealed class EntryEndpoints : IEndpoint
 /// </param>
 /// <param name="CounterpartyAccountId">对手方账户主键；**仅 <c>Account</c> 档有值**。</param>
 /// <param name="CounterpartyName">对手方账户名称；**仅 <c>Account</c> 档有值**。</param>
+/// <param name="CategoryId">交易分类主键；**未分类**时为 <c>null</c>。</param>
+/// <param name="CategoryName">
+/// 交易分类名称；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。
+/// 分类名由后端下发（不是前端自己拼的），改名后历史明细自动显示新名字。
+/// </param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
 /// 对手方分档而非「给名称或给 null」：<c>Ledger</c> 与 <c>Hidden</c> 都不给主键与名称，
 /// 「不可见」这件事本身不携带任何可辨识信息。
+/// <para>
+/// **分类不分档**：它没有可见性维度（账套内所有成员共用同一份字典），
+/// 故直接给出主键与名称，不像对手方那样需要 <c>Ledger</c> / <c>Hidden</c> 这类遮罩档位。
+/// </para>
 /// </remarks>
 public sealed record EntryDto(
     int Id,
@@ -255,7 +269,9 @@ public sealed record EntryDto(
     decimal SignedAmount,
     string CounterpartyKind,
     int? CounterpartyAccountId,
-    string? CounterpartyName)
+    string? CounterpartyName,
+    int? CategoryId,
+    string? CategoryName)
 {
     /// <summary>由查询结果构造 DTO。</summary>
     /// <param name="row">明细行。</param>
@@ -280,7 +296,11 @@ public sealed record EntryDto(
         row.Direction.SignedAmount(row.Amount),
         row.CounterpartyKind.ToString(),
         row.CounterpartyAccountId,
-        row.CounterpartyName);
+        row.CounterpartyName,
+        // 分类是交易级的属性，同一笔交易的两条明细会拿到同一个分类——
+        // 这不是重复，而是「一笔转账只应有一个分类」在明细视图下的如实呈现
+        row.CategoryId,
+        row.CategoryName);
 }
 
 /// <summary>一页账目明细。</summary>

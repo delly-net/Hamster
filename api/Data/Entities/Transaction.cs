@@ -59,6 +59,30 @@ public sealed class Transaction
     public string? Remark { get; set; }
 
     /// <summary>
+    /// 分类主键（<see cref="Category"/>），**可空**；<c>null</c> 即「未分类」。
+    /// </summary>
+    /// <remarks>
+    /// 分类挂在**交易**而非明细上：它描述的是「这笔账因何而发生」，是记账行为的属性。
+    /// 一笔转账会落借贷两条明细，若分类挂在明细上，一笔转账就要选两个分类——
+    /// 而转账的分类（如「还信用卡」）天然是整笔的，不是某一条明细的。
+    /// <para>
+    /// **可空是本表的正常状态**，不是待补的空缺：记账时分类是可选的（用户可不选），
+    /// 且列是随分类能力才引入的，此前的历史流水一律为 <c>null</c>。
+    /// </para>
+    /// <para>
+    /// 存**主键**而非分类名：分类可改名，存名称会让改名前的历史明细停留在旧名字上，
+    /// 同一个分类在账面上裂成两个。挂主键则改名后历史明细自动跟着显示新名字。
+    /// </para>
+    /// <para>
+    /// **本列不需要回填**（与 <see cref="Account.IsSystem"/>、<see cref="Account.CurrencyCode"/> 不同）：
+    /// 那两列是非空 <c>bool</c> / 非空 <c>string</c>，NULL 会让实体绑定失败而整个列表查询 500；
+    /// 而 <c>int?</c> 的既有行取到 NULL 正是「未分类」这一合法语义，直接可用。
+    /// </para>
+    /// </remarks>
+    [SugarColumn(ColumnName = "category_id", IsNullable = true)]
+    public int? CategoryId { get; set; }
+
+    /// <summary>
     /// 记账人主键；**可空**。
     /// </summary>
     /// <remarks>

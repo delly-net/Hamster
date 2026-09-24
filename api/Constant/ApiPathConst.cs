@@ -33,6 +33,18 @@ public static class ApiPathConst
     /// <summary>账户端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string ACCOUNT_GROUP = "/api/accounts";
 
+    /// <summary>分类端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
+    /// <remarks>
+    /// 分类**按账套隔离**（每个账套各维护一份），故它读 <c>X-Account-Set-Id</c> 请求头，
+    /// 这一点与 <see cref="CURRENCY_GROUP"/> 相反、与 <see cref="ACCOUNT_GROUP"/> 一致。
+    /// <para>
+    /// 读写**不拆成两个分组**（不像币种那样把维护能力放到管理端）：
+    /// 分类是账套内所有成员共用的字典，维护它不需要系统管理员身份，
+    /// 拆出去只会让普通用户面对一个自己建的分类却无权改名的局面。
+    /// </para>
+    /// </remarks>
+    public const string CATEGORY_GROUP = "/api/categories";
+
     /// <summary>账目明细查询端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string ENTRY_GROUP = "/api/entries";
 

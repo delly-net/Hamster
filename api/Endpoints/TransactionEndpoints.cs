@@ -34,6 +34,9 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <summary>备注最大长度，与 <see cref="Transaction.Remark"/> 的列长一致。</summary>
     private const int REMARK_MAX_LENGTH = 256;
 
+    /// <summary>分类名最大长度，与 <see cref="Category.Name"/> 的列长一致。</summary>
+    private const int CATEGORY_NAME_MAX_LENGTH = 32;
+
     /// <summary>金额绝对值上限，防止超出 decimal(18,2) 的表示范围（与账户端点同一口径）。</summary>
     private const decimal AMOUNT_ABS_LIMIT = 999_999_999_999.99M;
 
@@ -71,6 +74,15 @@ public sealed class TransactionEndpoints : IEndpoint
     private static readonly string[] TIME_ERROR =
         ["时间格式不正确，应为 ISO 8601 时间（如 2026-09-23T02:00:00Z）"];
 
+    /// <summary>分类主键在当前账套内不存在时的字段错误。</summary>
+    /// <remarks>
+    /// 分类**没有可见性维度**，分不出「不存在」与「无权访问」，
+    /// 故此处用 400 而非账户路径上的 404——两者在分类语境下本就是同一件事，
+    /// 且 400 可与其余请求体校验的错误**合并返回**，用户一次就能看到全部问题。
+    /// </remarks>
+    private static readonly string[] CATEGORY_ERROR =
+        ["所选分类在当前账套内不存在，请重新选择或改用分类名"];
+
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
     {
@@ -86,6 +98,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 IAccountSetService accountSets,
                 IAccountService accounts,
                 ICurrencyService currencies,
+                ICategoryService categories,
                 ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
@@ -116,6 +129,8 @@ public sealed class TransactionEndpoints : IEndpoint
                 ValidateAmount(request.Amount, errors);
                 ValidateText(request.Summary, SUMMARY_MAX_LENGTH, "summary", "摘要", errors);
                 ValidateText(request.Remark, REMARK_MAX_LENGTH, "remark", "备注", errors, required: false);
+                // 分类可选（留空即「未分类」），但给了名字就得在列长以内——超长的名字要在建之前拦下
+                ValidateText(request.CategoryName, CATEGORY_NAME_MAX_LENGTH, "categoryName", "分类名", errors, required: false);
 
                 // 币种须是**存在的启用币种**：停用币种不接受新记账，
                 // 否则「停用」就挡不住新数据继续引用它（与账户新建同一口径）
@@ -181,9 +196,20 @@ public sealed class TransactionEndpoints : IEndpoint
                     counterparty = resolved;
                 }
 
+                // 分类在所有校验之后解析：它可能**按名自动创建**（有副作用），
+                // 放在校验闸门之前会让一个注定被拒的请求也在分类表里留下痕迹
+                var (category, categoryFailure) = await ResolveCategoryAsync(
+                    request, accountSet!.Id, categories, cancellationToken);
+
+                if (categoryFailure is not null)
+                {
+                    return categoryFailure;
+                }
+
                 var transaction = await transactions.RecordUserTransactionAsync(
                     account,
                     counterparty,
+                    category,
                     type,
                     request.Amount,
                     hasOccurredAt ? occurredAt : DateTime.UtcNow,
@@ -194,7 +220,7 @@ public sealed class TransactionEndpoints : IEndpoint
 
                 return Results.Created(
                     $"{ApiPathConst.TRANSACTION_GROUP}/{transaction.Id}",
-                    TransactionDto.From(transaction, account, counterparty));
+                    TransactionDto.From(transaction, account, counterparty, category));
             })
             .WithName("RecordTransaction")
             .WithSummary("记一笔收入、支出或转账")
@@ -212,6 +238,11 @@ public sealed class TransactionEndpoints : IEndpoint
                 "语义是「款项来自/去往账套之外」；指定了则是一笔**两个真实账户之间的转账**，账本账户完全不参与。" +
                 "counterpartyName 命不中既有可见账户时会**自动创建为个人往来账户**（期初金额 0，故不写期初分录）。" +
                 "账本账户对任何人不呈现，用户既不需要也无需选择它。" +
+                "**分类可选**（categoryId 或 categoryName，两者皆空即「未分类」）：" +
+                "与对手方同一取舍——给了主键按主键取，取不到即 400（分类按账套隔离，越界的主键在库里不该存在）；" +
+                "只给了名字时，命中既有分类就用它（**含已停用的**，手工指名即归到它上面，不另建同名的），" +
+                "否则**自动创建**（这正是「记账时顺手建分类」的入口），名字 32 位以内。" +
+                "分类挂在**交易**而非明细上——一笔转账只带一个分类，因为「这笔账因何而发生」是整笔的属性。" +
                 $"交易类型只能是 {RECORDABLE_TYPE_HINT}，期初余额（OpeningBalance）由系统在账户创建时自动生成，" +
                 "传它会被拒绝。" +
                 "amount **恒为正**：增减由 type 表达，不靠金额符号，故负数金额没有语义。" +
@@ -310,6 +341,70 @@ public sealed class TransactionEndpoints : IEndpoint
 
         return (created, null);
     }
+
+    /// <summary>
+    /// 解析本次记账的分类。
+    /// </summary>
+    /// <param name="request">记账请求体。</param>
+    /// <param name="accountSetId">当前账套主键。</param>
+    /// <param name="categories">分类服务。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>分类（**为 <c>null</c> 表示「未分类」**，是合法状态）与失败响应；成功时失败响应为 <c>null</c>。</returns>
+    /// <remarks>
+    /// 三级解析，优先级从高到低：
+    /// <list type="number">
+    ///   <item>给了主键 → 按主键取。<b>主键比名称精确</b>，故与名称同时给出时以它为准（与对手方同一取舍）；
+    ///   取不到则 400——分类按账套隔离，跨账套的主键在库里不该存在。</item>
+    ///   <item>给了名称且命中既有分类 → 用它。</item>
+    ///   <item>给了名称但不存在 → **自动创建**（这就是「手工输入即建分类」的落点）。</item>
+    ///   <item>两者皆无 → 「未分类」，返回 <c>null</c>。</item>
+    /// </list>
+    /// <para>
+    /// **按名解析不限于启用分类**（<see cref="ICategoryService.FindByNameAsync"/> 刻意连停用的一并返回）：
+    /// 用户既然一字不差地打出了这个名字，意图就是归到那个分类上；
+    /// 此时若因它被停用而另建一个同名分类，历史流水就裂成了两份。
+    /// 停用挡的是「从候选里被选中」，不是「被手工指名」。
+    /// </para>
+    /// <para>
+    /// 这里**不需要**账户路径那样的可见性判定：分类没有归属人、也没有可见性维度
+    /// （见 <see cref="Category"/>），账套内的分类对所有成员一视同仁。
+    /// </para>
+    /// </remarks>
+    private static async Task<(Category? Category, IResult? Failure)> ResolveCategoryAsync(
+        TransactionRequest request,
+        int accountSetId,
+        ICategoryService categories,
+        CancellationToken cancellationToken)
+    {
+        if (request.CategoryId is { } categoryId)
+        {
+            var byId = await categories.FindAsync(accountSetId, categoryId, cancellationToken);
+
+            return byId is null
+                ? (null, CategoryProblem(CATEGORY_ERROR))
+                : (byId, null);
+        }
+
+        var name = request.CategoryName?.Trim();
+        if (string.IsNullOrEmpty(name))
+        {
+            return (null, null);
+        }
+
+        var existing = await categories.FindByNameAsync(accountSetId, name, cancellationToken);
+
+        // 不存在即创建：记账时顺手建分类是这个能力的**主用途**，不是兜底。
+        // 不预先判重名：FindByNameAsync 已覆盖同一范围（账套 + 不区分大小写），命中就返回了
+        return existing is not null
+            ? (existing, null)
+            : (await categories.CreateAsync(accountSetId, name, cancellationToken), null);
+    }
+
+    /// <summary>构造分类校验失败的字段级 400。</summary>
+    /// <param name="errors">字段错误文案。</param>
+    /// <returns>400 响应。</returns>
+    private static IResult CategoryProblem(string[] errors) =>
+        Results.ValidationProblem(new Dictionary<string, string[]> { ["categoryId"] = errors });
 
     /// <summary>构造「账户币种与交易币种不一致」的字段级错误响应。</summary>
     /// <param name="actual">账户实际所属的币种代码。</param>
@@ -636,6 +731,21 @@ public sealed class TransactionEndpoints : IEndpoint
 /// 而转账只允许资金账户与负债账户，接受它等于绕开该限制。
 /// </para>
 /// </param>
+/// <param name="CategoryId">
+/// 分类主键，可选。用户从候选中**选中**时传它。
+/// 与 <paramref name="CategoryName"/> 同时给出时**以本字段为准**（主键比名称精确）；
+/// 取不到（不属于当前账套）则 400。
+/// <para>
+/// 与 <paramref name="CategoryName"/> 均为空即「未分类」，是合法状态。
+/// </para>
+/// </param>
+/// <param name="CategoryName">
+/// 分类名，可选。用户**手工输入**（未命中候选）时传它；**不存在则自动创建**，
+/// 这就是「记账时顺手建分类」的入口。32 位以内，与 <c>Category.Name</c> 同长。
+/// <para>
+/// 按名解析**不限于启用分类**：手工指名一个已停用的分类会归到它上面，而不是另建一个同名的。
+/// </para>
+/// </param>
 public sealed record TransactionRequest(
     string? Type,
     int AccountId,
@@ -645,7 +755,9 @@ public sealed record TransactionRequest(
     string? Remark,
     string? CurrencyCode,
     int? CounterpartyAccountId,
-    string? CounterpartyName);
+    string? CounterpartyName,
+    int? CategoryId,
+    string? CategoryName);
 
 /// <summary>交易（对外暴露）。</summary>
 /// <param name="Id">交易主键。</param>
@@ -662,6 +774,8 @@ public sealed record TransactionRequest(
 /// <param name="CounterpartyName">
 /// 对手方账户名称（转账时为**转入账户名称**）；**未指定对手方**（落系统账本账户）时为 <c>null</c>。
 /// </param>
+/// <param name="CategoryId">分类主键；**未分类**时为 <c>null</c>。</param>
+/// <param name="CategoryName">分类名；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。</param>
 /// <param name="CreatedAt">落库时间（UTC，ISO 8601）。</param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
@@ -685,6 +799,8 @@ public sealed record TransactionDto(
     string AccountName,
     string CurrencyCode,
     string? CounterpartyName,
+    int? CategoryId,
+    string? CategoryName,
     DateTime CreatedAt)
 {
     /// <summary>由实体构造 DTO。</summary>
@@ -694,8 +810,21 @@ public sealed record TransactionDto(
     /// 对手方账户；**为 <c>null</c> 或为系统账本账户时，出参的对手方名称为 <c>null</c>**。
     /// 转账的对手方是转入账户，必然是一个非系统账户，故名称恒有值。
     /// </param>
+    /// <param name="category">
+    /// 分类；**为 <c>null</c> 即「未分类」**，此时出参的两个分类字段均为 <c>null</c>。
+    /// 由调用方把刚存下的分类实体传进来（它可能正是本次按名新建的），避免为取一个名字再查一次库。
+    /// </param>
     /// <returns>交易 DTO。</returns>
-    public static TransactionDto From(Transaction transaction, Account account, Account? counterparty = null) => new(
+    /// <remarks>
+    /// <see cref="CategoryId"/> 与 <see cref="CategoryName"/> 由参数 <paramref name="category"/>
+    /// 同时给出或同时为 <c>null</c>：分类名是给界面直接显示的，主键是给后续改分类用的，
+    /// 前端拿到两者就能既显示、又不必为改名再查一次。
+    /// </remarks>
+    public static TransactionDto From(
+        Transaction transaction,
+        Account account,
+        Account? counterparty = null,
+        Category? category = null) => new(
         transaction.Id,
         transaction.AccountSetId,
         transaction.Type.ToString(),
@@ -710,5 +839,9 @@ public sealed record TransactionDto(
         // 账本账户与非系统账户在这里是同一行代码：账本账户对用户不可见，回传它的名称
         // 等于泄露一个界面上不存在的账户。判据是 IsSystem 而非类型，与账本识别口径一致
         counterparty is { IsSystem: false } ? counterparty.Name : null,
+        // 分类恒取自传入的实体而非 transaction.CategoryId 直接回传：两者本应一致，
+        // 但从实体取能保证「回传的名字」与「落库的主键」出自同一条记录
+        category?.Id,
+        category?.Name,
         DateTime.SpecifyKind(transaction.CreatedAt, DateTimeKind.Utc));
 }

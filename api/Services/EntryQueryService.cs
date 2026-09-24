@@ -85,6 +85,10 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                 Summary = tx.Summary,
                 Remark = tx.Remark,
                 Type = tx.Type,
+                // 只取分类主键，名称稍后批量解析：分类名要查分类表，而联表已到两张表，
+                // 再挂一张会让 BuildBaseQuery 变成三表联查（它的别名一致性本就脆弱）。
+                // 名称也不随交易行冗余存储——那样分类改名后历史明细会停留在旧名字上。
+                CategoryId = tx.CategoryId,
             })
             .MergeTable()
             .OrderBy(row => row.OccurredAt, OrderByType.Asc)
@@ -95,11 +99,23 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             .ToListAsync(cancellationToken);
 
         var counterparties = await ResolveCounterpartiesAsync(rows, nameById, cancellationToken);
+        var categoryNames = await ResolveCategoryNamesAsync(rows, cancellationToken);
 
         var items = rows
             .Select(row =>
             {
                 var counterparty = counterparties[row.EntryId];
+
+                // 分类主键与名称**从同一处取**，故同生同灭：只给出主键而名字查不到，
+                // 界面上就是一个渲染不出任何文字的空档（分类行只软删除，正常不会查不到）。
+                int? categoryId = null;
+                string? categoryName = null;
+                if (row.CategoryId is { } id && categoryNames.TryGetValue(id, out var resolved))
+                {
+                    categoryId = id;
+                    categoryName = resolved;
+                }
+
                 return new EntryQueryRow(
                     row.EntryId,
                     row.TransactionId,
@@ -113,7 +129,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                     row.Amount,
                     counterparty.Kind,
                     counterparty.AccountId,
-                    counterparty.Name);
+                    counterparty.Name,
+                    categoryId,
+                    categoryName);
             })
             .ToArray();
 
@@ -256,6 +274,47 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         return result;
     }
 
+    /// <summary>
+    /// 批量取本页交易用到的分类名称。
+    /// </summary>
+    /// <param name="rows">本页明细。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>分类主键到名称的映射；本页无分类时为空字典。</returns>
+    /// <remarks>
+    /// **查名称而不是随投影联表带出**：给 <see cref="BuildBaseQuery"/> 再挂一张表会让它变成三表联查，
+    /// 而那条查询的别名一致性本就脆弱（见 <c>QueryAsync</c> 中关于 <c>MergeTable()</c> 的注释）。
+    /// 分类名是纯粹的查表，用一次 <c>IN</c> 查询批量取回即可，代价与页大小同阶。
+    /// <para>
+    /// **不过滤 <see cref="Category.IsActive"/>**：停用是「不再出现在记账候选里」，
+    /// 不是「历史上从未用过」。给历史明细隐藏分类名，等于让用户的旧账凭空少了一列。
+    /// </para>
+    /// <para>
+    /// 本页一条分类都没有时不查库：那是常态（分类是可选的）。
+    /// </para>
+    /// </remarks>
+    private async Task<IReadOnlyDictionary<int, string>> ResolveCategoryNamesAsync(
+        IReadOnlyList<EntryRow> rows,
+        CancellationToken cancellationToken)
+    {
+        var categoryIds = rows
+            .Where(row => row.CategoryId.HasValue)
+            .Select(row => row.CategoryId!.Value)
+            .Distinct()
+            .ToArray();
+
+        if (categoryIds.Length == 0)
+        {
+            return new Dictionary<int, string>();
+        }
+
+        var categories = await db.Queryable<Category>()
+            .Where(category => categoryIds.Contains(category.Id))
+            .Select(category => new CategoryName { Id = category.Id, Name = category.Name })
+            .ToListAsync(cancellationToken);
+
+        return categories.ToDictionary(row => row.Id, row => row.Name);
+    }
+
     /// <summary>空页（无匹配明细，或目标账户集为空时直接给出，不必查库）。</summary>
     /// <param name="page">页码。</param>
     /// <param name="pageSize">每页条数。</param>
@@ -297,6 +356,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>交易类型。</summary>
         public TransactionType Type { get; set; }
+
+        /// <summary>交易分类主键；未分类时为 <c>null</c>。</summary>
+        public int? CategoryId { get; set; }
     }
 
     /// <summary>同笔交易的兄弟明细（用于定位对手方）。</summary>
@@ -323,6 +385,16 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>账户类型。</summary>
         public AccountType Type { get; set; }
+    }
+
+    /// <summary>分类名称的查询结果（只取主键与名称）。</summary>
+    private sealed class CategoryName
+    {
+        /// <summary>分类主键。</summary>
+        public int Id { get; set; }
+
+        /// <summary>分类名称。</summary>
+        public string Name { get; set; } = string.Empty;
     }
 
     /// <summary>对手方描述。</summary>

@@ -19,12 +19,16 @@
  * - **对手方账户**（来源账户 / 目标账户 / 转入账户）：可留空，也可输入一个不存在的名字
  *   （`freeText: true`）。留空表示「款项来自/去往账套之外」，后端会落到该币种的系统账本账户；
  *   填了不存在的名字则由后端自动创建为个人往来账户。
+ * - **分类**：可留空（即「未分类」），也可输入一个不存在的名字——后端会在当前账套内自动创建它。
+ *   它与币种无关（换币种不清空），也不区分收入/支出/转账，故不参与上面那套联动。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
+import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { TRANSFER_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
+import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
 import { useTransactionsStore, type RecordableTransactionType } from '@/stores/transactions'
 
@@ -82,10 +86,14 @@ const meta = computed(() => MODE_META[props.mode])
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
 const currenciesStore = useCurrenciesStore()
+const categoriesStore = useCategoriesStore()
 const transactionsStore = useTransactionsStore()
 
 /** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
 const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
+
+/** 分类名最大长度，与后端 `Category.Name` 的列长一致。前端拦一道只是为了少一次往返。 */
+const CATEGORY_NAME_MAX_LENGTH = 32
 
 const errorMessage = ref('')
 const notice = ref('')
@@ -100,6 +108,15 @@ const primaryAccountText = ref('')
 /** 对手方账户（收入页为「来源账户」，支出页为「目标账户」）。 */
 const counterpartyAccountId = ref<number | null>(null)
 const counterpartyAccountText = ref('')
+
+/**
+ * 分类：可留空（即「未分类」，后端接受），也可输入一个尚不存在的名字。
+ *
+ * 与账户同样的两个 ref：从候选中点选时 `id` 有值，手工输入新名字时只有文本有值——
+ * 那个名字会被后端自动创建为分类。分类**与币种无关**，故换币种时不随之清空。
+ */
+const categoryId = ref<number | null>(null)
+const categoryText = ref('')
 
 /** 金额草稿。**声明为 `string`**：输入框用 `type="text"`，v-model 不转型，恒为字符串。 */
 const draftAmount = ref('')
@@ -141,6 +158,18 @@ const accountOptions = computed(() =>
       account.currencyCode === selectedCurrencyCode.value &&
       (!isTransfer.value || TRANSFER_ACCOUNT_TYPES.includes(account.type)),
   ),
+)
+
+/**
+ * 分类候选：当前账套内的**启用**分类（停用的不再供新记账选择）。
+ *
+ * 不做任何本地过滤——分类没有可见性维度，也不随币种变化，账套内的全量启用分类即是候选全集。
+ */
+const categoryOptions = computed(() => categoriesStore.categories)
+
+/** 分类字段的提示文案。 */
+const categoryPlaceholder = computed(() =>
+  categoryOptions.value.length === 0 ? '暂无分类，可直接输入新分类名' : '可留空，或输入新分类名',
 )
 
 /** 主账户字段的提示文案。 */
@@ -229,14 +258,18 @@ function parseAmount(raw: unknown): number | null {
   return parsed
 }
 
-/** 拉取币种字典与记账可选的账户（两者都只要启用的）。 */
+/** 拉取币种字典、记账可选的账户与分类（三者都只要启用的）。 */
 async function loadOptions(): Promise<boolean> {
   try {
-    // 并发拉取：两者互不依赖（账户的币种过滤在前端做），串行只是白白多等一次往返
-    await Promise.all([currenciesStore.loadActive(), accountsStore.list(false)])
+    // 并发拉取：三者互不依赖（账户的币种过滤在前端做），串行只是白白多等几次往返
+    await Promise.all([
+      currenciesStore.loadActive(),
+      accountsStore.list(false),
+      categoriesStore.list(false),
+    ])
     return true
   } catch (error) {
-    errorMessage.value = error instanceof ApiError ? error.message : '加载币种与账户失败'
+    errorMessage.value = error instanceof ApiError ? error.message : '加载币种、账户与分类失败'
     return false
   }
 }
@@ -255,6 +288,10 @@ function resetFields(): void {
 
   counterpartyAccountId.value = null
   counterpartyAccountText.value = ''
+
+  // 分类每笔重填：它是逐笔的语义（这一笔因何而发生），沿用上一笔与沿用上一笔金额同样危险
+  categoryId.value = null
+  categoryText.value = ''
 
   draftAmount.value = ''
   draftOccurredAt.value = nowLocalInput()
@@ -326,6 +363,14 @@ async function submit(): Promise<void> {
 
   const remark = draftRemark.value.trim()
 
+  // 分类**可留空**（即「未分类」，后端接受）；填了名字就先在本机拦住超长，
+  // 与后端 `Category.Name` 同一列长——让用户立刻看到问题，而不必为一处超长等一次往返
+  const categoryNameDraft = categoryText.value.trim()
+  if (categoryNameDraft.length > CATEGORY_NAME_MAX_LENGTH) {
+    errorMessage.value = `分类名不能超过 ${CATEGORY_NAME_MAX_LENGTH} 位`
+    return
+  }
+
   // 转账的两个端点都是真实账户，没有「账套之外」这一说，故转入账户必须选定（后端同样会拒）
   if (isTransfer.value && counterpartyAccountId.value === null) {
     errorMessage.value = `请选择${counterpartyLabel.value}`
@@ -360,16 +405,26 @@ async function submit(): Promise<void> {
         !isTransfer.value && counterpartyId === null && counterpartyName.length > 0
           ? counterpartyName
           : null,
+      // 分类同为「有 id 传 id、否则传名字」；两者皆空即「未分类」，这是合法的，后端不报错。
+      // 与对手方不同的是：分类**永远接受按名创建**，转账也不例外——分类没有账户类型那样的限制
+      categoryId: categoryId.value,
+      categoryName:
+        categoryId.value === null && categoryNameDraft.length > 0 ? categoryNameDraft : null,
     })
 
     // 记账后清空并可立即接着记下一笔：金额与摘要是逐笔的，沿用上一笔只会导致误提交
     resetFields()
     // 转账提示读作「转出 A → 转入 B」：两个账户都是用户自己选的，方向和起止点必须一眼看清；
     // 收支则用「主账户（对手方）」的写法，对手方留空时呈现后端落的系统账本账户
+    // 分类回显的是**后端落定的那个分类**（本次手工输入的名字可能是刚被自动创建的），
+    // 而不是输入框里的文本：只有后端才知道这个名字最终归到了哪一条记录上。
+    // 未分类时不显示这一段——空括号不如什么都不要
+    const categorySuffix = created.categoryName === null ? '' : ` · 分类：${created.categoryName}`
+
     notice.value = isTransfer.value
-      ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}`
+      ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}${categorySuffix}`
       : `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
-        `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）`
+        `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）${categorySuffix}`
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '记账失败'
   }
@@ -386,6 +441,7 @@ watch(
     if (currentId === null) {
       accountsStore.clear()
       currenciesStore.clear()
+      categoriesStore.clear()
       return
     }
 
@@ -448,6 +504,19 @@ onMounted(async () => {
             :options="accountOptions"
             :placeholder="counterpartyPlaceholder"
             :free-text="!isTransfer"
+          />
+        </div>
+
+        <div class="field field-wide">
+          <label class="label" for="record-category">分类（可选）</label>
+          <!-- 分类可留空（即「未分类」），也可直接输入一个尚不存在的名字——后端会为它自动创建分类。
+               与账户选择框的分工一致：从候选中点选时上报 id，手工输入时上报名字 -->
+          <CategorySearchSelect
+            v-model:id="categoryId"
+            v-model:text="categoryText"
+            input-id="record-category"
+            :options="categoryOptions"
+            :placeholder="categoryPlaceholder"
           />
         </div>
 
@@ -517,6 +586,8 @@ onMounted(async () => {
         且只允许资金账户与负债账户：往来账户记的是「谁欠谁」而不是「钱放在哪」，
         钱转进转出它并不改变钱的所在。转账也不支持跨币种，只有币种相同的账户之间才能转账。
         发生时间取业务发生时间，可补记往日的转账。
+        <strong>分类可以留空</strong>：它是「这笔账因何而发生」，一笔转账只带一个分类；
+        填入一个尚不存在的分类名时，会为你在当前账套内自动创建这个分类。
       </p>
 
       <p v-else class="hint">
@@ -525,6 +596,8 @@ onMounted(async () => {
         留空即表示款项来自或去往本账套之外（记入系统账本账户，该账户不在任何列表与筛选器中呈现）；
         填入一个尚不存在的账户名时，会为你自动创建一个个人往来账户。只有**币种相同**的账户之间才能记账。
         发生时间取业务发生时间，可补记往日的{{ modeLabel }}。
+        <strong>分类可以留空</strong>（留空即「未分类」），也可以直接输入一个新名字——
+        它会在当前账套内被自动创建；分类不区分收入/支出/转账，同一份字典三类共用。
       </p>
     </template>
   </section>

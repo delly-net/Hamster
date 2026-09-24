@@ -54,6 +54,15 @@ public interface ITransactionService
     /// 非空时必须是当前用户可见的账户，且**币种须与 <paramref name="account"/> 相同**
     /// （见下方「不变量」）。
     /// </param>
+    /// <param name="category">
+    /// 分类，**可空**：<c>null</c> 即「未分类」，是正常状态（记账时分类是可选的）。
+    /// 非空时必须是**同一账套**内的分类，否则抛 <see cref="ArgumentException"/>（见下方「不变量」）。
+    /// <para>
+    /// 分类由端点层解析后传入（可能是用户选中的、也可能是按名自动创建的），
+    /// 本服务不查分类表——与 <paramref name="counterpartyAccount"/> 同一取舍。
+    /// 分类挂在**交易**而非明细上，故一笔转账只带一个分类。
+    /// </para>
+    /// </param>
     /// <param name="type">
     /// 交易类型，取值须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>
     /// （<see cref="TransactionType.Income"/> / <see cref="TransactionType.Expense"/> /
@@ -83,6 +92,12 @@ public interface ITransactionService
     /// 把它守在这里，「跨币种交易」在库里就不可能存在，与「配平由等额反向保证」同一性质。
     /// </para>
     /// <para>
+    /// **不变量：分类不会跨账套。** <paramref name="category"/> 非空时其
+    /// <see cref="Category.AccountSetId"/> 必须与 <paramref name="account"/> 的一致，
+    /// 否则抛 <see cref="ArgumentException"/>。分类表没有可见性维度可依赖（与账户不同），
+    /// 这道卡只能设在写入路径上。
+    /// </para>
+    /// <para>
     /// **其余前置条件**（本方法不重复校验，与 <see cref="IAccountService"/> 的取舍一致）：
     /// <paramref name="type"/> 须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>、
     /// <paramref name="amount"/> 须大于 0，且 <paramref name="account"/> 与
@@ -103,6 +118,7 @@ public interface ITransactionService
     Task<Transaction> RecordUserTransactionAsync(
         Account account,
         Account? counterpartyAccount,
+        Category? category,
         TransactionType type,
         decimal amount,
         DateTime occurredAt,

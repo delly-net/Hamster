@@ -103,6 +103,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     public async Task<Transaction> RecordUserTransactionAsync(
         Account account,
         Account? counterpartyAccount,
+        Category? category,
         TransactionType type,
         decimal amount,
         DateTime occurredAt,
@@ -121,6 +122,17 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             throw new ArgumentException(
                 $"对手方账户的币种（{counterpartyAccount.CurrencyCode}）与目标账户（{account.CurrencyCode}）不一致",
                 nameof(counterpartyAccount));
+        }
+
+        // 分类必须与交易同账套。分类按账套隔离（见 Category），端点层只会把当前账套内的分类传进来，
+        // 此处再判一次同样是「守住唯一写账入口」：分类表**没有**可见性维度可依赖，
+        // 不在此处设卡的话，一个越界的分类主键就会在库里留下一条跨账套的引用。
+        // 抛异常而非返回 null，理由与上面币种一致：这是编码错误，不是用户可修正的输入。
+        if (category is not null && category.AccountSetId != account.AccountSetId)
+        {
+            throw new ArgumentException(
+                $"分类（主键 {category.Id}）属于账套 {category.AccountSetId}，与交易所在账套 {account.AccountSetId} 不一致",
+                nameof(category));
         }
 
         // 未指定对手方 → 用该账户币种的系统账本账户，语义即「款项来自/去往账套之外」。
@@ -146,6 +158,8 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             OccurredAt = occurredAt,
             Summary = summary,
             Remark = remark,
+            // 分类为空即「未分类」，是合法状态（记账时分类可选），不填哨兵值
+            CategoryId = category?.Id,
             CreatedByUserId = createdByUserId,
         };
 

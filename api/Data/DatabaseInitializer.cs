@@ -38,9 +38,9 @@ public static class DatabaseInitializer
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
             // 分两次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
             db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
-            db.CodeFirst.InitTables<Transaction, TransactionEntry, Currency>();
+            db.CodeFirst.InitTables<Transaction, TransactionEntry, Currency, Category>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency、hamster_category",
                 options.DbTypeLabel);
 
             // 播种**必须先于账户币种回填**：回填要用默认币种代码，而默认币种正是播种时标出来的
@@ -56,6 +56,16 @@ public static class DatabaseInitializer
             BackfillUserFlags(db, options.DbType, logger);
             BackfillAccountFlags(db, options.DbType, logger);
             BackfillAccountCurrency(db, options.DbType, logger);
+
+            // 分类**刻意不播种、也不回填**：
+            // - 不播种：分类是各家的业务语义（「餐饮」在两个账套里覆盖的范围可以完全不同），
+            //   不存在「所有人都需要的那几个」这种共识（币种有，故 CurrencySeeder 成立）；
+            //   且播种后用户删掉的分类会在下次启动被塞回来，管理页的改动形同虚设。
+            //   空字典 + 记账时手工输入自动创建，正好覆盖「开箱可用」。
+            // - 不回填：hamster_transaction.category_id 是可空 int，既有行取到 NULL 正是
+            //   「未分类」这一合法语义（见 Transaction.CategoryId）。上面三处回填之所以必需，
+            //   是因为那些列是非空 bool / 非空 string，NULL 会让实体绑定失败而整个列表查询 500。
+            //   勿照先例给本列补一段无用的 UPDATE。
         }
         catch (Exception ex)
         {
