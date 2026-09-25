@@ -45,6 +45,66 @@ export const TRANSACTION_TYPE_OPTIONS: {
   { value: 'Transfer', label: TRANSACTION_TYPE_LABELS.Transfer },
 ]
 
+/**
+ * 一种记账类型的界面文案与两个账户端的角色名。
+ *
+ * 用查找表而非嵌套三元表达式：类型从两种涨到三种后，三元表达式会退化成
+ * 「A ? x : B ? y : z」这类读不出对应关系的式子，而这张表把「哪种记账用哪套词」摊平了，
+ * 新增类型只需加一行、漏加时 TypeScript 会因 `Record` 缺键当场报错。
+ *
+ * **定义在 store 而不是记账表单里**：改账弹窗要用同一套角色名（「支出账户」/「目标账户」）。
+ * 两处各写一份，同一对端点就会拿到两种叫法，而用户读到的正是这些名字。
+ */
+export interface TransactionModeMeta {
+  /** 记账类型的中文名，用于按钮与提示文案。 */
+  label: string
+  /** 主账户的字段名。 */
+  primaryLabel: string
+  /** 对手方账户的字段名。 */
+  counterpartyLabel: string
+  /** 摘要输入框的占位示例。 */
+  summaryPlaceholder: string
+}
+
+/**
+ * 各记账类型的文案与账户角色。
+ *
+ * 名字随方向变而非统一叫「账户」：用户看到「收入账户」就知道这里是钱的**落点**，
+ * 看到「转出账户」就知道这里是钱的**来处**，两个框的分工无需额外解释。
+ */
+export const TRANSACTION_MODE_META: Record<RecordableTransactionType, TransactionModeMeta> = {
+  Income: {
+    label: '收入',
+    primaryLabel: '收入账户',
+    counterpartyLabel: '来源账户',
+    summaryPlaceholder: '如：工资',
+  },
+  Expense: {
+    label: '支出',
+    primaryLabel: '支出账户',
+    counterpartyLabel: '目标账户',
+    summaryPlaceholder: '如：午餐',
+  },
+  Transfer: {
+    label: '转账',
+    primaryLabel: '转出账户',
+    counterpartyLabel: '转入账户',
+    summaryPlaceholder: '如：还信用卡',
+  },
+}
+
+/**
+ * 取某交易类型的文案与账户角色；**非用户可记账的类型返回 `null`**。
+ *
+ * 期初余额没有「主账户 / 对手方」这两个角色——它的方向由期初金额的符号决定，
+ * 不由类型决定，给它编一套名字只会让调用方以为它也能走记账/改账那两条路径。
+ * 返回 `null` 而不是抛错：调用方（改账弹窗）本来就只在类型可记账时才被挂载，
+ * 这里多给一条分支是为了让「不该出现的类型」当场可见，而不是静默取到一名字。
+ */
+export function transactionModeMeta(type: TransactionType): TransactionModeMeta | null {
+  return type === 'OpeningBalance' ? null : TRANSACTION_MODE_META[type]
+}
+
 /** 记账入参。 */
 export interface RecordTransactionPayload {
   /** 交易类型：`Income` 收入 / `Expense` 支出 / `Transfer` 转账。 */
@@ -142,6 +202,23 @@ export interface RecordedTransaction {
   createdAt: string
 }
 
+/**
+ * 改账入参。
+ *
+ * **比记账入参少两个字段，这不是巧合，而是契约上的事实**：
+ *
+ * - 去掉 `type`：**交易类型不可改**。它决定两条明细的借贷方向，且「收支互改」在语义上
+ *   是两笔不同的账。后端为此准备了**另一个请求体记录**（不是「同一份减去两个字段」），
+ *   故前端也从类型上删除它——多余字段会被后端静默忽略，留着它只会让「改成功了」变成猜测。
+ * - 去掉 `currencyCode`：交易表没有币种列，币种由主账户决定。记账时它是「先选币种再过滤
+ *   账户候选」的输入；改账时账户已定，再带一个币种只可能多出「币种与主账户打架」的 400。
+ *   币种随主账户走，对手方账户的币种须与之一致（后端校验，与记账同一口径）。
+ *
+ * 其余字段含义与 {@link RecordTransactionPayload} **逐字相同**（含对手方的三级解析与转账的额外约束）：
+ * 改一笔账与记一笔账在这些点上是同一件事，后端也共用同一份判定。
+ */
+export type UpdateTransactionPayload = Omit<RecordTransactionPayload, 'type' | 'currencyCode'>
+
 /** 接口基址。 */
 const TRANSACTIONS_PATH = '/api/transactions'
 
@@ -167,8 +244,33 @@ export const useTransactionsStore = defineStore('transactions', () => {
     }
   }
 
+  /**
+   * 修改一笔已记账的交易（收入 / 支出 / 转账）。
+   *
+   * **改的是整笔交易**：后端会把借贷两条明细一并改写并保持方向不变，故这里只需提交一次；
+   * 只改「当前这一行」的接口是不存在的——那会让复式记账的配平当场失效。
+   * 账户余额不需要任何额外调用：它是明细的派生值，改完重新查询即得新值。
+   *
+   * @param id 交易主键（取明细行的 `transactionId`，**不是明细主键**）。
+   * @throws 交易不存在、不属于当前账套、或两条明细挂靠的账户不在操作者这一侧时返回 404
+   * （三者同响应，不泄露存在性）；期初余额交易返回 400；字段非法、主账户/对手方账户不可见、
+   * 转账两端不合规、币种不一致时与记账同响应。
+   */
+  async function update(id: number, payload: UpdateTransactionPayload): Promise<RecordedTransaction> {
+    loading.value = true
+    try {
+      return await request<RecordedTransaction>(`${TRANSACTIONS_PATH}/${id}`, {
+        method: 'PUT',
+        body: payload,
+      })
+    } finally {
+      loading.value = false
+    }
+  }
+
   return {
     loading,
     record,
+    update,
   }
 })

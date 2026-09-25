@@ -49,14 +49,23 @@
  * 「收入 / 支出」文字标签由金额正负派生（见 {@link sideText}），**不取自 `direction`**：它只是把窄屏下
  * 丢失的「金额在哪一列」这一层信息补回来，与宽屏「按符号分列」同一口径；写成 `direction` 分支等于把
  * 「借/贷」放回页面，也会与既有口径分叉。
+ *
+ * **本页可改账**（`PUT /api/transactions/{id}`，入口在 {@link EntryEditDialog}）：改的是**整笔交易**
+ * ——一条明细没有独立于对侧的意义，只改一行等于当场打破复式记账的配平，故弹窗一并改写借贷两条明细
+ * 且保持方向不变。「重新计算相关账户余额」在这里表现为**改完重新查询**而不是一次额外的调用：
+ * 余额是明细的派生值（后端按账户汇总带符号金额），库里没有余额列，故没有「重算」这一步可做。
+ * 入口只在 {@link isEntryEditable} 为真的行上呈现（期初余额行、对手方不在我名下的行不给入口）
+ * ——**不出禁用态按钮**：那两类原因都不是用户在本页能解决的，占位只会让人去猜为什么点不动。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
+import EntryEditDialog from '@/components/EntryEditDialog.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import {
   COUNTERPARTY_KIND_LABELS,
   ENTRY_PAGE_SIZE,
+  isEntryEditable,
   transactionTypeLabel,
   useEntriesStore,
   type Entry,
@@ -411,6 +420,41 @@ function signedCellClass(value: number, side: 'income' | 'expense' | 'net'): str
   return value < 0 ? 'expense' : 'income'
 }
 
+/**
+ * 正在修改的那一行；`null` 表示没有打开改账弹窗。
+ *
+ * 存整行而不是只存 `transactionId`：弹窗要用它还原两个端点（哪一侧是主账户由 `isPrimary` 决定）、
+ * 回填金额与时间、判断对手方是否账本账户，而「再查一次拿同一行」只会多一次往返、
+ * 还可能把已经翻页消失的行取成另一行。
+ */
+const editingEntry = ref<Entry | null>(null)
+
+/**
+ * 打开改账弹窗。
+ *
+ * 只在可编辑的行上被调用（按钮的渲染条件本身就是 `isEntryEditable`），故这里不做二次判定。
+ */
+function openEdit(entry: Entry): void {
+  editingEntry.value = entry
+}
+
+/**
+ * 改账成功后的收尾：关弹窗、重取本页与账户候选，最后给出提示。
+ *
+ * 明细与账户**两者都要重取**：
+ * - 明细：改过的金额、时间、分类、账户都会反映在行上，改账户或时间还可能让这一行移出当前的
+ *   筛选条件——不重取就会停在旧数据上。
+ * - 账户：账户行上的余额是明细的派生值，这一改已经让它变了，而候选列表里的余额正是「选哪个账户」
+ *   的依据（见 `AccountSearchSelect`），留着旧值会让人按错的余额做决定。
+ *
+ * 提示放在最后：`load()` 会把 `notice` 改写成「共 N 条明细」，先写提示会被它盖掉。
+ */
+async function onEdited(message: string): Promise<void> {
+  editingEntry.value = null
+  await Promise.all([load(), loadAccounts()])
+  notice.value = message
+}
+
 /** 拉取账户筛选候选；含已停用账户。 */
 async function loadAccounts(): Promise<boolean> {
   try {
@@ -569,6 +613,8 @@ onMounted(() => {
           【净额】列是这一行的增减合计；表格底部给出当页小计。
           【分类】列是这笔交易的分类（记账时可选，未分类显示 —）。
           一笔交易涉及两个所选账户时会呈现两行。时间取业务发生时间，可补记往日收支。
+          每行末尾的【修改】用于改这一笔：借贷两条明细会一并改写，相关账户的余额随之重算；
+          期初余额行与对手方不在我名下的行不提供修改。
         </p>
       </div>
     </header>
@@ -673,6 +719,7 @@ onMounted(() => {
             <th>摘要</th>
             <th>分类</th>
             <th>备注</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -701,9 +748,21 @@ onMounted(() => {
             <!-- 分类是交易级属性：一笔交易的两条明细会显示同一个分类，这不是重复 -->
             <td class="category">{{ categoryText(entry) }}</td>
             <td class="remark">{{ entry.remark || '—' }}</td>
+            <!-- 不可编辑的行留空而不是给一个禁用按钮：期初余额行、对手方不在我名下的行
+                 都不是用户在本页能解决的问题，禁用的控件只会让人去猜为什么点不动 -->
+            <td class="row-actions">
+              <button
+                v-if="isEntryEditable(entry)"
+                type="button"
+                class="edit"
+                @click="openEdit(entry)"
+              >
+                修改
+              </button>
+            </td>
           </tr>
           <tr v-if="items.length === 0">
-            <td colspan="10" class="empty">{{ emptyText }}</td>
+            <td colspan="11" class="empty">{{ emptyText }}</td>
           </tr>
         </tbody>
         <!-- 小计只统计**当页**：跨页合计会让「本页小计」这个标题名不副实，
@@ -721,7 +780,7 @@ onMounted(() => {
             <td class="amount" :class="signedCellClass(pageTotals.net, 'net')">
               {{ formatSigned(pageTotals.net) }}
             </td>
-            <td colspan="4"></td>
+            <td colspan="5"></td>
           </tr>
         </tfoot>
       </table>
@@ -760,6 +819,12 @@ onMounted(() => {
             <span class="card-category">分类：{{ categoryText(entry) }}</span>
             <span class="card-remark">备注：{{ entry.remark || '—' }}</span>
           </p>
+
+          <!-- 卡片底部就是窄屏下唯一的编辑入口（宽屏走表格的「操作」列），
+               门槛与宽屏同源：不可编辑的行不呈现这一行 -->
+          <div v-if="isEntryEditable(entry)" class="card-actions">
+            <button type="button" class="edit" @click="openEdit(entry)">修改</button>
+          </div>
         </li>
 
         <!-- 空态与表格空态行共用同一 emptyText，两处文案不得各自表述 -->
@@ -816,6 +881,14 @@ onMounted(() => {
           下一页
         </button>
       </div>
+
+      <!-- 改账弹窗：挂载即打开（`editingEntry` 非空才有它），改完由 onEdited 重取本页 -->
+      <EntryEditDialog
+        v-if="editingEntry"
+        :entry="editingEntry"
+        @close="editingEntry = null"
+        @saved="onEdited"
+      />
     </template>
   </main>
 </template>
@@ -1108,6 +1181,34 @@ onMounted(() => {
   opacity: 0.75;
 }
 
+/* 操作列：只放一个行内按钮，故不必占宽——靠右并禁止折行即可 */
+.row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* 行内操作按钮：外观与 .ghost 同源（边框主色 + 主色文字），但字号与内边距都更小
+   ——它嵌在表格行里，不该与页级的【查询】【上一页】长得一样大 */
+.edit {
+  padding: 0.25rem 0.6rem;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--color-accent-strong);
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s;
+}
+
+@media (hover: hover) {
+  .edit:hover {
+    background-color: var(--color-accent-soft);
+  }
+}
+
 .badge {
   display: inline-block;
   padding: 0.15rem 0.5rem;
@@ -1306,6 +1407,12 @@ onMounted(() => {
   opacity: 0.6;
 }
 
+/* 卡片底部操作区：按钮靠右，与卡片头部右侧的金额对齐成一条边线 */
+.card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 /* 汇总条：底色 + 上边框把它读作「汇总」而不是「又一张卡片」，与表格 <tfoot> 同源 */
 .totals {
   padding: 0.7rem 0.85rem;
@@ -1370,6 +1477,14 @@ onMounted(() => {
 
   .totals {
     display: block;
+  }
+
+  /* 卡片底部那个按钮是窄屏下唯一需要「点」的元素，宽屏那套尺寸（12.5px 字号、约 1.6rem 高）
+     是给鼠标准备的，对触屏偏小，故只在断点内放大——宽屏尺寸逐字不变 */
+  .card-actions .edit {
+    min-height: 2.25rem;
+    padding: 0.4rem 1rem;
+    font-size: 13px;
   }
 }
 </style>

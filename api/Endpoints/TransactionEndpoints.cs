@@ -74,6 +74,22 @@ public sealed class TransactionEndpoints : IEndpoint
     private static readonly string[] TIME_ERROR =
         ["时间格式不正确，应为 ISO 8601 时间（如 2026-09-23T02:00:00Z）"];
 
+    /// <summary>改账时未给出发生时间时的字段错误。</summary>
+    /// <remarks>
+    /// 与新建的「省略即取当前时刻」刻意不同：改账是全量替换（空备注即清空备注），
+    /// 把缺时间解释成「保持原值」会让同一份契约里并存两套语义。
+    /// </remarks>
+    private static readonly string[] TIME_REQUIRED_ERROR =
+        ["时间不能为空；需要保留原来的时间，请把它原样传回来"];
+
+    /// <summary>试图修改期初余额交易时的字段错误。</summary>
+    /// <remarks>
+    /// 与 <see cref="TYPE_ERROR"/> 分开：那条说的是「传了不能记的类型」，这条说的是
+    /// 「这笔账的类型不支持修改」。文案也不同——用户看到的是他自己那笔期初分录，不是一次非法输入。
+    /// </remarks>
+    private static readonly string[] OPENING_BALANCE_ERROR =
+        ["期初余额由系统在账户创建时生成，不支持修改"];
+
     /// <summary>分类主键在当前账套内不存在时的字段错误。</summary>
     /// <remarks>
     /// 分类**没有可见性维度**，分不出「不存在」与「无权访问」，
@@ -174,7 +190,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 {
                     // 转账走独立的解析路径：它不接受「留空落账本账户」，也不接受按名新建对手方
                     var (resolved, transferFailure) = await ResolveTransferCounterpartyAsync(
-                        request, account, accountSet!, actor!.Id, actor.IsAdmin, accounts, cancellationToken);
+                        request.CounterpartyAccountId, account, accountSet!, actor!.Id, actor.IsAdmin, accounts, cancellationToken);
 
                     if (transferFailure is not null)
                     {
@@ -186,7 +202,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 else
                 {
                     var (resolved, counterpartyFailure) = await ResolveCounterpartyAsync(
-                        request, accountSet!, actor!, account.CurrencyCode, accounts, cancellationToken);
+                        request.CounterpartyAccountId, request.CounterpartyName, accountSet!, actor!, account.CurrencyCode, accounts, cancellationToken);
 
                     if (counterpartyFailure is not null)
                     {
@@ -199,7 +215,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 // 分类在所有校验之后解析：它可能**按名自动创建**（有副作用），
                 // 放在校验闸门之前会让一个注定被拒的请求也在分类表里留下痕迹
                 var (category, categoryFailure) = await ResolveCategoryAsync(
-                    request, accountSet!.Id, categories, cancellationToken);
+                    request.CategoryId, request.CategoryName, accountSet!.Id, categories, cancellationToken);
 
                 if (categoryFailure is not null)
                 {
@@ -255,12 +271,223 @@ public sealed class TransactionEndpoints : IEndpoint
                 "记完的明细可在 `GET /api/entries` 中按时间区间与账户查到。" +
                 "本端点**只有写入**，不提供单笔交易查询：需要逐条明细（含对手方档位）请用 `GET /api/entries`，" +
                 "为本就存在的查询能力再开一个近似端点只会多出一条会漂移的读取路径。");
+
+        group.MapPut("/{id:int}", async (
+                int id,
+                TransactionUpdateRequest request,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IAccountService accounts,
+                ICategoryService categories,
+                ITransactionService transactions,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                // 先判「在不在 + 类型允不允许」，再判「形态认不认识」——**两个问题各有各的响应码，
+                // 不能合成一次查询**：期初余额交易没有主账户方向，形态解析（FindEditableAsync）
+                // 只能给它 null，于是「不可改」会与「不存在」挤进同一个 404；
+                // 而期初行用户在明细页**看得见**它，说它「不存在」是撒谎。
+                // 故类型这一关先过，且它必须由**交易头**来判（形态还没解析，拿不到 Type）。
+                var transaction = await transactions.FindAsync(id, accountSet!.Id, cancellationToken);
+
+                if (transaction is null)
+                {
+                    return Results.NotFound(new { message = "账目不存在" });
+                }
+
+                // 期初余额交易不接受修改：它的金额恒等于目标账户的期初余额、每账户至多一条。
+                // 前端同样不给入口（见 ui 的 isEntryEditable），此处是防绕过；
+                // 服务层在写入口上还判一次（见 UpdateUserTransactionAsync），那是最后一道。
+                if (!transaction.Type.IsUserRecordable())
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        ["type"] = OPENING_BALANCE_ERROR,
+                    });
+                }
+
+                // 待改写的交易及其两个端点账户。不属于当前账套、明细不是「借贷各一条」、
+                // 或明细指向的账户已不在库里时一律得到 null，回到 404，不泄露存在性（沿用 #35/#38 口径）
+                var editable = await transactions.FindEditableAsync(id, accountSet.Id, cancellationToken);
+
+                if (editable is null)
+                {
+                    return Results.NotFound(new { message = "账目不存在" });
+                }
+
+                var errors = new Dictionary<string, string[]>();
+
+                ValidateAmount(request.Amount, errors);
+                ValidateText(request.Summary, SUMMARY_MAX_LENGTH, "summary", "摘要", errors);
+                ValidateText(request.Remark, REMARK_MAX_LENGTH, "remark", "备注", errors, required: false);
+                // 分类可选（留空即「未分类」），但给了名字就得在列长以内——超长的名字要在建之前拦下
+                ValidateText(request.CategoryName, CATEGORY_NAME_MAX_LENGTH, "categoryName", "分类名", errors, required: false);
+
+                // 发生时间在改账时**必填**，与新建时「省略即取当前时刻」刻意不同：
+                // 本次请求是**全量替换**（空备注即清空备注），若把缺时间解释成「保持原值」，
+                // 同一份契约里就会并存两套语义。要保留原时间就把它原样传回来。
+                if (!TryParseTime(request.OccurredAt, out var occurredAt, errors))
+                {
+                    // 格式错误时 TryParseTime 已写过文案，不覆盖它；只有「压根没给时间」才落到这里。
+                    // **不能写成 errors["occurredAt"] ??= …**：字典索引器先读后写，
+                    // 键不存在时那一次读会抛 KeyNotFoundException（500），而不是给出这条 400 文案
+                    if (!errors.ContainsKey("occurredAt"))
+                    {
+                        errors["occurredAt"] = TIME_REQUIRED_ERROR;
+                    }
+                }
+
+                if (errors.Count > 0)
+                {
+                    return Results.ValidationProblem(errors);
+                }
+
+                // 新的主账户必须是当前用户可见的账户——与记账同一口径（不可见与不存在同为 404）
+                var account = await accounts.FindVisibleAsync(
+                    request.AccountId, accountSet.Id, actor!.Id, actor.IsAdmin, cancellationToken);
+
+                if (account is null)
+                {
+                    return Results.NotFound(new { message = "账户不存在" });
+                }
+
+                // 可编辑性闸门：这笔交易的两个端点都必须落在「我这一侧」。
+                // 主账户明细的账户必须可见；对手方**可见或是系统账本账户**——
+                // 账本账户对任何人的可见性判定都是 null（它对谁都不呈现），却是每一笔用户收支的
+                // 合法对手方，按「必须可见」一刀切会把绝大多数收支交易判成不可编辑。
+                // 对手方是他人个人账户时拒绝：那笔账的另一半在别人名下，改它等于替别人改账。
+                // 与「交易不存在」同响应，不泄露存在性。
+                var primaryVisible = await accounts.FindVisibleAsync(
+                    editable.PrimaryAccount.Id, accountSet.Id, actor.Id, actor.IsAdmin, cancellationToken);
+
+                var counterpartyVisible = editable.CounterpartyAccount.IsSystem
+                    || await accounts.FindVisibleAsync(
+                        editable.CounterpartyAccount.Id,
+                        accountSet.Id,
+                        actor.Id,
+                        actor.IsAdmin,
+                        cancellationToken) is not null;
+
+                if (primaryVisible is null || !counterpartyVisible)
+                {
+                    return Results.NotFound(new { message = "账目不存在" });
+                }
+
+                // 币种随**新的主账户**走：交易表没有币种列，币种由账户决定。
+                // 请求体刻意不带 currencyCode——编辑语境下账户已定，再带一个币种字段
+                // 只会多出「币种字段与主账户打架」的 400，是噪音。
+                // 对手方的解析与新建**共用同一份实现**（按主键 / 按名 / 按名自动创建），
+                // 两条路径的准入条件本就相同，各写一份必然在某一处漂移
+                Account? counterparty;
+
+                if (editable.Transaction.Type == TransactionType.Transfer)
+                {
+                    // 转账同样走独立路径：不接受留空、也不接受按名新建对手方
+                    var (resolved, transferFailure) = await ResolveTransferCounterpartyAsync(
+                        request.CounterpartyAccountId, account, accountSet, actor.Id, actor.IsAdmin, accounts, cancellationToken);
+
+                    if (transferFailure is not null)
+                    {
+                        return transferFailure;
+                    }
+
+                    counterparty = resolved;
+                }
+                else
+                {
+                    var (resolved, counterpartyFailure) = await ResolveCounterpartyAsync(
+                        request.CounterpartyAccountId,
+                        request.CounterpartyName,
+                        accountSet,
+                        actor,
+                        account.CurrencyCode,
+                        accounts,
+                        cancellationToken);
+
+                    if (counterpartyFailure is not null)
+                    {
+                        return counterpartyFailure;
+                    }
+
+                    counterparty = resolved;
+                }
+
+                // 分类在所有校验之后解析：它可能**按名自动创建**（有副作用），
+                // 放在校验闸门之前会让一个注定被拒的请求也在分类表里留下痕迹
+                var (category, categoryFailure) = await ResolveCategoryAsync(
+                    request.CategoryId, request.CategoryName, accountSet.Id, categories, cancellationToken);
+
+                if (categoryFailure is not null)
+                {
+                    return categoryFailure;
+                }
+
+                // 改写**整笔交易**（交易头 + 借贷两条明细），而非只改这一行：
+                // 复式记账的两条明细恒等额反向，只改一条即账不平。
+                // 余额无需任何额外动作——它是明细的派生值，改完下次查询即为新值
+                var updated = await transactions.UpdateUserTransactionAsync(
+                    editable.Transaction,
+                    account,
+                    counterparty,
+                    category,
+                    request.Amount,
+                    occurredAt,
+                    request.Summary!.Trim(),
+                    string.IsNullOrWhiteSpace(request.Remark) ? null : request.Remark.Trim(),
+                    cancellationToken);
+
+                // 取回后到改写前被并发删除（受影响行数为 0）：与一开始就找不到同响应
+                if (updated is null)
+                {
+                    return Results.NotFound(new { message = "账目不存在" });
+                }
+
+                return Results.Ok(TransactionDto.From(updated, account, counterparty, category));
+            })
+            .WithName("UpdateTransaction")
+            .WithSummary("修改一笔已记账的收入、支出或转账")
+            .WithDescription(
+                "改写一笔已存在的交易。**改的是整笔交易，不是单独一行明细**：" +
+                "一笔交易由借贷两条等额反向的明细构成，故两条明细**一并改写**、方向保持不变，" +
+                "复式配平（借方合计 == 贷方合计）在改完后仍然成立。" +
+                "**账户余额不需要任何额外操作**：余额是全部明细的有符号汇总（派生值，库里没有余额列），" +
+                "明细一改，新旧账户的余额下次查询即为新值。" +
+                "**交易类型不可改**：它决定两条明细的方向，且「收支互改」在语义上是两笔不同的账——" +
+                "故本请求体里**根本没有 type 字段**（不是「收了不理会」，那样用户会以为改成功了）。" +
+                "**期初余额（OpeningBalance）的交易不可修改**（400）：它的金额恒等于账户的期初余额、" +
+                "且每账户至多一条，改它会让这两条不变量同时失效。" +
+                "**可改字段**：accountId（主账户，收入/支出时是收入/支出账户，转账时是**转出账户**）、" +
+                "amount、occurredAt、summary、remark、categoryId / categoryName、" +
+                "counterpartyAccountId / counterpartyName（语义与新建完全一致：转账时必填且须为 " +
+                TRANSFER_ACCOUNT_TYPE_HINT + "，收支留空即落该币种账本账户，按名命不中会新建个人往来账户）。" +
+                "**请求体不含 currencyCode**：交易表没有币种列，币种由主账户决定，" +
+                "对手方账户的币种必须与主账户一致（否则 400，与新建同一口径）。" +
+                "occurredAt 在本端点**必填**（与新建的「省略即取当前时刻」不同）：本次是全量替换，" +
+                "缺字段的含义只能是错误，要保留原时间就原样传回。" +
+                "**accountId 与 counterpartyAccountId 沿用新建的全部约束**（账户类型、同账户、可见性、币种）：" +
+                "改一笔账与记一笔账在这几点上是同一件事，共用同一份判定。" +
+                "**准入条件**：交易须属于当前账套，且其**两条明细挂靠的账户都必须在操作者这一侧**" +
+                "（主账户账户须可见；对手方须可见或为系统账本账户）；否则与「交易不存在」同响应 404，不泄露存在性——" +
+                "对手方是他人个人账户时，那笔账的另一半在别人名下，改它等于替别人改账。" +
+                "**只做 UPDATE，不删旧插新**：交易主键与两条明细主键**保持不变**（明细主键是明细查询的" +
+                "稳定排序键，换它会让翻页行序漂移），交易也不新增任何行。" +
+                "改完的明细可在 `GET /api/entries` 中按时间区间与账户查到（同一 transactionId 的两行会同步变化）。");
     }
 
     /// <summary>
     /// 解析本次记账的对手方账户。
     /// </summary>
-    /// <param name="request">记账请求体。</param>
+    /// <param name="counterpartyAccountId">对手方账户主键；未给出时为 <c>null</c>。</param>
+    /// <param name="counterpartyName">对手方账户名称；未给出时为 <c>null</c>。</param>
     /// <param name="accountSet">当前账套。</param>
     /// <param name="actor">当前操作者。</param>
     /// <param name="currencyCode">交易币种（已与目标账户核对一致）。</param>
@@ -285,16 +512,22 @@ public sealed class TransactionEndpoints : IEndpoint
     /// （公共账户 ∪ 本人个人账户）恰好覆盖了「个人账户重名」可能命中的全部行——若该范围内已有同名账户，
     /// 上一步就已命中并直接返回。再查一次只会让「找到了吗」有两个答案来源。
     /// </para>
+    /// <para>
+    /// 收两个**散字段**而非整个请求体：记账与改账的请求体是两个不同的记录
+    /// （改账的记录里没有 <c>type</c> / <c>currencyCode</c>），共用本方法才不会得到两份解析实现——
+    /// 而两份「按主键 / 按名 / 按名自动创建」的解析必然在某一处漂移。
+    /// </para>
     /// </remarks>
     private static async Task<(Account? Account, IResult? Failure)> ResolveCounterpartyAsync(
-        TransactionRequest request,
+        int? counterpartyAccountId,
+        string? counterpartyName,
         AccountSet accountSet,
         User actor,
         string currencyCode,
         IAccountService accounts,
         CancellationToken cancellationToken)
     {
-        if (request.CounterpartyAccountId is { } counterpartyId)
+        if (counterpartyAccountId is { } counterpartyId)
         {
             var byId = await accounts.FindVisibleAsync(
                 counterpartyId, accountSet.Id, actor.Id, actor.IsAdmin, cancellationToken);
@@ -309,7 +542,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 : (null, CurrencyMismatch(byId.CurrencyCode, currencyCode, "对手方账户"));
         }
 
-        var name = request.CounterpartyName?.Trim();
+        var name = counterpartyName?.Trim();
         if (string.IsNullOrEmpty(name))
         {
             // 未指定对手方：交给服务层落回该币种的系统账本账户
@@ -347,7 +580,8 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <summary>
     /// 解析本次记账的分类。
     /// </summary>
-    /// <param name="request">记账请求体。</param>
+    /// <param name="categoryId">分类主键；未给出时为 <c>null</c>。</param>
+    /// <param name="categoryName">分类名；未给出时为 <c>null</c>。</param>
     /// <param name="accountSetId">当前账套主键。</param>
     /// <param name="categories">分类服务。</param>
     /// <param name="cancellationToken">取消令牌。</param>
@@ -371,23 +605,28 @@ public sealed class TransactionEndpoints : IEndpoint
     /// 这里**不需要**账户路径那样的可见性判定：分类没有归属人、也没有可见性维度
     /// （见 <see cref="Category"/>），账套内的分类对所有成员一视同仁。
     /// </para>
+    /// <para>
+    /// 收两个**散字段**而非整个请求体，理由同 <see cref="ResolveCounterpartyAsync"/>：
+    /// 记账与改账共用同一份三级解析。
+    /// </para>
     /// </remarks>
     private static async Task<(Category? Category, IResult? Failure)> ResolveCategoryAsync(
-        TransactionRequest request,
+        int? categoryId,
+        string? categoryName,
         int accountSetId,
         ICategoryService categories,
         CancellationToken cancellationToken)
     {
-        if (request.CategoryId is { } categoryId)
+        if (categoryId is { } givenId)
         {
-            var byId = await categories.FindAsync(accountSetId, categoryId, cancellationToken);
+            var byId = await categories.FindAsync(accountSetId, givenId, cancellationToken);
 
             return byId is null
                 ? (null, CategoryProblem(CATEGORY_ERROR))
                 : (byId, null);
         }
 
-        var name = request.CategoryName?.Trim();
+        var name = categoryName?.Trim();
         if (string.IsNullOrEmpty(name))
         {
             return (null, null);
@@ -422,7 +661,7 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <summary>
     /// 解析转账的转入账户。
     /// </summary>
-    /// <param name="request">记账请求体。</param>
+    /// <param name="toAccountId">转入账户主键；未给出时为 <c>null</c>。</param>
     /// <param name="fromAccount">转出账户（已取得，即请求体的 <c>accountId</c>）。</param>
     /// <param name="accountSet">当前账套。</param>
     /// <param name="actorId">当前操作者主键。</param>
@@ -445,7 +684,7 @@ public sealed class TransactionEndpoints : IEndpoint
     /// </para>
     /// </remarks>
     private static async Task<(Account? Counterparty, IResult? Failure)> ResolveTransferCounterpartyAsync(
-        TransactionRequest request,
+        int? toAccountId,
         Account fromAccount,
         AccountSet accountSet,
         int actorId,
@@ -453,7 +692,6 @@ public sealed class TransactionEndpoints : IEndpoint
         IAccountService accounts,
         CancellationToken cancellationToken)
     {
-        var toAccountId = request.CounterpartyAccountId;
         if (toAccountId is null)
         {
             return (null, Results.ValidationProblem(new Dictionary<string, string[]>
@@ -756,6 +994,58 @@ public sealed record TransactionRequest(
     string? Summary,
     string? Remark,
     string? CurrencyCode,
+    int? CounterpartyAccountId,
+    string? CounterpartyName,
+    int? CategoryId,
+    string? CategoryName);
+
+/// <summary>改账请求体。</summary>
+/// <param name="AccountId">
+/// 主账户主键，须为当前用户可见的账户：收入时它是收入账户（余额增加），
+/// 支出时是支出账户、转账时是**转出账户**（余额减少）。与新建时含义相同。
+/// </param>
+/// <param name="Amount">金额，**必须大于 0**，两位小数以内；增减方向由**交易类型**表达（类型不可改）。</param>
+/// <param name="OccurredAt">
+/// 业务发生时间（ISO 8601，UTC）。**必填**——本请求是全量替换，
+/// 缺字段的含义只能是错误；要保留原来的时间就把它原样传回来（与新建的「省略即取当前时刻」刻意不同）。
+/// </param>
+/// <param name="Summary">交易摘要，必填，128 位以内。</param>
+/// <param name="Remark">备注，可选，256 位以内；**留空即清空备注**（覆盖而非保留）。</param>
+/// <param name="CounterpartyAccountId">
+/// 对手方账户主键，可选。语义与新建完全一致：交易类型为 <c>Transfer</c> 时它**必填且为转入账户**
+/// （两端都须满足转账账户限制、不能是同一个账户）；收支可留空，留空即落回主账户**所属币种**的
+/// 系统账本账户（按新主账户的币种取，故改到别的币种账户上也不会跨币种）。
+/// <para>与 <paramref name="CounterpartyName"/> 同时给出时**以本字段为准**（主键比名称精确）。</para>
+/// </param>
+/// <param name="CounterpartyName">
+/// 对手方账户名称，可选。用户**手工输入**（未命中候选）时传它；不存在则自动创建为个人往来账户。
+/// 与新建同一口径：交易类型为 <c>Transfer</c> 时不接受本字段（400）。
+/// </param>
+/// <param name="CategoryId">
+/// 分类主键，可选。与 <paramref name="CategoryName"/> 同时给出时以本字段为准；
+/// 取不到（不属于当前账套）则 400。两者皆空即「未分类」，是合法状态。
+/// </param>
+/// <param name="CategoryName">分类名，可选；不存在则**自动创建**，32 位以内。</param>
+/// <remarks>
+/// **刻意不含 <c>Type</c>**：交易类型不可改——它决定两条明细的方向，而「收支互改」在语义上
+/// 是两笔不同的账。Minimal API 对多余字段静默忽略，故把不可改字段从契约中**整个删掉**，
+/// 才不会出现「用户以为改了、其实被忽略」（同 <c>AccountUpdateRequest</c> 的取舍）。
+/// <para>
+/// **刻意不含 <c>CurrencyCode</c>**：交易表没有币种列，币种由主账户决定；
+/// 新建时该字段是「先选币种再过滤账户候选」的输入，编辑时账户已定，
+/// 再带一个币种字段只会多出「币种字段与主账户打架」的 400，是噪音。
+/// </para>
+/// <para>
+/// 与 <see cref="TransactionRequest"/> 是**两个记录而非「同一个去掉两个字段」**：
+/// 结构上的差异要在契约层可见，否则「不可改」这件事只存在于注释里。
+/// </para>
+/// </remarks>
+public sealed record TransactionUpdateRequest(
+    int AccountId,
+    decimal Amount,
+    string? OccurredAt,
+    string? Summary,
+    string? Remark,
     int? CounterpartyAccountId,
     string? CounterpartyName,
     int? CategoryId,

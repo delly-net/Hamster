@@ -83,4 +83,39 @@ public static class TransactionTypeExtensions
     /// </remarks>
     public static bool IsUserRecordable(this TransactionType type) =>
         type is TransactionType.Income or TransactionType.Expense or TransactionType.Transfer;
+
+    /// <summary>
+    /// 该类型交易中**主账户明细**的借贷方向。
+    /// </summary>
+    /// <param name="type">交易类型。</param>
+    /// <returns>
+    /// <see cref="TransactionType.Income"/> 为借方（收入账户余额增加）；
+    /// <see cref="TransactionType.Expense"/> 与 <see cref="TransactionType.Transfer"/> 为贷方
+    /// （支出账户/转出账户余额减少）；<see cref="TransactionType.OpeningBalance"/> 为 <c>null</c>。
+    /// </returns>
+    /// <remarks>
+    /// 主账户即「用户记账时选定的那个账户」：收入时是收入账户，支出时是支出账户，转账时是**转出账户**。
+    /// 「这笔交易里哪条明细挂在主账户上」只在这里判定一次，两个调用点共用：
+    /// <list type="bullet">
+    /// <item>写入路径（<c>TransactionService.RecordUserTransactionAsync</c>）——据此决定两条明细各记哪个方向；</item>
+    /// <item>明细查询（<c>EntryQueryService.QueryAsync</c>）——据此给出每行的 <c>IsPrimary</c>，
+    /// 供界面把「被点的那一行」还原成「主账户 + 对手方」两个端点。</item>
+    /// </list>
+    /// 一旦两处各写一遍三元表达式，判据就会各自漂移，而判错的后果是**编辑写到了错误的账户上**——
+    /// 属于数据损坏类缺陷，不是显示问题。这与 <see cref="EntryDirectionExtensions.SignedAmount"/>
+    /// 「换算只定义一处」是同一取舍。
+    /// <para>
+    /// 期初余额返回 <c>null</c> 而非某个方向：期初没有「主账户」这一概念——
+    /// 它的方向由**期初金额的符号**决定（正数入借方、负数入贷方，见
+    /// <c>TransactionService.RecordOpeningBalanceAsync</c>），与其账户是不是「用户选定的」无关。
+    /// 用一个看似合理的默认方向去凑，会让负数期初的账户被认成「对手方行」。
+    /// 期初交易本就不支持编辑，故该情形只需要一个诚实的空值，不需要一个能用的值。
+    /// </para>
+    /// </remarks>
+    public static EntryDirection? PrimaryDirection(this TransactionType type) => type switch
+    {
+        TransactionType.Income => EntryDirection.Debit,
+        TransactionType.Expense or TransactionType.Transfer => EntryDirection.Credit,
+        _ => null,
+    };
 }

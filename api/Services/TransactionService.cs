@@ -116,28 +116,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         int createdByUserId,
         CancellationToken cancellationToken = default)
     {
-        // 币种不同就无法交易——这是记账的**核心不变量**，正常路径由端点层拦下并给 400，
-        // 此处再判一次：本方法是唯一写账入口，把它守在这里，「跨币种交易」在库里就不可能存在，
-        // 与「配平由等额反向保证」同一性质。抛异常而非返回 null：调用方传错参数是编码错误，
-        // 不是用户可以修正的输入错误，静默降级只会掩盖 bug。
-        if (counterpartyAccount is not null
-            && !string.Equals(counterpartyAccount.CurrencyCode, account.CurrencyCode, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ArgumentException(
-                $"对手方账户的币种（{counterpartyAccount.CurrencyCode}）与目标账户（{account.CurrencyCode}）不一致",
-                nameof(counterpartyAccount));
-        }
-
-        // 分类必须与交易同账套。分类按账套隔离（见 Category），端点层只会把当前账套内的分类传进来，
-        // 此处再判一次同样是「守住唯一写账入口」：分类表**没有**可见性维度可依赖，
-        // 不在此处设卡的话，一个越界的分类主键就会在库里留下一条跨账套的引用。
-        // 抛异常而非返回 null，理由与上面币种一致：这是编码错误，不是用户可修正的输入。
-        if (category is not null && category.AccountSetId != account.AccountSetId)
-        {
-            throw new ArgumentException(
-                $"分类（主键 {category.Id}）属于账套 {category.AccountSetId}，与交易所在账套 {account.AccountSetId} 不一致",
-                nameof(category));
-        }
+        EnsureWriteInvariants(account, counterpartyAccount, category);
 
         // 未指定对手方 → 用该账户币种的系统账本账户，语义即「款项来自/去往账套之外」。
         // 指定了对手方 → 直接用：此时这是一笔两个真实账户之间的转账，账本账户完全不参与。
@@ -145,12 +124,13 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         var counterparty = counterpartyAccount
             ?? await EnsureLedgerAccountAsync(account.AccountSetId, account.CurrencyCode, cancellationToken);
 
-        // 收入使目标账户余额增加（借方）、其余类型使其减少（贷方）；对手方一律取相反方向。
-        // 转账与支出同向：转出账户就是「钱离开的那个账户」，记贷方。
         // 方向由交易类型决定而非金额符号：金额恒为正，两条明细等额反向，配平天然成立。
-        var targetDirection = type == TransactionType.Income
-            ? EntryDirection.Debit
-            : EntryDirection.Credit;
+        // 「哪个方向算主账户方向」只有一处定义（含收入为何是借方、支出与转账为何同向），
+        // 见 TransactionTypeExtensions.PrimaryDirection。
+        var targetDirection = type.PrimaryDirection()
+            // 期初余额没有主账户方向（它的方向由期初金额符号决定），故本方法只接受用户可记账的类型。
+            // 端点层已按 IsUserRecordable 拦下其余取值，走到这里说明是编码错误，抛异常而非静默取一个默认方向
+            ?? throw new ArgumentException($"交易类型 {type} 不支持用户记账，无法确定主账户明细的方向", nameof(type));
         var counterpartyDirection = targetDirection == EntryDirection.Debit
             ? EntryDirection.Credit
             : EntryDirection.Debit;
@@ -177,6 +157,196 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             cancellationToken);
 
         return transaction;
+    }
+
+    /// <inheritdoc />
+    public async Task<Transaction?> FindAsync(
+        int transactionId,
+        int accountSetId,
+        CancellationToken cancellationToken = default)
+    {
+        var matched = await db.Queryable<Transaction>()
+            .Where(candidate => candidate.Id == transactionId && candidate.AccountSetId == accountSetId)
+            .Take(1)
+            .ToListAsync(cancellationToken);
+
+        return matched.Count == 0 ? null : matched[0];
+    }
+
+    /// <inheritdoc />
+    public async Task<EditableTransaction?> FindEditableAsync(
+        int transactionId,
+        int accountSetId,
+        CancellationToken cancellationToken = default)
+    {
+        // 取交易头这一段与 FindAsync 同一口径，直接委托它——两处各写一份查询，
+        // 日后「怎么算属于本账套」若有变化，就会有一处悄悄不跟
+        var transaction = await FindAsync(transactionId, accountSetId, cancellationToken);
+
+        if (transaction is null)
+        {
+            return null;
+        }
+
+        // 主账户方向由交易类型决定；期初余额没有这个概念（null），故期初交易在此返回 null——
+        // 它的两条明细（目标账户 + 账本账户）定不出主次，本方法无法回答「改哪一条」。
+        // **这个 null 不等于「该笔账不存在」**：调用方按类型先行判定，期初交易在那一步就拿到 400，
+        // 走不到这里（见 TransactionEndpoints 的改名端点注释）。
+        if (transaction.Type.PrimaryDirection() is not { } primaryDirection)
+        {
+            return null;
+        }
+
+        var entries = await db.Queryable<TransactionEntry>()
+            .Where(entry => entry.TransactionId == transaction.Id)
+            .OrderBy(entry => entry.Id)
+            .ToListAsync(cancellationToken);
+
+        // 恰两条、且能定出主账户那条与对手方那条，才是本能力认识的形态。
+        // 每笔交易恒有借贷两条明细（唯一写账入口 WriteBalancedTransactionAsync 保证），
+        // 出现别的形态说明数据被外力改过——此处不做「尽量猜一条」的兜底：
+        // 猜错方向会让编辑写到错误的账户上，比干脆拒绝危险得多。
+        // 对手方的取法与查询侧同义（「同交易中方向不同的第一条」，见 EntryQueryService），
+        // 两处口径一致才不会出现「界面上看到的对手方」与「编辑时改的对手方」不是同一个。
+        var primary = entries.FirstOrDefault(entry => entry.Direction == primaryDirection);
+        var counterparty = entries.FirstOrDefault(entry => entry.Direction != primaryDirection);
+
+        if (entries.Count != 2 || primary is null || counterparty is null)
+        {
+            return null;
+        }
+
+        var accountIds = new[] { primary.AccountId, counterparty.AccountId };
+        var accounts = await db.Queryable<Account>()
+            .Where(account => accountIds.Contains(account.Id))
+            .ToListAsync(cancellationToken);
+
+        // 明细指向的账户在库里不存在（外键未被数据库强制）时同样归入「形态不认识」：
+        // 两个端点缺一不可，凑不出完整的一笔账。
+        var primaryAccount = accounts.FirstOrDefault(account => account.Id == primary.AccountId);
+        var counterpartyAccount = accounts.FirstOrDefault(account => account.Id == counterparty.AccountId);
+
+        if (primaryAccount is null || counterpartyAccount is null)
+        {
+            return null;
+        }
+
+        return new EditableTransaction(transaction, primaryAccount, counterpartyAccount);
+    }
+
+    /// <inheritdoc />
+    public async Task<Transaction?> UpdateUserTransactionAsync(
+        Transaction transaction,
+        Account account,
+        Account? counterpartyAccount,
+        Category? category,
+        decimal amount,
+        DateTime occurredAt,
+        string summary,
+        string? remark,
+        CancellationToken cancellationToken = default)
+    {
+        // 期初余额改不得：它的金额恒等于其目标账户的期初余额、且每账户至多一条
+        // （后者是 BackfillOpeningBalancesAsync 的幂等判据）。允许改它，两条不变量会同时失效，
+        // 且「账户的期初金额」会与「那条期初分录」脱钩。端点层已先判一次并给出 400，
+        // 此处再判依然是「守住唯一写账入口」——本方法与 RecordUserTransactionAsync 是同一扇门。
+        if (!transaction.Type.IsUserRecordable())
+        {
+            throw new ArgumentException($"交易类型 {transaction.Type} 不支持修改", nameof(transaction));
+        }
+
+        // 币种一致与分类同账套两条不变量与新建**共用同一份判据**：改一笔账与记一笔账
+        // 在这两点上是同一件事，各写一份迟早只改一处
+        EnsureWriteInvariants(account, counterpartyAccount, category);
+
+        // 对手方为空 → 按**新主账户**的币种取账本账户：这样「把一笔支出从 CNY 账户改到 USD 账户」
+        // 也不会把人民币的金额记到美元的账本上（跨币种配平是没有意义的数）。
+        var counterparty = counterpartyAccount
+            ?? await EnsureLedgerAccountAsync(transaction.AccountSetId, account.CurrencyCode, cancellationToken);
+
+        // 主账户方向由**类型**决定，而类型不可改，故两条明细的方向一律不变。
+        var primaryDirection = transaction.Type.PrimaryDirection()
+            ?? throw new ArgumentException($"交易类型 {transaction.Type} 不支持修改，无法确定主账户明细的方向", nameof(transaction));
+
+        // 交易头只改用户可改的字段：Type / AccountSetId / CreatedByUserId 一律不动
+        // ——改账不换记账人、不换账套（同 AccountService.UpdateAsync「不可改字段不进契约」的取舍）。
+        transaction.OccurredAt = occurredAt;
+        transaction.Summary = summary;
+        transaction.Remark = remark;
+        transaction.CategoryId = category?.Id;
+
+        await db.Ado.UseTranAsync(async () =>
+        {
+            // 先在事务内取回两条明细：取回与改写之间若被并发改动，事务内的读能看到一致快照。
+            // 与 FindEditableAsync 同一取法（按明细主键升序），两处口径一致。
+            var entries = await db.Queryable<TransactionEntry>()
+                .Where(entry => entry.TransactionId == transaction.Id)
+                .OrderBy(entry => entry.Id)
+                .ToListAsync(cancellationToken);
+
+            var primary = entries.FirstOrDefault(entry => entry.Direction == primaryDirection);
+            var other = entries.FirstOrDefault(entry => entry.Direction != primaryDirection);
+
+            // 形态不是「恰两条、主账户与对手方各一条」时抛异常而不猜：FindEditableAsync 已用同一判据
+            // 把这类账挡在端点之外，走到这里说明库里出现了本系统产生不了的形态（数据被外力改过）。
+            // 静默改写其中两条会留下第三条对不上的明细，那才是真正的账不平。
+            if (entries.Count != 2 || primary is null || other is null)
+            {
+                throw new InvalidOperationException(
+                    $"交易 {transaction.Id} 的明细不是「借贷各一条」，无法改写");
+            }
+
+            // 只改账户与金额，方向保持原值：主账户那条的方向由类型决定（类型不可改），
+            // 对手方那条恒取相反方向。删旧插新会换掉明细主键，而主键是查询侧
+            // 「同一时刻多条明细」的稳定排序键（见 EntryQueryService 的三级排序），换它会让翻页行序漂移。
+            primary.AccountId = account.Id;
+            primary.Amount = amount;
+            other.AccountId = counterparty.Id;
+            other.Amount = amount;
+
+            await db.Updateable(transaction)
+                .UpdateColumns(tx => new { tx.OccurredAt, tx.Summary, tx.Remark, tx.CategoryId })
+                .ExecuteCommandAsync(cancellationToken);
+
+            await db.Updateable(new List<TransactionEntry> { primary, other })
+                .ExecuteCommandAsync(cancellationToken);
+        });
+
+        return transaction;
+    }
+
+    /// <summary>
+    /// 校验「唯一写账入口」的两条不变量：币种一致、分类同账套。
+    /// </summary>
+    /// <param name="account">目标账户（收入账户 / 支出账户 / 转出账户）。</param>
+    /// <param name="counterpartyAccount">对手方账户；<c>null</c> 即「未指定」，不看币种。</param>
+    /// <param name="category">分类；<c>null</c> 即「未分类」。</param>
+    /// <remarks>
+    /// 新建与修改两条写入路径**共用本方法**：这两条不变量在两处是同一件事，
+    /// 各写一份则只会在改其一的时候漏掉另一处。
+    /// <para>
+    /// **抛异常而非返回 null**：调用方传错参数是编码错误，不是用户可以修正的输入错误，
+    /// 静默降级只会掩盖 bug。端点层已先判一次并给出 400，此处再判是因为本方法是唯一的写入口——
+    /// 把它守在这里，「跨币种交易」与「跨账套分类」在库里就不可能存在，
+    /// 与「配平由等额反向保证」同一性质（分类表没有可见性维度可依赖，这道卡只能设在写入路径上）。
+    /// </para>
+    /// </remarks>
+    private static void EnsureWriteInvariants(Account account, Account? counterpartyAccount, Category? category)
+    {
+        if (counterpartyAccount is not null
+            && !string.Equals(counterpartyAccount.CurrencyCode, account.CurrencyCode, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException(
+                $"对手方账户的币种（{counterpartyAccount.CurrencyCode}）与目标账户（{account.CurrencyCode}）不一致",
+                nameof(counterpartyAccount));
+        }
+
+        if (category is not null && category.AccountSetId != account.AccountSetId)
+        {
+            throw new ArgumentException(
+                $"分类（主键 {category.Id}）属于账套 {category.AccountSetId}，与交易所在账套 {account.AccountSetId} 不一致",
+                nameof(category));
+        }
     }
 
     /// <summary>

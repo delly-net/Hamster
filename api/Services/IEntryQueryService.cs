@@ -93,6 +93,9 @@ public interface IEntryQueryService
 /// <param name="CategoryName">
 /// 交易分类名称；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。
 /// </param>
+/// <param name="IsPrimary">
+/// 这条明细是否挂在**主账户**上（主账户 = 用户记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
+/// </param>
 /// <remarks>
 /// 分类挂在**交易**上而非明细上（见 <see cref="Transaction.CategoryId"/>），
 /// 故同一笔交易的两条明细会得到同一个分类——这是刻意的：一笔转账只应有一个分类。
@@ -100,6 +103,18 @@ public interface IEntryQueryService
 /// 分类**没有可见性档位**（不像对手方那样分 Account / Ledger / Hidden 三档）：
 /// 分类表没有可见性维度，账套内所有成员看到的是同一份完整字典，
 /// 故这里直接给出主键与名称，不需要「可见 / 不可见」这层区分。
+/// </para>
+/// <para>
+/// <see cref="IsPrimary"/> 的判据是「<see cref="Direction"/> 等于该交易类型的
+/// <see cref="TransactionTypeExtensions.PrimaryDirection"/>」，由查询侧在内存里算得——
+/// 界面据它把「被点的那一行」还原成「主账户 + 对手方」两个端点，从而**不必自己按方向再推一遍**。
+/// 判错的后果是编辑写到错误的账户上（数据损坏），故该判据只定义一处、不向前端镜像
+/// （同 #43 把 <c>signedAmount</c> 算好下发而不让前端再算一次符号）。
+/// </para>
+/// <para>
+/// 一笔用户交易里**恰有一行**为 <c>true</c>（两条明细方向恒相反）；
+/// <see cref="TransactionType.OpeningBalance"/> 的行恒为 <c>false</c>——期初没有「主账户」这一概念
+/// （它的方向由期初金额的符号决定），而期初本就不支持编辑，故该字段对它无意义。
 /// </para>
 /// </remarks>
 public sealed record EntryQueryRow(
@@ -117,7 +132,8 @@ public sealed record EntryQueryRow(
     int? CounterpartyAccountId,
     string? CounterpartyName,
     int? CategoryId,
-    string? CategoryName);
+    string? CategoryName,
+    bool IsPrimary);
 
 /// <summary>一页明细。</summary>
 /// <param name="Items">本页明细。</param>

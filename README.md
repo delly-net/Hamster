@@ -526,6 +526,16 @@ columns and its green / red colouring derive from it, so a caller **need not** r
 direction-to-sign conversion — that conversion has exactly one definition
 (`EntryDirectionExtensions.SignedAmount`), shared with the balance roll-up `SumSignedAmountsAsync`.
 
+**`isPrimary` marks "this entry stands for the whole transaction"**: it compares the row's
+`direction` with the transaction type's **primary direction**
+(`TransactionTypeExtensions.PrimaryDirection` — income is a debit, expenses and transfers are
+credits). It exists for any presentation that shows a transaction's amount **once**: the income /
+expense columns, and the single amount on a narrow-screen card, must first know *which* entry
+carries the transaction's amount, or both rows of one transfer would print it. It is **always
+`false` for opening-balance transactions** — they have no primary direction (their two entries are
+the two symmetric faces of "this account now has a balance"), so there is no entry that stands for
+the whole. That does not stop them appearing in the entry query as usual.
+
 Ordering is `occurred_at` ascending, then transaction id, then entry id. The third key is not
 decoration: without it, rows sharing a timestamp could swap places between requests and appear on
 two pages at once.
@@ -603,6 +613,68 @@ the same pair** — a transfer's two rows share one category.
 Failure contract: 400 without the account-set header ("请先选择账套"); the account set unknown or not
 yours → 403; caller not found → 401; a malformed `from` / `to`, `from` later than `to`, `page < 1`, or
 `pageSize` outside `1..200` → 400 as a field-level error.
+
+###### Updating an entry
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `PUT /api/transactions/{id}` | Bearer | Rewrites an already-recorded income, expense or transfer (200). The body mirrors `POST` but carries **no `type` and no `currencyCode`**: `{ accountId, amount, occurredAt, summary, remark, counterpartyAccountId, counterpartyName, categoryId, categoryName }`, every field governed by the same rules as `POST`. Returns the rewritten transaction (with `id` / `accountName` / `counterpartyName` / `categoryName`) |
+
+**What is rewritten is the whole transaction, not a single entry row.** A transaction consists of one
+debit and one credit; both are **rewritten together** with their directions unchanged, so
+double-entry balance still holds afterwards — editing only one side would unbalance the books. This
+is precisely why "sync the other double-entry rows" needs nothing from the caller: the two entries
+belong to one transaction and **have no independent write path of their own**.
+
+**Account balances need no extra step.** A balance is the signed roll-up of all entries
+(`SumSignedAmountsAsync`) and **no balance column exists** — once the entries change, both the old
+and the new account report new balances on the next read. "Recalculate the affected account balances"
+is, in this system, just "read again": there is no cache or summary table to miss.
+
+**The transaction type cannot be changed**, so the body has **no `type` field at all** (rather than
+accepting and ignoring it, which would let a caller believe the change went through). The type
+decides the two entries' directions, and swapping income for expense is semantically a different
+posting. **Opening-balance transactions cannot be modified**: their amount is by definition the
+account's opening balance and there is at most one per account, so editing one would break both
+invariants — the response is 400 with the error on the `type` field (`errors.type`). A 404 is
+deliberately **not** used here: the user *can see* that opening row in the entry query, so calling it
+"not found" would be a lie. "Does it exist" (404) and "may it be changed" (400) are two questions,
+so the endpoint checks the type off the transaction header before resolving the shape.
+
+**The body has no `currencyCode`**: the transaction table has no currency column, so the currency
+follows the **new primary account**. In an edit the account is already given, and a currency field on
+top of it would only add "the currency disagrees with the primary account" 400s — noise. The
+counterparty's currency must still match the primary account's (400 otherwise, same rule as
+recording) — changing the account changes the currency, and cross-currency is still refused.
+
+`occurredAt` is **required** on this endpoint, deliberately unlike `POST`'s "omitted means now": this
+request is a full replacement (an empty remark clears the remark), so reading a missing time as "keep
+the current value" would put two meanings into one contract. To keep the original time, send it back.
+
+`accountId` and `counterpartyAccountId` keep **all** of `POST`'s constraints (account type, same
+account, visibility, currency) and share its single resolution implementation: editing a posting and
+recording one are the same act on these points. **Admission**: the transaction must belong to the
+current account set, and the accounts behind **both** of its entries must be on the operator's side
+(the primary account must be visible; the counterparty must be visible, or be the system ledger
+account — the ledger account's visibility is `null` for everyone, yet it is the legitimate
+counterparty of nearly every user income/expense, so demanding visibility across the board would
+mark most of them uneditable). Otherwise the response is the same 404 as "no such transaction",
+leaking no existence: when the counterparty is someone else's personal account, the other half of
+that posting is in their name, and editing it would be editing their books.
+
+**UPDATE only — no delete-and-reinsert**: the transaction id and both entry ids are **unchanged**
+(entry ids are the stable sort key of the entry query, and changing them would make page ordering
+drift), and no row is added. The rewritten entries read back from `GET /api/entries` as usual, with
+both rows of the same `transactionId` changing in step. Failure contract matches `GET /api/entries`
+(400 without the account-set header, 403 for an account set that is not yours, 401 for an unknown
+caller); field-level errors are 400 and are **aggregated**.
+
+**The UI entry point is the 【修改】 button on each entry-query row**; opening-balance rows get no
+button, and neither do rows whose `counterpartyKind` is `Hidden` / `None` — those two cases are
+exactly the preconditions of the 400 / 404 above, so frontend and backend share one judgement (the
+same `counterpartyKind`): one decides whether to offer the entry point, the other whether to accept
+the request. The frontend check is a presentation-layer choice; the backend 400 / 404 is the one that
+cannot be bypassed. They are not the same thing being enforced twice.
 
 ##### Upgrading an existing database
 

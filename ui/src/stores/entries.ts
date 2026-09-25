@@ -134,6 +134,21 @@ export interface Entry {
    * **已停用分类的名称照常给出**：停用是「不再供新记账选择」，不是「历史上从未用过」。
    */
   categoryName: string | null
+  /**
+   * 这条明细是否挂在**主账户**上（主账户 = 记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
+   *
+   * 一笔交易的两条明细里恰有一行为 `true`（两条明细方向恒相反）；
+   * 期初余额的行恒为 `false`——期初没有「主账户」这一概念（它的方向由期初金额的符号决定）。
+   *
+   * **改账要用它**：一笔交易可能占两行（转账的两端都会呈现），从任一行点开编辑时，
+   * 都要把「这一行」还原成「主账户 + 对手方」两个端点——本行为 `true` 则 `accountId` 即主账户，
+   * 否则主账户是它的对手方（`counterpartyAccountId`）。
+   *
+   * **判据由后端下发，前端不镜像**：它是「方向是否等于该类型的主账户方向」，
+   * 算错的后果是「编辑写到了错误的账户上」（数据损坏），故与 `signedAmount` 同一取舍
+   * ——后端算好给出，前端只消费。
+   */
+  isPrimary: boolean
 }
 
 /** 查询条件；`from` / `to` 均为 **ISO 8601 UTC** 且为闭区间端点。 */
@@ -161,6 +176,30 @@ const ENTRIES_PATH = '/api/entries'
 /** 取交易类型的中文标签；未知取值回退原字符串。 */
 export function transactionTypeLabel(type: TransactionType): string {
   return TRANSACTION_TYPE_LABELS[type] ?? String(type)
+}
+
+/**
+ * 该行是否可编辑——**决定界面上是否呈现编辑入口**。
+ *
+ * 两个条件，与后端 `PUT /api/transactions/{id}` 的准入条件**同源**：
+ *
+ * 1. **类型可由用户记账**：期初余额由系统在账户创建时生成，它的金额恒等于账户的期初余额、
+ *    且每账户至多一条，改它会让这两条不变量同时失效（后端 400）。
+ * 2. **对手方档位为 `Account` 或 `Ledger`**：`Ledger` 是系统账本账户，它对任何人不呈现，
+ *    却是每一笔收支的合法对手方，照常可编辑；`Hidden` 表示对手方是**当前用户看不见的账户**
+ *    ——那笔账的另一半在别人名下，改它等于替别人改账（后端 404）；`None` 是数据问题（没有对手方），
+ *    连对手方都定不出来，自然也谈不上「同步改写两条关联明细」。
+ *
+ * **不可编辑时不出按钮，而不是出禁用态按钮**：禁用控件占位会让用户去猜「为什么不能点」，
+ * 而这里的两个原因（系统生成、别人名下的账户）都不是用户在当前页面能解决的。
+ *
+ * 判据放这里一处，供页面与验证共用——写成两份的话，界面上的入口与后端的准入迟早对不上。
+ */
+export function isEntryEditable(entry: Entry): boolean {
+  return (
+    entry.transactionType !== 'OpeningBalance' &&
+    (entry.counterpartyKind === 'Account' || entry.counterpartyKind === 'Ledger')
+  )
 }
 
 export const useEntriesStore = defineStore('entries', () => {

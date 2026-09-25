@@ -30,7 +30,11 @@ import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
-import { useTransactionsStore, type RecordableTransactionType } from '@/stores/transactions'
+import {
+  TRANSACTION_MODE_META,
+  useTransactionsStore,
+  type RecordableTransactionType,
+} from '@/stores/transactions'
 
 const props = defineProps<{
   /** 记账类型：`Income` 收入 / `Expense` 支出 / `Transfer` 转账。 */
@@ -40,48 +44,8 @@ const props = defineProps<{
 /** 是否在记一笔转账。转账的几处差异都由它分支。 */
 const isTransfer = computed(() => props.mode === 'Transfer')
 
-/**
- * 各记账类型的文案与账户角色。
- *
- * 用查找表而非嵌套三元表达式：类型从两种涨到三种后，三元表达式会退化成
- * 「A ? x : B ? y : z」这类读不出对应关系的式子，而这张表把「哪种记账用哪套词」摊平了，
- * 新增类型只需加一行、漏加时 TypeScript 会因 `Record` 缺键当场报错。
- */
-const MODE_META: Record<
-  RecordableTransactionType,
-  {
-    /** 记账类型的中文名，用于按钮与提示文案。 */
-    label: string
-    /** 主账户的字段名。 */
-    primaryLabel: string
-    /** 对手方账户的字段名。 */
-    counterpartyLabel: string
-    /** 摘要输入框的占位示例。 */
-    summaryPlaceholder: string
-  }
-> = {
-  Income: {
-    label: '收入',
-    primaryLabel: '收入账户',
-    counterpartyLabel: '来源账户',
-    summaryPlaceholder: '如：工资',
-  },
-  Expense: {
-    label: '支出',
-    primaryLabel: '支出账户',
-    counterpartyLabel: '目标账户',
-    summaryPlaceholder: '如：午餐',
-  },
-  Transfer: {
-    label: '转账',
-    primaryLabel: '转出账户',
-    counterpartyLabel: '转入账户',
-    summaryPlaceholder: '如：还信用卡',
-  },
-}
-
-/** 当前记账类型的文案与账户角色。 */
-const meta = computed(() => MODE_META[props.mode])
+/** 当前记账类型的文案与账户角色；表在 store 里，改账弹窗共用同一份。 */
+const meta = computed(() => TRANSACTION_MODE_META[props.mode])
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()

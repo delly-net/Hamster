@@ -135,6 +135,14 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                     categoryName = resolved;
                 }
 
+                // 「这条明细是否挂在主账户上」的判据只有一处定义（含收入为何是借方、
+                // 支出与转账为何同向），见 TransactionTypeExtensions.PrimaryDirection。
+                // **在内存里算、不进 Select 投影**：SqlSugar 不翻译扩展方法（同上面 moneyIds 那处）。
+                // 期初余额没有主账户方向（PrimaryDirection 返回 null），故期初行恒为 false——
+                // 那不是「算不出来」，而是该概念对它本就不存在（详见 EntryQueryRow.IsPrimary 的说明）。
+                var isPrimary = row.Type.PrimaryDirection() is { } primaryDirection
+                    && row.Direction == primaryDirection;
+
                 return new EntryQueryRow(
                     row.EntryId,
                     row.TransactionId,
@@ -150,7 +158,8 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                     counterparty.AccountId,
                     counterparty.Name,
                     categoryId,
-                    categoryName);
+                    categoryName,
+                    isPrimary);
             })
             .ToArray();
 

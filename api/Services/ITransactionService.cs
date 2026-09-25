@@ -136,6 +136,122 @@ public interface ITransactionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 按主键取当前账套内的交易头。
+    /// </summary>
+    /// <param name="transactionId">交易主键。</param>
+    /// <param name="accountSetId">当前账套主键；交易不属于该账套时视为不存在。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>交易实体；不存在或不属于该账套时返回 <c>null</c>。</returns>
+    /// <remarks>
+    /// 与 <see cref="FindEditableAsync"/> 的分工是**「在不在」与「能不能改」**：本方法只看存在性与归属，
+    /// 不看形态、也不取明细；后者还要定出主账户与对手方两条明细挂靠的账户。
+    /// <para>
+    /// 编辑端点需要**在解析形态之前**先看一眼类型（期初余额交易不可改，且它与「不存在」响应码不同），
+    /// 而形态解析拿不到期初交易的类型——它没有主账户方向，只能返回 <c>null</c>。
+    /// 两件事挤在一次查询里，就必然有一方的判据落空。
+    /// </para>
+    /// </remarks>
+    Task<Transaction?> FindAsync(
+        int transactionId,
+        int accountSetId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 取一笔待编辑的交易，连同其借贷两条明细挂靠的**账户实体**。
+    /// </summary>
+    /// <param name="transactionId">交易主键。</param>
+    /// <param name="accountSetId">当前账套主键；交易不属于该账套时视为不存在。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>
+    /// 交易头与两个端点账户；交易不存在、不属于该账套、或**形态不是本能力认识的那种**
+    /// （明细不是恰两条、或缺少主账户方向的那条）时返回 <c>null</c>。
+    /// </returns>
+    /// <remarks>
+    /// 返回**账户实体**而非仅主键：编辑端点要判「这两个账户对我是否可见」，
+    /// 而账本账户必须与「他人不可见的账户」区分开——它对任何人的可见性判定都是 <c>null</c>，
+    /// 却是每一笔用户收支的合法对手方。区分依据是 <see cref="Account.IsSystem"/>，
+    /// 故端点需要拿到实体本身。
+    /// <para>
+    /// 可见性判定本身**不在这里**做（本服务不注入 <see cref="IAccountService"/>，
+    /// 理由见 <see cref="RecordUserTransactionAsync"/>），本方法只负责把事实取回来。
+    /// </para>
+    /// <para>
+    /// **形态不认识时返回 <c>null</c> 而不是抛异常**：这类数据在本系统无法产生
+    /// （唯一写账入口 <c>TransactionService.WriteBalancedTransactionAsync</c> 恒写入两条等额反向的明细），
+    /// 返回 null 的后果是该笔账在编辑端点上一律 404，不会把用户引向一次半途的改写。
+    /// </para>
+    /// </remarks>
+    Task<EditableTransaction?> FindEditableAsync(
+        int transactionId,
+        int accountSetId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 改写一笔已存在的用户交易：交易头 + 借贷**两条明细一并改写**，改完仍配平。
+    /// </summary>
+    /// <param name="transaction">
+    /// 待改写的交易实体（须已落库、且由 <see cref="FindEditableAsync"/> 取回），
+    /// 其 <see cref="Transaction.Type"/> 不可改——两条明细的**方向由类型决定**，
+    /// 改类型等于要求整笔重算方向，而「收支互改」在语义上是两笔不同的账。
+    /// </param>
+    /// <param name="account">
+    /// 新的主账户（用户选定的那个账户），须已取得主键且为当前用户**可见**的账户。
+    /// 收入时它是收入账户，支出与转账时它是支出账户 / 转出账户。
+    /// </param>
+    /// <param name="counterpartyAccount">
+    /// 新的对手方账户，**可空**；语义与 <see cref="RecordUserTransactionAsync"/> 完全一致
+    /// （<c>null</c> 即落回 <paramref name="account"/> **所属币种**的系统账本账户——
+    /// 按新主账户的币种取，故改到一个不同币种的账户上也不会跨币种）。
+    /// </param>
+    /// <param name="category">新的分类，<c>null</c> 即「未分类」；非空时须与交易同账套。</param>
+    /// <param name="amount">新的金额，**恒为正**。</param>
+    /// <param name="occurredAt">新的业务发生时间（UTC）。</param>
+    /// <param name="summary">新的摘要（调用方需保证已 Trim 且非空）。</param>
+    /// <param name="remark">新的备注；无备注时传 <c>null</c>（**是覆盖而非保留**：留空即清空备注）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>改写后的交易（即传入的实体）；交易已被并发删除时返回 <c>null</c>。</returns>
+    /// <remarks>
+    /// **就地 UPDATE 原有的两条明细，不删旧插新**：明细主键是查询侧「同一时刻多条明细」的
+    /// 稳定排序键（见 <c>EntryQueryService</c> 的三级排序），换主键会让翻页时的行序漂移。
+    /// <para>
+    /// **交易与明细同事务**（<c>db.Ado.UseTranAsync</c>）：中途失败会留下一笔
+    /// 「头已改、明细未改」的账，其金额与明细对不上。
+    /// </para>
+    /// <para>
+    /// **只更新可改字段**：交易头写 <see cref="Transaction.OccurredAt"/> /
+    /// <see cref="Transaction.Summary"/> / <see cref="Transaction.Remark"/> /
+    /// <see cref="Transaction.CategoryId"/>，明细写 <see cref="TransactionEntry.AccountId"/> 与
+    /// <see cref="TransactionEntry.Amount"/>。<see cref="Transaction.Type"/>、
+    /// <see cref="Transaction.AccountSetId"/>、<see cref="Transaction.CreatedByUserId"/>
+    /// 与明细的 <see cref="TransactionEntry.Direction"/> 一律不动——改账不换记账人、不换账套，
+    /// 也不改方向（方向由类型决定，而类型不可改）。同 <c>AccountService.UpdateAsync</c>
+    /// 「把不可改字段从契约中整个删掉」的取舍。
+    /// </para>
+    /// <para>
+    /// **余额不需要任何写动作**：余额是派生值（<see cref="SumSignedAmountsAsync"/> 对明细的
+    /// 有符号汇总），明细一改，新旧账户的余额下次查询即为新值。库里没有余额列可写，也不该有。
+    /// </para>
+    /// <para>
+    /// **不变量与 <see cref="RecordUserTransactionAsync"/> 同源**（币种一致、分类同账套），
+    /// 由同一份判定守卫；<paramref name="transaction"/>.Type 不满足
+    /// <see cref="TransactionTypeExtensions.IsUserRecordable"/> 时抛 <see cref="ArgumentException"/>
+    /// ——期初余额交易改不得（它的金额恒等于账户的期初余额、且每账户至多一条，
+    /// 允许改这两条不变量会同时失效）。端点层已先判一次并给出 400，此处再判是因为
+    /// 本方法与 <see cref="RecordUserTransactionAsync"/> 一样是**唯一写账入口**。
+    /// </para>
+    /// </remarks>
+    Task<Transaction?> UpdateUserTransactionAsync(
+        Transaction transaction,
+        Account account,
+        Account? counterpartyAccount,
+        Category? category,
+        decimal amount,
+        DateTime occurredAt,
+        string summary,
+        string? remark,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 批量取账户余额的**有符号汇总**（借方为正、贷方为负之和），用于派生出账户余额。
     /// </summary>
     /// <param name="accountSetId">账套主键；只汇总该账套内的交易。</param>
@@ -163,3 +279,22 @@ public interface ITransactionService
     /// </remarks>
     Task<int> BackfillOpeningBalancesAsync(CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// 一笔待编辑交易及其两个端点账户。
+/// </summary>
+/// <param name="Transaction">交易头（已落库）。</param>
+/// <param name="PrimaryAccount">
+/// **主账户**明细挂靠的账户（即用户记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
+/// 哪条明细是主账户那条，由 <see cref="TransactionTypeExtensions.PrimaryDirection"/> 判定。
+/// </param>
+/// <param name="CounterpartyAccount">对手方明细挂靠的账户（可能是系统账本账户）。</param>
+/// <remarks>
+/// 两个账户都可能是**当前用户看不见**的：主账户是他人个人账户时（成员间共享的公共账户上
+/// 由别人记的账），或对手方是账本账户时。可见性判定留给端点层——
+/// <see cref="ITransactionService"/> 不注入 <c>IAccountService</c>（见其类头注释）。
+/// </remarks>
+public sealed record EditableTransaction(
+    Transaction Transaction,
+    Account PrimaryAccount,
+    Account CounterpartyAccount);

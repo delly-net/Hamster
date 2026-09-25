@@ -259,6 +259,10 @@ public sealed class EntryEndpoints : IEndpoint
 /// 交易分类名称；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。
 /// 分类名由后端下发（不是前端自己拼的），改名后历史明细自动显示新名字。
 /// </param>
+/// <param name="IsPrimary">
+/// 这条明细是否挂在**主账户**上（主账户 = 用户记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
+/// 一笔交易的两条明细里恰有一行为 <c>true</c>（期初余额的行恒为 <c>false</c>）。
+/// </param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
 /// 对手方分档而非「给名称或给 null」：<c>Ledger</c> 与 <c>Hidden</c> 都不给主键与名称，
@@ -266,6 +270,14 @@ public sealed class EntryEndpoints : IEndpoint
 /// <para>
 /// **分类不分档**：它没有可见性维度（账套内所有成员共用同一份字典），
 /// 故直接给出主键与名称，不像对手方那样需要 <c>Ledger</c> / <c>Hidden</c> 这类遮罩档位。
+/// </para>
+/// <para>
+/// <see cref="IsPrimary"/> 是为**改账**下发的：一笔交易可能占两行（转账的两端都会呈现），
+/// 界面从任一行点开编辑时，都要把「这一行」还原成「主账户 + 对手方」两个端点——
+/// 该行是主账户行则 <c>accountId</c> 即主账户，否则主账户是它的对手方。
+/// 这个判据（方向是否等于该类型的主账户方向）只定义在后端一处、随本字段下发，
+/// **前端不镜像**：它与 <see cref="SignedAmount"/> 同一性质——算错的后果是
+/// 「编辑写到了错误的账户上」（数据损坏），不是显示问题，故由后端算好给出。
 /// </para>
 /// </remarks>
 public sealed record EntryDto(
@@ -284,7 +296,8 @@ public sealed record EntryDto(
     int? CounterpartyAccountId,
     string? CounterpartyName,
     int? CategoryId,
-    string? CategoryName)
+    string? CategoryName,
+    bool IsPrimary)
 {
     /// <summary>由查询结果构造 DTO。</summary>
     /// <param name="row">明细行。</param>
@@ -313,7 +326,10 @@ public sealed record EntryDto(
         // 分类是交易级的属性，同一笔交易的两条明细会拿到同一个分类——
         // 这不是重复，而是「一笔转账只应有一个分类」在明细视图下的如实呈现
         row.CategoryId,
-        row.CategoryName);
+        row.CategoryName,
+        // 原样透传：判据在查询侧算得（见 EntryQueryRow.IsPrimary 的说明），
+        // DTO 不重算——两处各算一遍正是它要避免的漂移
+        row.IsPrimary);
 }
 
 /// <summary>一页账目明细。</summary>
