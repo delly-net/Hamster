@@ -31,6 +31,12 @@ public enum AccountType
     Liability = 3,
 
     /// <summary>往来账户：人情往来与应收应付（借出、借入、待收报销等）。</summary>
+    /// <remarks>
+    /// 它记录的是「谁欠谁」而不是「钱放在哪」，故不属于钱账户
+    /// （见 <see cref="AccountTypeExtensions.IsMoneyAccount"/>）：不能作为转账的端点，
+    /// 其明细也不在「账目明细」页呈现。它照常出现在账户管理页，并作为**对手方**
+    /// 出现在钱账户那些明细行的对手方列上——「支出 现金 → 老王」的那笔往来正记在它上面。
+    /// </remarks>
     Contact = 4,
 }
 
@@ -59,26 +65,59 @@ public static class AccountTypeExtensions
     public static bool IsUserAssignable(this AccountType type) => type != AccountType.Ledger;
 
     /// <summary>
+    /// 该类型是否是「**钱本身**」——钱实际放在哪里。
+    /// </summary>
+    /// <param name="type">账户类型。</param>
+    /// <returns>是钱账户返回 <c>true</c>。</returns>
+    /// <remarks>
+    /// 只有 <see cref="AccountType.Fund"/>（资金账户）与 <see cref="AccountType.Liability"/>（负债账户）
+    /// 返回 <c>true</c>——现金、银行卡、电子钱包，以及信用卡、借款。
+    /// <para>
+    /// <see cref="AccountType.Contact"/> 返回 <c>false</c>：往来账户是人情往来与应收应付，
+    /// 它记录的是「谁欠谁」而不是「钱放在哪」。
+    /// <see cref="AccountType.Ledger"/> 返回 <c>false</c>：它是系统内部账户，对任何用户不呈现，
+    /// 也不接受手工指定（见 <see cref="IsUserAssignable"/>）。
+    /// </para>
+    /// <para>
+    /// 本谓词是**共用定义**，当前有两个消费点，且两处的依据是同一句话（往来账户不是钱）：
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// **转账的端点**（<see cref="IsTransferAccount"/>）：把钱在两处「钱」之间挪动，两端都必须是钱。
+    /// </description></item>
+    /// <item><description>
+    /// **账目明细的呈现**（<c>EntryQueryService</c>）：明细页回答的是「钱动在哪个账户」，
+    /// 往来账户上的明细是「谁欠谁」的另一本账，不在该页呈现；它只作为**对手方**出现在
+    /// 钱账户那些行的对手方列上（如「支出 现金 → 老王」）。
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// 两条规则是同一条集合，故只在此处写一遍：写成两份清单必然漂移——新增账户类型时改了一处、
+    /// 另一处静默地继续把它当钱看。
+    /// </para>
+    /// <para>
+    /// **注意**：与 <see cref="IsUserAssignable"/> 一样，扩展方法**不能被 SqlSugar 翻译**成 SQL。
+    /// 本谓词只能作用在**已在内存里**的账户列表上（<c>EntryQueryService</c> 正是如此），
+    /// 不得写进查询表达式树——SQL 侧需要该条件时只能写枚举字面量，理由见
+    /// <c>AccountService.ListByAccountSetAsync</c>。
+    /// </para>
+    /// </remarks>
+    public static bool IsMoneyAccount(this AccountType type) =>
+        type is AccountType.Fund or AccountType.Liability;
+
+    /// <summary>
     /// 该类型是否可作为一笔转账的转出账户或转入账户。
     /// </summary>
     /// <param name="type">账户类型。</param>
     /// <returns>可作为转账端点返回 <c>true</c>。</returns>
     /// <remarks>
-    /// 只有 <see cref="AccountType.Fund"/>（资金账户）与 <see cref="AccountType.Liability"/>（负债账户）
-    /// 返回 <c>true</c>：这两类才是「钱本身」——现金、银行卡、电子钱包，以及信用卡、借款。
-    /// 转账的语义就是把钱在两处「钱」之间挪动，两个端点都必须是钱。
+    /// 转账的语义就是把钱在两处「钱」之间挪动，两个端点都必须是钱，故本方法**就是**
+    /// <see cref="IsMoneyAccount"/>——它只是该集合在「转账端点」这个语境下的名字。
     /// <para>
-    /// <see cref="AccountType.Contact"/> 返回 <c>false</c>：往来账户是人情往来与应收应付，
-    /// 它记录的是「谁欠谁」而不是「钱放在哪」，钱转进转出它并不改变钱的所在。
-    /// <see cref="AccountType.Ledger"/> 返回 <c>false</c>：它是系统内部账户，对任何用户不呈现，
-    /// 也不接受手工指定（见 <see cref="IsUserAssignable"/>）。
-    /// </para>
-    /// <para>
-    /// 与 <see cref="IsUserAssignable"/> 是同一取舍：规则挂在枚举旁而非端点里，因为它是
-    /// **类型的固有属性**（能不能作为一笔转账的端点），与「谁来校验」无关。端点的校验与错误文案
-    /// 均由此派生，新增枚举取值时不会漏掉落校验，也不会出现「文案说可选、代码其实拒绝」的漂移。
+    /// 保留这个名字而不让端点直接调 <see cref="IsMoneyAccount"/>：端点的错误文案与校验读起来
+    /// 是「转账的两端只能是…」，名字须与它说的那件事一致（同 <see cref="IsUserAssignable"/>
+    /// 「规则挂在枚举旁而非端点里」的取舍）。
     /// </para>
     /// </remarks>
-    public static bool IsTransferAccount(this AccountType type) =>
-        type is AccountType.Fund or AccountType.Liability;
+    public static bool IsTransferAccount(this AccountType type) => type.IsMoneyAccount();
 }

@@ -221,13 +221,23 @@ Four account types exist and users cannot extend them:
 | Liability | `Liability` | Money owed (credit cards, loans); the opening balance may be negative | Yes |
 | Contact | `Contact` | Receivables and payables (lending, borrowing, pending reimbursements) | Yes |
 
-The account type also carries one **usage-side** rule: only **Fund and Liability accounts** may serve
-as either end of a **transfer**. It is decided in exactly one place —
-`AccountTypeExtensions.IsTransferAccount` (shaped like `IsUserAssignable`) — and the transfer
-endpoint's validation and error text derive from it. A Contact account records "who owes whom"
-rather than "where the money sits", so moving money into or out of it does not change where the
-money is; the ledger account is an internal system account. Neither can be an end of a transfer.
-This is not a new account type — only a rule about which types may transfer between each other.
+The account type also carries one **usage-side** rule: only **Fund and Liability accounts** are
+**money itself** — the accounts money actually sits in — decided in exactly one place,
+`AccountTypeExtensions.IsMoneyAccount` (shaped like `IsUserAssignable`). A Contact account records
+"who owes whom" rather than "where the money sits"; the ledger account is an internal system
+account. Neither is money. That one set has two consumers, both resting on the same sentence:
+
+- **The two ends of a transfer**: moving money between two places where money sits, so both ends
+  must be money. On the endpoint side the name is `AccountTypeExtensions.IsTransferAccount` — it
+  **is** `IsMoneyAccount` under the name that fits "transfer end" (the two are identical) — and the
+  transfer endpoint's validation and error text derive from it.
+- **How the entry query presents rows**: that page answers "which account did the money move in",
+  so it presents only entries booked on money accounts. Entries on a Contact account belong to the
+  other ledger (who owes whom) and are not shown there. A Contact account **still appears as the
+  counterparty** on money accounts' rows — in "expense cash → LaoWang" the row's account is cash
+  and its counterparty is LaoWang.
+
+This is not a new account type — only a rule about which types are money.
 
 The **ledger account is a purely internal system account**: it exists only as the double-entry
 counterparty of opening balances. It **cannot be created by hand** (`POST` with `type: "Ledger"`
@@ -528,9 +538,36 @@ entries vanish while the rows sit in the database. `IAccountService` and `ITrans
 **untouched** by this feature, so the opening-balance, balance-aggregation and backfill paths are
 unaffected.
 
-`accountIds` is **intersected** with the visible set rather than validated against it: ids you cannot
-see are silently dropped (no error, no rows), and an empty intersection returns an empty page. Were
-an invisible id to answer 403/404, the parameter would become a probe for other people's accounts.
+**Rows are only ever booked on money accounts.** After the visible account set is fetched, rows are
+filtered by `AccountTypeExtensions.IsMoneyAccount` (Fund / Liability): the page answers "which
+account did the money move in", while a Contact account records "who owes whom" rather than "where
+the money sits", so its entries are the other ledger and **never appear as rows** (its balance and
+its running account are the account-management page's job). The ledger account is an internal
+system account and is excluded for the same reason. **The name source, however, is the full visible
+set**: a Contact account still shows up as the **counterparty** on money accounts' rows ("expense
+cash → LaoWang" has cash as the row's account and LaoWang as `counterpartyName`), so the `Account`
+tier of `counterpartyKind` keeps handing out Contact names. What is excluded is "a Contact account
+as the booking subject", not "a Contact account as a piece of information" — narrowing the name
+source too would only demote that counterparty to the `Hidden` tier and render it as "—".
+
+Excluded rows are **merely not presented**: the transaction's two entries stay balanced in the
+database and the account balance (`SumSignedAmountsAsync`) still counts them. This feature changes
+**no data**. Existing rows whose transaction has **both** entries on Contact accounts (main account
+a Contact account, counterparty auto-created as another Contact account) will no longer appear here
+— no migration and no exemption; the record form's primary-account candidates now exclude Contact
+accounts, so that shape stops being produced.
+
+`accountIds` is **intersected** with the **money account set** rather than validated against it: ids
+you cannot see, and Contact accounts, are silently dropped (no error, no rows), and an empty
+intersection returns an empty page. Were an invisible id to answer 403/404, the parameter would
+become a probe for other people's accounts; answering an error for a Contact account would only
+suggest the caller passed the wrong parameter.
+
+Account filter options need no endpoint of their own: `GET /api/accounts?includeInactive=true`
+already returns the full list including deactivated accounts. But it **does not filter by type**
+(the account-management page needs the complete list, and no `type` parameter is added for this), so
+**a caller building filter options for the entry query must exclude `Contact` itself** — rows never
+include Contact accounts, so offering them as a filter only creates "pick it and find nothing".
 
 The counterparty is the entry with the opposite direction in the same transaction, and it travels as
 a **tiered** `counterpartyKind`:

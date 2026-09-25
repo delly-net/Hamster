@@ -26,7 +26,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         int pageSize,
         CancellationToken cancellationToken = default)
     {
-        // 可见账户集：既是「明细行挂靠账户」的过滤依据，也是「账户名」的来源，一次取回两用。
+        // 可见账户集：一次取回，**两用**——但它对两用的口径并不相同，故下面拆成两个集合。
         // includeInactive 恒为 true：账户是软删除，停用账户上的历史明细仍然查得到（见接口注释）。
         var visible = await accounts.ListByAccountSetAsync(
             accountSetId,
@@ -35,13 +35,32 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             includeInactive: true,
             cancellationToken);
 
+        // 用途一：**账户名的来源**，取全部可见账户（含往来账户）。
+        // 往来账户必须留在这里：它要在「现金 → 老王」这类行的**对手方列**上显示名字。
+        // 若把它一并删掉，ResolveCounterpartiesAsync 会走「不在 nameById 里 → 查类型」的分支，
+        // 命中 Contact ≠ Ledger 而落到 CounterpartyKind.Hidden，界面把「—」渲染到对手方列——
+        // 等于把用户自己的往来账户伪装成不可见账户（Hidden 是权限结论，不是「我不呈现它」）。
         var nameById = visible.ToDictionary(item => item.Account.Id, item => item.Account.Name);
 
-        // 目标账户集：未指定账户时即全部可见账户；指定了则与可见集**求交**而非报错
-        // （不可见的账户被静默剔除，交集为空就返回空页——不泄露「该账户是否存在」）。
+        // 用途二：**明细行的过滤依据**，只取钱账户（资金/负债）。
+        // 本页回答的是「钱动在哪个账户」，而往来账户记的是「谁欠谁」而不是「钱放在哪」——
+        // 它上面的明细是另一本账，不在本页呈现（同一条依据也是转账两端的限制，
+        // 定义见 AccountTypeExtensions.IsMoneyAccount）。它的余额与来往由账户管理页承担。
+        //
+        // 过滤发生在**内存里的 visible 列表**上：SqlSugar 不翻译扩展方法，
+        // 该谓词不能写进 BuildBaseQuery 的表达式树（同 AccountService 里那处枚举字面量）。
+        var moneyIds = visible
+            .Where(item => item.Account.Type.IsMoneyAccount())
+            .Select(item => item.Account.Id)
+            .ToHashSet();
+
+        // 目标账户集：未指定账户时即全部**钱账户**；指定了则与钱账户集**求交**而非报错
+        // （不可见的账户、以及往来账户都被静默剔除，交集为空就返回空页——
+        // 不泄露「该账户是否存在」）。求交同时挡住「传往来账户主键」这条路径：
+        // 候选列表（前端）本就不含往来账户，这里再挡一次，直接构造的请求也查不到它们。
         var targetIds = accountIds is null || accountIds.Count == 0
-            ? nameById.Keys.ToArray()
-            : accountIds.Where(nameById.ContainsKey).Distinct().ToArray();
+            ? moneyIds.ToArray()
+            : accountIds.Where(moneyIds.Contains).Distinct().ToArray();
 
         if (targetIds.Length == 0)
         {
@@ -140,7 +159,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
     /// <summary>构造基础查询：联表 + 账套与账户过滤 + 时间区间。</summary>
     /// <param name="accountSetId">账套主键。</param>
-    /// <param name="targetIds">目标账户主键（必然已与可见账户求交）。</param>
+    /// <param name="targetIds">
+    /// 目标账户主键（必然已与**钱账户集**求交，故只含资金/负债账户）。
+    /// </param>
     /// <param name="hasFrom">是否限制下界。</param>
     /// <param name="fromValue">下界（含）。</param>
     /// <param name="hasTo">是否限制上界。</param>
@@ -170,7 +191,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// 解析本页每条明细的对手方。
     /// </summary>
     /// <param name="rows">本页明细。</param>
-    /// <param name="nameById">可见账户主键到名称的映射。</param>
+    /// <param name="nameById">
+    /// 可见账户主键到名称的映射（**含往来账户**：对手方列要显示「老王」这样的名字）。
+    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>明细主键到对手方描述的映射。</returns>
     /// <remarks>

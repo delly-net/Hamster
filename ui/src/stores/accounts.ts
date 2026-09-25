@@ -58,16 +58,25 @@ export const ACCOUNT_TYPE_OPTIONS: { value: AccountType; label: string }[] = [
 ]
 
 /**
- * 可作为**转账**转出/转入的账户类型（顺序即界面呈现顺序）。
+ * 「**钱本身**」的账户类型——钱实际放在哪里的那几类（顺序即界面呈现顺序）。
  *
- * 与 `ACCOUNT_TYPE_OPTIONS` 的分工是——那者描述「用户可手工建立什么账户」（资金/负债/往来），
- * 本数组描述「哪些账户之间可以转账」（只有资金与负债）。往来账户记录的是「谁欠谁」而不是
- * 「钱放在哪」，钱转进转出它并不改变钱的所在，故不能作为转账端点。
+ * 依据一句话：往来账户记录的是「谁欠谁」而不是「钱放在哪」。由此推出三个消费点，
+ * 它们共用本数组而不是各写一份清单（同一集合写两遍必然漂移）：
  *
- * 这是后端 `AccountTypeExtensions.IsTransferAccount` 的前端镜像：后端会拒绝其余类型（400），
- * 此处少几项只是不让用户先选中再被挡下（与按币种过滤候选同一取舍）。
+ * 1. **转账的两个端点**（`EntryRecordForm.vue` 的对手方候选）：钱在两处「钱」之间挪动。
+ * 2. **记账页的主账户 / 转出账户候选**（同文件）：那是「这笔钱记到哪个账户」，
+ *    与「谁欠谁」无关；若放开往来账户，记到它上面的流水在「账目明细」页将不可见。
+ * 3. **账目明细页的账户筛选项与明细行**（`EntryQueryView.vue`）：该页回答的是
+ *    「钱动在哪个账户」，往来账户上的明细是另一本账（明细行的排除在后端做）。
+ *
+ * **对手方候选是刻意不在其列的**：收入/支出下「支出 现金 → 老王」正是记到往来账户上的写法，
+ * 把往来账户挡在对手方候选中等于砍掉这个功能。
+ *
+ * 这是后端 `AccountTypeExtensions.IsMoneyAccount` 的前端镜像（`IsTransferAccount` 是它
+ * 在转账语境下的名字，两者恒等）：后端会拒绝其余类型（400），此处少几项只是不让用户
+ * 先选中再被挡下（与按币种过滤候选同一取舍）。
  */
-export const TRANSFER_ACCOUNT_TYPES: readonly AccountType[] = ['Fund', 'Liability']
+export const MONEY_ACCOUNT_TYPES: readonly AccountType[] = ['Fund', 'Liability']
 
 /** 账户（后端不回传内部明细）。 */
 export interface Account {

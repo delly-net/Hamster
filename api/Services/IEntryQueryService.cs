@@ -14,6 +14,18 @@ namespace Hamster.Api.Services;
 /// 历史明细仍然挂在它上面，漏掉它会让过去的账凭空消失。
 /// </para>
 /// <para>
+/// **明细行只落在钱账户上**：可见账户集取回后，行的过滤依据是
+/// <see cref="AccountTypeExtensions.IsMoneyAccount"/>（资金/负债）——本页回答的是「钱动在哪个账户」，
+/// 而往来账户记的是「谁欠谁」而不是「钱放在哪」，它上面的明细是另一本账，不在本页呈现
+/// （其余额与来往由账户管理页承担）。账本账户同理：它是系统内部账户，从不作为明细行出现。
+/// </para>
+/// <para>
+/// 但**账户名**来自**全部**可见账户（含往来账户）：往来账户照常作为**对手方**出现在钱账户那些行上
+/// （「支出 现金 → 老王」的对手方就是它），故 <see cref="CounterpartyKind.Account"/> 档的
+/// <see cref="EntryQueryRow.CounterpartyName"/> 照旧给出它的名称。
+/// 行被排除的是「往来账户作为记账主体」，不是「往来账户这个信息」。
+/// </para>
+/// <para>
 /// 本服务是**纯读取**：不写任何表，也不参与「明细方向 → 账户余额」的符号换算
 /// （那个换算的唯一入口是 <see cref="ITransactionService.SumSignedAmountsAsync"/>）。
 /// 明细行对外呈现的是「借贷方向 + 恒正金额」两列，不折算带符号金额。
@@ -33,17 +45,23 @@ public interface IEntryQueryService
     /// </param>
     /// <param name="to">结束时间（UTC，**含端点**）；<c>null</c> 表示不限上界。</param>
     /// <param name="accountIds">
-    /// 目标账户主键集合；<c>null</c> 或空集合表示不限账户（即全部可见账户）。
-    /// **集合会与可见账户求交**：其中不可见的账户被静默剔除，不会因此报错——
-    /// 否则这个参数就成了探测他人账户是否存在的探针（与 <see cref="IAccountService.FindVisibleAsync"/>
-    /// 「不存在、不属于本账套、不可见三种情形同响应」的取舍一致）。
+    /// 目标账户主键集合；<c>null</c> 或空集合表示不限账户（即全部**钱账户**）。
+    /// **集合会与钱账户集求交**：其中不可见的账户、以及往来账户都被静默剔除，
+    /// 不会因此报错——否则这个参数就成了探测他人账户是否存在的探针
+    /// （与 <see cref="IAccountService.FindVisibleAsync"/>「不存在、不属于本账套、不可见三种情形同响应」
+    /// 的取舍一致）；而往来账户本就不作为明细行出现，为它报错只会让调用方以为「传错了参数」。
     /// </param>
     /// <param name="page">页码，从 1 开始。</param>
     /// <param name="pageSize">每页条数。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
-    /// 一页明细及总数。明细按 <see cref="Transaction.OccurredAt"/> 升序、同一时刻按交易主键升序、
+    /// 一页明细及总数，**只含钱账户上的明细**（往来账户与账本账户上的行不在其中）。
+    /// 明细按 <see cref="Transaction.OccurredAt"/> 升序、同一时刻按交易主键升序、
     /// 再按明细主键升序排列（第三级排序键保证分页结果稳定，不会出现「同一笔数据在两页里各出现一次」）。
+    /// <para>
+    /// 被排除的行只影响**呈现**，不影响库内数据：那笔交易的借贷两条明细照旧在库里配平，
+    /// 账户余额（<see cref="ITransactionService.SumSignedAmountsAsync"/>）也照旧把它们计入。
+    /// </para>
     /// </returns>
     Task<EntryQueryPage> QueryAsync(
         int accountSetId,
@@ -64,7 +82,7 @@ public interface IEntryQueryService
 /// <param name="Summary">交易摘要。</param>
 /// <param name="Remark">交易备注；无备注时为 <c>null</c>。</param>
 /// <param name="Type">交易类型。</param>
-/// <param name="AccountId">挂靠账户主键（必然是当前用户可见的账户）。</param>
+/// <param name="AccountId">挂靠账户主键（必然是当前用户可见的**钱账户**）。</param>
 /// <param name="AccountName">挂靠账户名称。</param>
 /// <param name="Direction">借贷方向。</param>
 /// <param name="Amount">金额，**恒为正**；方向由 <paramref name="Direction"/> 表达。</param>

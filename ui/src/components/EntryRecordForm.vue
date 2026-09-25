@@ -27,7 +27,7 @@ import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
-import { TRANSFER_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
+import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
 import { useTransactionsStore, type RecordableTransactionType } from '@/stores/transactions'
@@ -145,18 +145,38 @@ const counterpartyLabel = computed(() => meta.value.counterpartyLabel)
 const currencyOptions = computed(() => currenciesStore.currencies)
 
 /**
- * 账户候选：当前账套内我可见的**启用**账户，且**币种与所选币种一致**；
- * 转账时**还要求类型是资金账户或负债账户**。
+ * 主账户 / 转出账户的候选：当前账套内我可见的**启用**账户，**币种与所选币种一致**，
+ * 且**恒为钱账户（资金/负债）**——三种记账类型口径一致，不按 mode 分支。
  *
- * 两处过滤都是体验层的提前收敛，不是防线：真正的约束是后端的跨币种校验与
- * `AccountTypeExtensions.IsTransferAccount` 校验。不过滤的话，用户会先选中一个
- * 别的币种或往来类型的账户，提交时才被 400 挡下。
+ * 主账户是「这笔钱记到哪个账户」，与「谁欠谁」无关，故往来账户不在其列：记账人要记的是
+ * 钱放在哪，而记到往来账户上的流水在「账目明细」页不呈现（那一页只呈现钱账户上的明细），
+ * 记录当场就会变成查不到的一笔。判断依据与后端同一处（`MONEY_ACCOUNT_TYPES` ↔
+ * `AccountTypeExtensions.IsMoneyAccount`）。
+ *
+ * 过滤是体验层的提前收敛，不是防线：真正的约束在后端（跨币种 400、明细页的行过滤）。
+ * 不过滤的话，用户会先选中一个别的币种或往来类型的账户，提交时才被挡下、或记完才发现查不到。
  */
-const accountOptions = computed(() =>
+const primaryAccountOptions = computed(() =>
   accountsStore.accounts.filter(
     (account) =>
       account.currencyCode === selectedCurrencyCode.value &&
-      (!isTransfer.value || TRANSFER_ACCOUNT_TYPES.includes(account.type)),
+      MONEY_ACCOUNT_TYPES.includes(account.type),
+  ),
+)
+
+/**
+ * 对手方账户的候选：币种一致，类型上**只有转账才收敛到钱账户**。
+ *
+ * 与主账户的差异是刻意的：收入/支出的对手方**正是**往来账户的落点——
+ * 「支出 现金 → 老王」的对手方就是老王，把往来账户挡在这里等于砍掉这个用法；
+ * 而转账的两端都是钱（钱在两处「钱」之间挪动），往来账户不参与，后端也会 400
+ * （`AccountTypeExtensions.IsTransferAccount`）。
+ */
+const counterpartyOptions = computed(() =>
+  accountsStore.accounts.filter(
+    (account) =>
+      account.currencyCode === selectedCurrencyCode.value &&
+      (!isTransfer.value || MONEY_ACCOUNT_TYPES.includes(account.type)),
   ),
 )
 
@@ -174,7 +194,9 @@ const categoryPlaceholder = computed(() =>
 
 /** 主账户字段的提示文案。 */
 const primaryPlaceholder = computed(() =>
-  accountOptions.value.length === 0 ? `当前币种下没有可用账户` : '输入关键词筛选，从候选中选择',
+  primaryAccountOptions.value.length === 0
+    ? `当前币种下没有可用账户`
+    : '输入关键词筛选，从候选中选择',
 )
 
 /**
@@ -184,7 +206,7 @@ const primaryPlaceholder = computed(() =>
  */
 const counterpartyPlaceholder = computed(() =>
   isTransfer.value
-    ? accountOptions.value.length === 0
+    ? counterpartyOptions.value.length === 0
       ? '当前币种下没有可用账户'
       : '输入关键词筛选，从候选中选择'
     : '留空即账本账户（账套之外）',
@@ -494,7 +516,7 @@ onMounted(async () => {
             v-model:id="primaryAccountId"
             v-model:text="primaryAccountText"
             input-id="record-account"
-            :options="accountOptions"
+            :options="primaryAccountOptions"
             :placeholder="primaryPlaceholder"
             :free-text="false"
           />
@@ -508,7 +530,7 @@ onMounted(async () => {
             v-model:id="counterpartyAccountId"
             v-model:text="counterpartyAccountText"
             input-id="record-counterparty"
-            :options="accountOptions"
+            :options="counterpartyOptions"
             :placeholder="counterpartyPlaceholder"
             :free-text="!isTransfer"
           />

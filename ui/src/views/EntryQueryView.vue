@@ -53,7 +53,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import { useAccountSetsStore } from '@/stores/accountSets'
-import { useAccountsStore } from '@/stores/accounts'
+import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import {
   COUNTERPARTY_KIND_LABELS,
   ENTRY_PAGE_SIZE,
@@ -119,8 +119,21 @@ const pageIndex = ref(1)
 /** 是否已选定账套；未选定时页面只提示，不展示筛选区与表格。 */
 const hasAccountSet = computed(() => accountSets.currentId !== null)
 
-/** 账户多选的候选：当前账套内我可见的全部账户（**含已停用**，已由后端排除账本账户）。 */
-const accountOptions = computed(() => accountsStore.accounts)
+/**
+ * 账户多选的候选：当前账套内我可见的**钱账户**（资金/负债，**含已停用**）。
+ *
+ * 两类排除各有出处：账本账户由**后端**排除（它从不离开服务层）；**往来账户由本页排除**——
+ * 明细行本就不含往来账户（后端只返回钱账户上的明细），候选若留着它，用户勾选后只会得到
+ * 一个「已选 N 个账户」却查不到任何东西的空档。
+ *
+ * 这是**页面级呈现分组**，不是权限过滤，也不放进 `accountsStore`：共享 store 装的是
+ * 「接口回传了什么」，而账户管理页（按类型分页签）与记账页的对手方候选都**需要**往来账户，
+ * 在 store 里过滤会把那两处一起改坏。同 #40「页签纯前端分组、不给 `GET /api/accounts`
+ * 加 `type` 参数」的先例：接口保持完整，分组由消费方按用途收敛。
+ */
+const accountOptions = computed(() =>
+  accountsStore.accounts.filter((account) => MONEY_ACCOUNT_TYPES.includes(account.type)),
+)
 
 const items = computed(() => entriesStore.page?.items ?? [])
 const totalCount = computed(() => entriesStore.page?.total ?? 0)
@@ -630,8 +643,9 @@ onMounted(() => {
         </div>
 
         <p class="picker-hint">
-          日期区间为闭区间（含起止当天），默认本月 1
-          日至今天。账本账户为系统内部账户，不在筛选列表中。
+          日期区间为闭区间（含起止当天），默认本月 1 日至今天。账本账户为系统内部账户，
+          不在筛选列表中；往来账户记的是「谁欠谁」而不是「钱放在哪」，本页只呈现钱账户
+          （资金/负债）上的明细，故它也不在筛选列表中——它照常出现在明细行的对手方列上。
         </p>
       </section>
 
