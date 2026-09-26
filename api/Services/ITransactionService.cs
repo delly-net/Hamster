@@ -285,6 +285,9 @@ public interface ITransactionService
     /// </summary>
     /// <param name="accountSetId">账套主键；只汇总该账套内的交易。</param>
     /// <param name="accountIds">目标账户主键集合。</param>
+    /// <param name="beforeUtc">
+    /// 只汇总**业务发生时间早于该时刻**的明细；传 <c>null</c>（默认）即不限时间、取当前余额。
+    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
     /// 账户主键到有符号余额的映射。**无任何明细的账户不会出现在结果中**（调用方按 0 处理），
@@ -292,10 +295,22 @@ public interface ITransactionService
     /// </returns>
     /// <remarks>
     /// 用一次分组查询取回全部账户的汇总，而非逐账户查询——后者是典型的 N+1。
+    /// <para>
+    /// **<paramref name="beforeUtc"/> 是「某一天结束时的余额」**：总资产结算要的是
+    /// 「账套在某一天收盘时有多少钱」，即把该日之后发生的明细排除在外，故传入
+    /// 「该日次日的本地 0 点」（见 <c>TotalAssetSettlementService</c>）。
+    /// 这不是第二个余额口径——符号换算、分组方式、期初金额的处理全都没变，
+    /// 只是多了一道时间上界。
+    /// </para>
+    /// <para>
+    /// **上界是「早于」而非「不晚于」**：界点本身属于下一天（半开区间 <c>[…, 界)</c>），
+    /// 与结算收集窗口的上界口径逐字相同（见 <c>SettlementService.CollectAsync</c>）。
+    /// </para>
     /// </remarks>
     Task<IReadOnlyDictionary<int, decimal>> SumSignedAmountsAsync(
         int accountSetId,
         IReadOnlyCollection<int> accountIds,
+        DateTime? beforeUtc = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -78,6 +78,19 @@ public static class ApiPathConst
     /// <summary>记账端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string TRANSACTION_GROUP = "/api/transactions";
 
+    /// <summary>总资产端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
+    /// <remarks>
+    /// 读的是总资产结算订阅落下的**按天快照**（<c>hamster_total_asset_settlement_record</c>），
+    /// 并按「当前用户」过滤——快照按用户分行，每个人看到的个人账户不同（见该实体注释）。
+    /// 与账户、分类、标签那几个「账套内共用一份」的分组不同，本分组的结果**因人而异**，
+    /// 这一点与 <see cref="ACCOUNT_SET_PREFERENCE_GROUP"/> 同类。
+    /// <para>
+    /// **只读**：快照由订阅在结算事件后重算，没有任何端点可以写入或触发重算——
+    /// 允许手工触发就等于允许「同一份数据有两条写入路径」，而它们的口径迟早会分叉。
+    /// </para>
+    /// </remarks>
+    public const string TOTAL_ASSET_GROUP = "/api/total-assets";
+
     /// <summary>示例账户端点路由分组前缀。</summary>
     public const string SAMPLE_ACCOUNT_GROUP = "/api/sample/accounts";
 }

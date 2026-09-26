@@ -19,7 +19,7 @@ public static class DatabaseInitializer
     private const string TRANSACTION_TABLE = "hamster_transaction";
 
     /// <summary>
-    /// 全部实体，供**逐表**建表使用；顺序沿用「先账号体系、再账套账目、后交易、最后标签与结算」。
+    /// 全部实体，供**逐表**建表使用；顺序沿用「先账号体系、再账套账目、后交易、最后标签、结算与结算订阅」。
     /// </summary>
     /// <remarks>
     /// 用一份显式清单而不是若干个 <c>InitTables&lt;…&gt;</c> 分组调用，理由有两条：
@@ -58,6 +58,8 @@ public static class DatabaseInitializer
         typeof(SettlementTask),
         typeof(SettlementTransaction),
         typeof(SettlementEntry),
+        typeof(SettlementSubscriptionExecution),
+        typeof(TotalAssetSettlementRecord),
     ];
 
     /// <summary>

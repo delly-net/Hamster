@@ -551,6 +551,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     public async Task<IReadOnlyDictionary<int, decimal>> SumSignedAmountsAsync(
         int accountSetId,
         IReadOnlyCollection<int> accountIds,
+        DateTime? beforeUtc = null,
         CancellationToken cancellationToken = default)
     {
         // 空集合不查库：`IN ()` 是无意义的条件，直接给出空结果
@@ -561,11 +562,16 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
 
         var ids = accountIds as int[] ?? [.. accountIds];
 
+        // 上界在 SQL 侧**放宽一秒**做预筛，精确判定留到下面的 C#（理由见 LocalDay.PrefilterMargin）
+        var hasBoundary = beforeUtc is not null;
+        var prefilterBefore = beforeUtc?.Add(LocalDay.PrefilterMargin) ?? DateTime.MaxValue;
+
         // 按「账户 + 方向」分组取回：同一账户的借方与贷方各占一行，折算符号后在内存里合并。
         // 不查原始明细逐条累加：那会把整本账读进内存，且失去了数据库聚合的意义。
         var rows = await db.Queryable<TransactionEntry>()
             .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
             .Where((entry, tx) => tx.AccountSetId == accountSetId && ids.Contains(entry.AccountId))
+            .WhereIF(hasBoundary, (entry, tx) => tx.OccurredAt < prefilterBefore)
             .GroupBy((entry, tx) => new { entry.AccountId, entry.Direction })
             .Select((entry, tx) => new
             {
@@ -584,6 +590,36 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             balances[row.AccountId] = balances.TryGetValue(row.AccountId, out var current)
                 ? current + signed
                 : signed;
+        }
+
+        if (beforeUtc is not { } boundary)
+        {
+            return balances;
+        }
+
+        // 精确剔除：上面那一层把界点之后「一秒以内」的行也取了回来（聚合结果无法再逐行筛，
+        // 故只能补一次查询把它们减掉）。窗口只有一秒宽，取回的至多是落在这一秒里的那几笔。
+        var boundaryRows = await db.Queryable<TransactionEntry>()
+            .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
+            .Where((entry, tx) => tx.AccountSetId == accountSetId && ids.Contains(entry.AccountId))
+            .Where((entry, tx) =>
+                tx.OccurredAt >= boundary.Subtract(LocalDay.PrefilterMargin) &&
+                tx.OccurredAt < boundary.Add(LocalDay.PrefilterMargin))
+            .Select((entry, tx) => new { entry.AccountId, entry.Direction, entry.Amount, tx.OccurredAt })
+            .ToListAsync(cancellationToken);
+
+        // 只有「不早于界点」的行是预筛多取回来的；界点之前的行本来就该算进来，留着不动。
+        foreach (var row in boundaryRows)
+        {
+            if (row.OccurredAt < boundary)
+            {
+                continue;
+            }
+
+            var signed = row.Direction.SignedAmount(row.Amount);
+
+            // 账户可能只在这一秒里有明细（上面那次分组查询便没有它的行），此时从 0 起扣。
+            balances[row.AccountId] = balances.GetValueOrDefault(row.AccountId) - signed;
         }
 
         return balances;

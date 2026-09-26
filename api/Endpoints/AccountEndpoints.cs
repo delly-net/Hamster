@@ -99,7 +99,7 @@ public sealed class AccountEndpoints : IEndpoint
                 var balances = await transactions.SumSignedAmountsAsync(
                     accountSet.Id,
                     [.. visible.Select(item => item.Account.Id)],
-                    cancellationToken);
+                    cancellationToken: cancellationToken);
 
                 return Results.Ok(visible
                     .Select(item => AccountDto.From(
@@ -190,7 +190,7 @@ public sealed class AccountEndpoints : IEndpoint
                 var balances = await transactions.SumSignedAmountsAsync(
                     accountSet.Id,
                     [created.Id],
-                    cancellationToken);
+                    cancellationToken: cancellationToken);
 
                 return Results.Created(
                     $"{ApiPathConst.ACCOUNT_GROUP}/{created.Id}",

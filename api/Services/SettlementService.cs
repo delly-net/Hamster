@@ -16,44 +16,16 @@ namespace Hamster.Api.Services;
 public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementService> logger) : ISettlementService
 {
     /// <summary>
-    /// 收集窗口在 SQL 侧预筛时向两侧放宽的秒数。
+    /// 结算的时区口径：**服务器本地时区**（解析与缓存的理由见 <see cref="LocalDay"/>）。
     /// </summary>
-    /// <remarks>
-    /// **为什么需要它**：Sqlite 把 <c>DateTime</c> 存成**文本**，而历史行的格式并不统一——
-    /// 有 <c>2026-09-23 15:06:00.5630041</c>（SqlSugar 写入，带 7 位小数）也有
-    /// <c>2026-09-23 15:06:00</c>（客户端显式传入的时刻，无小数部分）。两者按字符串比较时，
-    /// 后者排在**同一个整秒的前面**，于是「恰好落在本地 0 点整」的一笔交易在与窗口边界比较时
-    /// 可能被判到边界之外，凭空漏掉。
-    /// <para>
-    /// 故 SQL 只做**预筛**：把窗口向两侧各放宽一秒取回候选行，再由 C# 用真正的
-    /// <see cref="DateTime"/> 比较做**精确**过滤（见 <see cref="CollectAsync"/>）。
-    /// 多取回的行至多几笔、代价可忽略，换来的是边界判定不依赖数据库的文本格式。
-    /// </para>
-    /// </remarks>
-    private static readonly TimeSpan WindowPrefilterMargin = TimeSpan.FromSeconds(1);
-
-    /// <summary>
-    /// 结算的时区口径：**服务器本地时区**。
-    /// </summary>
-    /// <remarks>
-    /// 在构造时解析一次并缓存：<see cref="TimeZoneInfo.Local"/> 每次访问都可能重新查一次系统时区库，
-    /// 而本服务在一次收集里要反复用它换算（每个交易、每一天都要换）。
-    /// <para>
-    /// **注意它在本项目里的特殊性**：<c>Hamster.Api.csproj</c> 开着
-    /// <c>InvariantGlobalization</c>，此处刻意不去改成固定偏移（如 +08:00）——
-    /// 「交易日期的分组口径」应当跟随部署所在地，写死偏移会让一台部署在其它时区的实例
-    /// 把用户的账分到错误的日期上。启动日志里会打印解析结果（见 <c>Program.LogStartupInfo</c>），
-    /// 运维可据此确认「本地时区」在这台机器上到底是什么。
-    /// </para>
-    /// </remarks>
-    private readonly TimeZoneInfo _timeZone = ResolveLocalTimeZone(logger);
+    private readonly TimeZoneInfo _timeZone = LocalDay.ResolveTimeZone(logger);
 
     /// <inheritdoc />
     public async Task<SettlementCollectionResult> CollectAsync(CancellationToken cancellationToken = default)
     {
         // 窗口上界：本地「当天 0 点」，**不含**该时刻（任务描述：到当天 0 点之前(不含 0 点)）
-        var endUtc = LocalDayStartToUtc(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _timeZone).Date);
-        var prefilterEnd = endUtc + WindowPrefilterMargin;
+        var endUtc = LocalDay.StartToUtc(TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, _timeZone).Date, _timeZone);
+        var prefilterEnd = endUtc + LocalDay.PrefilterMargin;
 
         var watermarks = await LoadWatermarksAsync(cancellationToken);
 
@@ -73,7 +45,7 @@ public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementServ
         {
             // 水位为空 = 这个账套从未结算过 = **第一次执行，不限初始时间**
             var startUtc = watermarks.TryGetValue(accountSetId, out var watermark)
-                ? LocalDayStartToUtc(watermark.Date.AddDays(1))
+                ? LocalDay.StartToUtc(watermark.Date.AddDays(1), _timeZone)
                 : (DateTime?)null;
 
             // 已结算到今天（或更晚，如系统时钟被回调过）→ 窗口为空，不再查询
@@ -83,7 +55,7 @@ public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementServ
             }
 
             var hasStart = startUtc is not null;
-            var prefilterStart = startUtc?.Subtract(WindowPrefilterMargin) ?? DateTime.MinValue;
+            var prefilterStart = startUtc?.Subtract(LocalDay.PrefilterMargin) ?? DateTime.MinValue;
 
             var rows = await db.Queryable<Transaction>()
                 .Where(transaction => transaction.AccountSetId == accountSetId)
@@ -93,11 +65,11 @@ public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementServ
                 .ToListAsync(cancellationToken);
 
             var byDay = rows
-                // 精确边界判定在这里：SQL 那一层向两侧各放宽了一秒（见 WindowPrefilterMargin）
+                // 精确边界判定在这里：SQL 那一层向两侧各放宽了一秒（见 LocalDay.PrefilterMargin）
                 .Where(transaction =>
                     transaction.OccurredAt < endUtc &&
                     (startUtc is null || transaction.OccurredAt >= startUtc))
-                .GroupBy(transaction => ToLocalDate(transaction.OccurredAt))
+                .GroupBy(transaction => LocalDay.DateOf(transaction.OccurredAt, _timeZone))
                 .OrderBy(group => group.Key)
                 .ToList();
 
@@ -199,7 +171,7 @@ public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementServ
     /// 整表取回后在内存里取最大值，而不是写一条 <c>GROUP BY + MAX</c>：
     /// 结算任务一天至多一条、一个账套一年至多 365 条，十年也不过几千行，
     /// 换取的是「水位怎么算」这件事只有一处、且用的是 C# 的日期比较（不受文本格式影响，同
-    /// <see cref="WindowPrefilterMargin"/> 那条注释）。真到了需要聚合的规模，再改成 GroupBy。
+    /// <see cref="LocalDay.PrefilterMargin"/> 那条注释）。真到了需要聚合的规模，再改成 GroupBy。
     /// </remarks>
     private async Task<IReadOnlyDictionary<int, DateTime>> LoadWatermarksAsync(CancellationToken cancellationToken)
     {
@@ -396,59 +368,5 @@ public sealed class SettlementService(ISqlSugarClient db, ILogger<SettlementServ
             .ToListAsync(cancellationToken);
 
         return categories.ToDictionary(category => category.Id, category => category.Name);
-    }
-
-    /// <summary>
-    /// 把一个 UTC 时刻换算成**本地日期**（时刻部分为 00:00:00）。
-    /// </summary>
-    /// <param name="utc">UTC 时刻。</param>
-    /// <returns>本地日期。</returns>
-    /// <remarks>
-    /// 先 <c>SpecifyKind</c> 再换算：从库里读回的时间 <c>Kind</c> 是 <c>Unspecified</c>
-    /// （两种数据库都不保存 Kind），而 <see cref="TimeZoneInfo.ConvertTimeFromUtc"/> 只在
-    /// <c>Kind</c> 不是 <c>Local</c> 时才把它当作 UTC 处理。显式声明一次，
-    /// 让「这一列存的就是 UTC」成为代码里的事实而不是隐含前提。
-    /// </remarks>
-    private DateTime ToLocalDate(DateTime utc) =>
-        TimeZoneInfo.ConvertTimeFromUtc(DateTime.SpecifyKind(utc, DateTimeKind.Utc), _timeZone).Date;
-
-    /// <summary>
-    /// 把**本地日期**的 0 点换算成 UTC 时刻。
-    /// </summary>
-    /// <param name="localDay">本地日期（时刻部分被忽略）。</param>
-    /// <returns>该本地日 0 点对应的 UTC 时刻。</returns>
-    /// <remarks>
-    /// 用 <c>TimeZoneInfo.GetUtcOffset</c> 而不是 <c>ConvertTimeToUtc</c>：
-    /// 后者在「夏令时向前跳」的那一天遇到不存在的本地时刻（如 2 点整跳到 3 点时的 2:30）
-    /// 会抛 <c>ArgumentException</c>，一个每天都要跑的定时任务不该因为某年某一天而整体失败。
-    /// <c>GetUtcOffset</c> 对不存在的时刻给的是跳变前的偏移，对重复的时刻给的是标准时间偏移，
-    /// 两个取值都是确定的、不会抛异常。中国不使用夏令时，本条在本地是无差别的保险。
-    /// </remarks>
-    private DateTime LocalDayStartToUtc(DateTime localDay) =>
-        DateTime.SpecifyKind(
-            DateTime.SpecifyKind(localDay.Date, DateTimeKind.Unspecified) - _timeZone.GetUtcOffset(localDay.Date),
-            DateTimeKind.Utc);
-
-    /// <summary>
-    /// 解析服务器本地时区，失败时回落 UTC 并告警。
-    /// </summary>
-    /// <param name="logger">日志记录器。</param>
-    /// <returns>本地时区；无法解析时为 UTC。</returns>
-    /// <remarks>
-    /// <see cref="TimeZoneInfo.Local"/> 在本进程里理论上不会抛异常，此处仍兜一层：
-    /// 结算的日期分组一旦没有时区可用就无从谈起，宁可退化成「按 UTC 日分组」也不能让
-    /// 两个定时任务的宿主构造失败——那会让**整个应用起不来**，代价远大于结算口径不精确。
-    /// </remarks>
-    private static TimeZoneInfo ResolveLocalTimeZone(ILogger logger)
-    {
-        try
-        {
-            return TimeZoneInfo.Local;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "无法解析服务器本地时区，结算的交易日期分组已回落为 UTC 日");
-            return TimeZoneInfo.Utc;
-        }
     }
 }

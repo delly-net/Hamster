@@ -928,6 +928,125 @@ instances dispatch the same task the second one can tell it was a duplicate rath
 overwriting. The event payload carries ids and counts, **not the entries** — there can be tens of
 thousands of them, and a subscriber that wants them can read the frozen snapshot by task id.
 
+##### The total-asset settlement subscription
+
+`TotalAssetSettlementSubscription` is the first subscriber to that machinery: on a
+`SettlementTriggeredEvent` it **recomputes every settlement date not yet processed** for the account set
+in the event, writing one total-asset row per day, per member and per currency.
+
+**Why a subscription needs a watermark table when the settlement task does not.** The collection
+watermark is derivable from "is there a task for that day", so no "last run" column exists (see the
+previous section); a **subscriber's progress is not derivable** — nothing in the business tables
+records that a given subscription has handled a given day, and two subscriptions have two different
+progresses. Hence `hamster_settlement_subscription_execution`:
+
+| Column | Meaning |
+|---|---|
+| `subscription_code` | Subscription identifier (`TotalAssetSettlement` for this one); **changing the value means a different subscription**, and the old watermark stops being honoured |
+| `account_set_id` | Account set |
+| `last_executed_date` | **The last completed day** (local date — the watermark itself) |
+| `last_executed_at` | When the watermark last actually moved (UTC, **observability only**) |
+| `created_at` / `updated_at` | Row timestamps |
+
+Unique on `(subscription_code, account_set_id)`, so each subscription has exactly one row per account
+set.
+
+**The watermark is a date, not an instant**: a subscription processes settlement tasks, and the
+granularity of a settlement task is a day. Storing an instant would add a "does the same day count"
+judgement that nothing needs.
+
+**It must be per account set**: a new account set receives **all** of its historical settlement tasks
+at once in the first collection run, and a single global watermark would skip that whole history. A
+watermark means "how far this reader has got", and different account sets do not start at the same
+place.
+
+**The semantics are "completed", not "started", and it only moves forward.** The order is **persist
+first, advance second** (see the loop in `TotalAssetSettlementService.RunAsync`): advancing first would
+let a crash leave "watermark moved, rows not written", and those days would never be processed again.
+When the target date is not later than the stored watermark, **not a single byte is written** — a
+redelivery is therefore a zero-write, which is exactly the observable evidence of idempotency
+(`last_executed_at` does not move on a no-op run).
+
+**Dates come from `hamster_settlement_task` alone.** The requirement is to pick up unprocessed dates
+from the settlement task table, and that table is already the authoritative list of "this account set
+has postings on this day": this service does not redo day-boundary logic (timezone conversion and
+midnight attribution, done once on the collection side — see `LocalDay`). Days with no postings create
+no settlement task and therefore do not appear here either; missing days are not zero-filled (see the
+endpoint below).
+
+Results land in `hamster_total_asset_settlement_record`:
+
+| Column | Meaning |
+|---|---|
+| `account_set_id` / `user_id` / `currency_code` / `transaction_date` | The four-part key that identifies a row (the unique index is these four columns) |
+| `personal_asset_total` / `personal_liability_total` | That member's **personal** account totals for funds / liabilities |
+| `public_asset_total` / `public_liability_total` | The account set's **public** account totals for funds / liabilities |
+| `created_at` / `updated_at` | Row timestamps |
+
+**There is exactly one place that defines the amounts: `ITransactionService.SumSignedAmountsAsync`.**
+This service does not query entries itself — the "entries → account balance" conversion exists once in
+the project (including the rule that the opening balance is already an entry and `initial_balance` is
+not added on top), and a second copy would make the home page's total and the account page's balance
+two different numbers. What it asks for is the signed balance **as of the end of that day** (next local
+midnight, half-open); the ±1 second SQL prefilter for the day boundary is `LocalDay.PrefilterMargin`.
+
+**Only fund and liability accounts count, and inactive accounts are not filtered out.** "Total of
+asset and liability accounts" means exactly those two kinds (a ledger account is the counterparty of
+double-entry bookkeeping, a contact account records who owes whom, neither is where money sits) — the
+same predicate as `IsMoneyAccount`. Deactivating an account means "stop offering it in pickers", not
+"this money never existed": excluding inactive accounts would make the curve drop a step on the day an
+account was deactivated.
+
+**Liabilities are stored signed (a debt is negative), so net assets = assets + liabilities.** Storing
+the absolute value and subtracting at display time invites the sign being written twice; here the sign
+lives in one place. There is deliberately **no `net_total` column** — it is the sum of the other two,
+and storing it would add a field that can disagree with them.
+
+**Every member gets a row every day (with four zeros when they have no accounts), and the currency is
+part of the key.** Rows are per user because account ownership differs per member (personal accounts
+belong to their creator), so "this month's total assets" is a different number for each member (the
+public part is shared); writing every member every day, zeros included, makes "one row per member per
+day" true and keeps the reader from having to distinguish "no row" from "a row of zeros". The currency
+cannot be dropped either: the project has no exchange-rate source, so adding amounts in different
+currencies would be a fabricated number — rows are split by currency and the chart takes the system
+default currency group.
+
+**Recomputation is an overwrite, not an append**: settling a day deletes that day's rows and inserts
+the freshly computed ones, inside one transaction. A half-written day left by a crash would show the
+reader a number that is neither the new value nor the old one, and that looks entirely normal.
+
+**A member who joins later gets their history backfilled.** The watermark is per (subscription,
+account set) while rows are per user, so a newly added member has no rows at all — advancing by the
+watermark alone would start their curve only from the day they joined. The lower bound for a run is
+therefore the **earliest** of the watermark and each member's last recorded day: if any member has no
+rows at all the bound disappears and every date for that account set is recomputed (safe, because
+recomputation is an overwrite), after which the bound returns to the watermark and only new days are
+processed. The same mechanism self-heals a write that failed after the watermark advanced, or rows
+removed by hand, both of which look like "a member's coverage lags the watermark". **With no fund or
+liability accounts at all it degrades to the watermark alone** — there is no currency to record and not
+a single row can be written, so an always-empty coverage would recompute all history on every execution
+day.
+
+**A failure means no advance, and a retry on the next execution day.** The subscriber does not swallow
+exceptions: a failure on any day makes the dispatch count as failed, so the settlement task is **not**
+marked executed (see the previous section) and is delivered again on the next execution day. By then
+the watermark has only reached the day before the failure, so that day is recomputed — and the
+overwrite makes that recomputation idempotent.
+
+**Endpoint `GET /api/total-assets/daily?month=YYYY-MM`** (read-only; used by the home page). An omitted
+`month` means **the server's current local month** — the stored dates are local dates, and following the
+server keeps them from being shifted — and the format is `yyyy-MM` only (`TryParseExact`, so variants
+like `2026-9-1` are a 400). The response echoes `month` and `currencyCode` because both can be decided
+by the server (current month, system default currency); a caller that did not get them back could only
+guess again, and guessing wrong shows "another currency's numbers under this currency's title". **Only
+days that have rows are returned, and missing days are not zero-filled** — zero-filling would draw "this
+day has not been settled yet" as "assets are 0 on this day", which is misinformation rather than
+missing information. With no enabled currency at all the response is `currencyCode: null` and an empty
+array (200, not 404 — "no currency to show" and "no data this month" are the same state in the UI). The
+result is **per user**, and the usual 400 / 403 / 401 conventions apply. This group exposes **no write
+or "recompute now" entry point**: the data is written by the subscription, and the frontend has no means
+to trigger it.
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.
@@ -954,6 +1073,16 @@ The three settlement tables are likewise all-new (`hamster_settlement_task`,
 backfill** for them — nothing existing is altered. They start empty, and the first collection run
 fills them from the transaction tables. Nothing is added to `hamster_transaction` except the
 `updated_at` column handled above.
+
+The two total-asset tables are all-new as well (`hamster_settlement_subscription_execution`,
+`hamster_total_asset_settlement_record`) — another "add a table, alter no column" change, so **no
+migration and no backfill** either: on an upgraded database the watermark table starts empty and the
+record table is filled by the first run after the upgrade. That run has no watermark and is treated as
+having no lower bound, recomputing **every historical settlement date** for the account set — the
+subscription-side counterpart of "the first run has no lower bound", which also means the full current
+month appears shortly after upgrading. The cost is that this one run is noticeably slower (one query
+and one overwrite per day, proportional to the history); it is **one-off**, and once the watermark is
+stored each day only handles the new one.
 
 The personal account-set preference table `hamster_account_set_preference` is a brand-new table too
 — another "add a table, alter no column" change — so it also needs **no migration and no backfill**:
