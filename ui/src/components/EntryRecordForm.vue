@@ -21,6 +21,11 @@
  *   填了不存在的名字则由后端自动创建为个人往来账户。
  * - **分类**：可留空（即「未分类」），也可输入一个不存在的名字——后端会在当前账套内自动创建它。
  *   它与币种无关（换币种不清空），也不区分收入/支出/转账，故不参与上面那套联动。
+ *
+ * 候选数据（账户与分类）的生命周期与本表单的字段是两件事：字段在每次复位时留空，而**候选缓存
+ * 在提交成功后作废**——一笔交易会改变账户余额、还可能按名新建往来账户与分类，留着旧候选就是拿
+ * 记账前的数回答「这笔钱从哪出」。作废后不立即重拉，由下一次需要候选时补上（见 `onFormFocusIn`）；
+ * 币种缓存不参与，理由见 `loadMutableDictionaries`。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
@@ -59,8 +64,45 @@ const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
 /** 分类名最大长度，与后端 `Category.Name` 的列长一致。前端拦一道只是为了少一次往返。 */
 const CATEGORY_NAME_MAX_LENGTH = 32
 
+/**
+ * 候选处于「已被提交清空、尚未补拉」的空窗时，两个账户字段的占位文案。
+ *
+ * 空窗里候选为空**不等于**「没有可用账户」——账户好端端地在库里，只是这份缓存刚被作废。
+ * 沿用「当前币种下没有可用账户」会在界面上说一句不实的话，而用户对着这一行字无从分辨
+ * （同 #57 的分界：`Hidden` 是**权限**结论，不是「我不呈现它」）。
+ */
+const ACCOUNTS_RELOADING_PLACEHOLDER = '正在加载账户…'
+
+/** 分类候选处于同一空窗时的占位文案；理由同 {@link ACCOUNTS_RELOADING_PLACEHOLDER}。 */
+const CATEGORIES_RELOADING_PLACEHOLDER = '正在加载分类…'
+
 const errorMessage = ref('')
 const notice = ref('')
+
+/**
+ * 账户与分类的候选缓存是否已被「提交成功」清空、尚未补拉。
+ *
+ * **清空与补拉分成两步是刻意的**：清空是「不留旧值」的动作（提交一笔账之后这两份字典必定陈旧，
+ * 见 `clearOptionCaches`），补拉则发生在**下一次需要候选**的时候（见 `onFormFocusIn`），
+ * 不塞进这笔提交里。空窗期由上面的两个占位常量如实表达。
+ */
+const optionsCleared = ref(false)
+
+/** 补拉是否在途：`focusin` 可能连发，用它挡住重复请求。 */
+const optionsReloading = ref(false)
+
+/**
+ * 补拉失败的说明；非空时与成功提示合并成同一条（见 `noticeText`）。
+ *
+ * 刻意与 `errorMessage` 分开：账已经记下了，那是既成事实，不能用「记账失败」的口气去说它；
+ * 但也不静默——候选里的余额与账户可能不是最新，用户有权知道。
+ */
+const cacheNote = ref('')
+
+/** 提示条文本：成功提示 +（补拉失败时）说明。两者皆空时不渲染这条提示。 */
+const noticeText = computed(() =>
+  [notice.value, cacheNote.value].filter((part) => part.length > 0).join(' '),
+)
 
 /** 选定的币种代码；为空串表示币种字典尚未加载或一个币种都没有。 */
 const selectedCurrencyCode = ref('')
@@ -151,30 +193,46 @@ const counterpartyOptions = computed(() =>
  */
 const categoryOptions = computed(() => categoriesStore.categories)
 
-/** 分类字段的提示文案。 */
+/**
+ * 分类字段的提示文案。
+ *
+ * 空窗（缓存已被提交清空、尚未补拉）里候选为空是「尚未取回」而非「暂无分类」，
+ * 故先判这一层，避免说一句不实的话。
+ */
 const categoryPlaceholder = computed(() =>
-  categoryOptions.value.length === 0 ? '暂无分类，可直接输入新分类名' : '可留空，或输入新分类名',
+  optionsCleared.value
+    ? CATEGORIES_RELOADING_PLACEHOLDER
+    : categoryOptions.value.length === 0
+      ? '暂无分类，可直接输入新分类名'
+      : '可留空，或输入新分类名',
 )
 
-/** 主账户字段的提示文案。 */
+/** 主账户字段的提示文案；空窗分支的理由同 {@link categoryPlaceholder}。 */
 const primaryPlaceholder = computed(() =>
-  primaryAccountOptions.value.length === 0
-    ? `当前币种下没有可用账户`
-    : '输入关键词筛选，从候选中选择',
+  optionsCleared.value
+    ? ACCOUNTS_RELOADING_PLACEHOLDER
+    : primaryAccountOptions.value.length === 0
+      ? `当前币种下没有可用账户`
+      : '输入关键词筛选，从候选中选择',
 )
 
 /**
  * 对手方账户字段的提示文案。
  *
  * 转账下不再是「可留空」——两个真实账户之间才有转账，没有「账套之外」这一说。
+ * 空窗分支（理由同 {@link primaryPlaceholder}）对三种记账类型一视同仁，故写在最外层。
  */
-const counterpartyPlaceholder = computed(() =>
-  isTransfer.value
+const counterpartyPlaceholder = computed(() => {
+  if (optionsCleared.value) {
+    return ACCOUNTS_RELOADING_PLACEHOLDER
+  }
+
+  return isTransfer.value
     ? counterpartyOptions.value.length === 0
       ? '当前币种下没有可用账户'
       : '输入关键词筛选，从候选中选择'
-    : '留空即账本账户（账套之外）',
-)
+    : '留空即账本账户（账套之外）'
+})
 
 /** 补零到两位。 */
 function pad(value: number): string {
@@ -244,15 +302,30 @@ function parseAmount(raw: unknown): number | null {
   return parsed
 }
 
+/**
+ * 拉取**记账会改变的两份字典**：账户与分类。
+ *
+ * 记账改变的事实正好都落在这两份字典上——一笔交易必然改变相关账户的余额，对手方按名新建时
+ * 后端还会多出一个本账套的往来账户；分类同样可能被后端按名自动创建。单独抽出来是因为它有两个
+ * 触发时机、语义并不相同：
+ * 1. 进入记账页 / 切换账套——连同币种一起拉齐（见 {@link loadOptions}）；
+ * 2. 提交记账成功后这两份缓存已被清空，下一次需要候选时补拉（见 {@link onFormFocusIn}）。
+ * 两处若各写一份清单，迟早漂移成「补拉了账户、忘了分类」。
+ *
+ * **刻意不含币种**：它是全局字典，记账不会新建它；且它是账户候选的筛选前提（换币种要清空账户选择），
+ * 清空它只会让币种下拉当场空白，与「币种回到默认值」的既有口径（#55）也相冲。
+ *
+ * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+ */
+async function loadMutableDictionaries(): Promise<void> {
+  await Promise.all([accountsStore.list(false), categoriesStore.list(false)])
+}
+
 /** 拉取币种字典、记账可选的账户与分类（三者都只要启用的）。 */
 async function loadOptions(): Promise<boolean> {
   try {
     // 并发拉取：三者互不依赖（账户的币种过滤在前端做），串行只是白白多等几次往返
-    await Promise.all([
-      currenciesStore.loadActive(),
-      accountsStore.list(false),
-      categoriesStore.list(false),
-    ])
+    await Promise.all([currenciesStore.loadActive(), loadMutableDictionaries()])
     return true
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '加载币种、账户与分类失败'
@@ -290,6 +363,54 @@ function resetFields(): void {
   draftOccurredAt.value = nowLocalInput()
   draftSummary.value = ''
   draftRemark.value = ''
+}
+
+/**
+ * 作废账户与分类的候选缓存。
+ *
+ * 记账成功后调用（**失败路径一律不调**：账没记下，缓存就不陈旧）。两个 store 的 `clear()`
+ * 原本只有「退出登录 / 账套失效」一个调用方，此处是第二个，两处说的是同一件事——手上这份列表
+ * 已不再是事实。
+ *
+ * 清空之后不在这里重拉：取回推迟到下一次需要候选时（{@link onFormFocusIn}）。选中项本身由
+ * {@link resetFields} 清掉，故留在这里的只有「候选数据的来源」这一层。
+ */
+function clearOptionCaches(): void {
+  accountsStore.clear()
+  categoriesStore.clear()
+  optionsCleared.value = true
+  cacheNote.value = ''
+}
+
+/**
+ * 表单内任意控件获得焦点：若候选缓存已被提交清空，补拉一次。
+ *
+ * 挂 `<form>` 上的 `focusin`（会冒泡）而不是给 `AccountSearchSelect` 加一个 emit——
+ * 子组件不认识「缓存」这回事，它的契约只有「按关键词筛选候选」（#49），
+ * 把父组件的取数时机塞进去会让那个契约变成两件事。
+ *
+ * **为什么必须补拉**：主账户候选恒为 `:free-text="false"`，候选空着就选不出账户，
+ * 用户将在本页无法接着记下一笔。清空是「不留旧值」，不是「本页不再记账」。
+ *
+ * **失败不推翻成功提示**：账已经记下了，那是既成事实；说明只进 {@link cacheNote}。
+ * `optionsCleared` 保持为真，使下一次聚焦可以重试。
+ */
+async function onFormFocusIn(): Promise<void> {
+  if (!optionsCleared.value || optionsReloading.value) {
+    return
+  }
+
+  optionsReloading.value = true
+  try {
+    await loadMutableDictionaries()
+    optionsCleared.value = false
+    cacheNote.value = ''
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '网络异常'
+    cacheNote.value = `（账户与分类列表刷新失败：${reason}，候选可能不是最新）`
+  } finally {
+    optionsReloading.value = false
+  }
 }
 
 /**
@@ -407,6 +528,9 @@ async function submit(): Promise<void> {
 
     // 记账后清空并可立即接着记下一笔：金额与摘要是逐笔的，沿用上一笔只会导致误提交
     resetFields()
+    // 账户与分类的候选缓存一并作废：后端可能刚按名新建了往来账户/分类，各账户余额也必定已变，
+    // 而候选行右侧显示的就是那个余额（见 `clearOptionCaches` 与 `onFormFocusIn`）
+    clearOptionCaches()
     // 转账提示读作「转出 A → 转入 B」：两个账户都是用户自己选的，方向和起止点必须一眼看清；
     // 收支则用「主账户（对手方）」的写法，对手方留空时呈现后端落的系统账本账户
     // 分类回显的是**后端落定的那个分类**（本次手工输入的名字可能是刚被自动创建的），
@@ -463,7 +587,9 @@ onMounted(async () => {
     </p>
 
     <template v-else>
-      <form class="form" @submit.prevent="submit">
+      <!-- @focusin：提交成功清空缓存后，在下一次需要候选时补拉（见 onFormFocusIn）。
+           用冒泡的事件委派而非给两个选择框加 emit——「何时取数」是表单的事，不是选择框的事 -->
+      <form class="form" @submit.prevent="submit" @focusin="onFormFocusIn">
         <div class="field">
           <label class="label" for="record-currency">币种</label>
           <select id="record-currency" :value="selectedCurrencyCode" @change="onCurrencyChange">
@@ -571,7 +697,9 @@ onMounted(async () => {
       </form>
 
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
-      <p v-if="notice" class="notice">{{ notice }}</p>
+      <!-- 成功提示与「补拉失败」说明共处一条：后者说的是这次记账的附带状况，不是另一件事，
+           分成两条提示会让读的人先看到绿色成功、再看到一条同样醒目的失败 -->
+      <p v-if="noticeText" class="notice">{{ noticeText }}</p>
 
       <p v-if="isTransfer" class="hint">
         一笔转账会同时记两条明细——{{ primaryLabel }}与{{ counterpartyLabel }}各一条、
