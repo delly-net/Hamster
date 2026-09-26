@@ -20,6 +20,17 @@
  * **允许落在候选之外**（没有 `freeText` 开关，因为标签**永远**接受按名创建）：
  * 敲一个候选里没有的名字，会以 {@link NEW_TAG_ID} 为主键进 `selected`，提交时交给后端自动创建。
  * 这与分类框同一口径，且没有账户那样的类型限制（转账也能按名建标签）。
+ *
+ * **选中即收起**：点【添加】或点选一个候选之后，收起候选列表并让输入框失焦——
+ * 与 `AccountSearchSelect` / `CategorySearchSelect` 同一口径（那两个的 `choose()` 结尾都是
+ * `open.value = false`，注释逐字写着「并收起列表」）。本组件此前是三者里唯一的例外：
+ * `choose()` 与 `commitDraft()` 的结尾都是 `open.value = true`，点完列表仍挂着、遮住下方字段。
+ * 收起的动作与理由收在 {@link collapseOptions}。
+ *
+ * **焦点口径的取舍（用户确认）**：收起点同时失焦，故**回车提交草稿后输入框也会失去焦点**，
+ * 此时直接敲下一个标签名不会生效，需先点回输入框——点回即由 `@focus` 重新展开候选，
+ * 因而「收起」不会把选择框锁死。**不要**改成「打字即重新展开」（给输入框加 `@input` 开列表）：
+ * 那会把已确认的失焦口径悄悄回退成另一种行为。
  */
 import { computed, ref } from 'vue'
 import { NEW_TAG_ID, type Tag, type TagRef } from '@/stores/tags'
@@ -59,6 +70,9 @@ const draft = ref('')
 
 /** 候选列表是否展开。 */
 const open = ref(false)
+
+/** 输入框元素：{@link collapseOptions} 需要它来主动失焦。 */
+const inputRef = ref<HTMLInputElement | null>(null)
 
 /** 草稿去空白后的比对键（标签名在账套内**不区分大小写**唯一，故比对也按小写）。 */
 const draftKey = computed(() => draft.value.trim().toLowerCase())
@@ -130,12 +144,31 @@ function addTag(ref: TagRef): void {
 }
 
 /**
- * 点选一个候选：直接落定它的主键与名称（这是我方已知存在的标签，不会被误判成新名字）。
+ * 收起候选列表并让输入框失焦。
+ *
+ * **两件事都要做，缺一不可**：
+ * - 只置 `open = false` 不够——{@link choose} 走的是候选按钮的 `@mousedown.prevent`，
+ *   输入框**不会**自然失焦，而本组件开列表的时机只有 `@focus` 一个，于是会留下
+ *   「列表收起了、输入框却仍聚焦，接着敲字看不到候选」这个中间态；
+ * - 只依赖失焦也不够——点【添加】时输入框本就先失焦（`@blur` 已把 `open` 置假），
+ *   但那之后 {@link commitDraft} 才跑，故收起点必须显式再置一次。
+ *
+ * 失焦是用户确认的口径：添加或选中即「这一轮选标签结束」，焦点离开标签编辑框；
+ * 要接着添加下一个标签，点回输入框即可（`@focus` → `open = true`），故收起不会锁死。
+ */
+function collapseOptions(): void {
+  open.value = false
+  inputRef.value?.blur()
+}
+
+/**
+ * 点选一个候选：直接落定它的主键与名称（这是我方已知存在的标签，不会被误判成新名字），
+ * 随后收起候选列表并让输入框失焦。
  */
 function choose(tag: Tag): void {
   addTag({ id: tag.id, name: tag.name })
   draft.value = ''
-  open.value = true
+  collapseOptions()
 }
 
 /**
@@ -145,6 +178,8 @@ function choose(tag: Tag): void {
  * 命中判定按名字全等（与 {@link filtered} 同一把钥匙）：用户敲出「报销」而候选里正有「报销」时，
  * 提交的应当是那个已有标签的主键，而不是一个待创建的同名项——否则后端要么报重名、
  * 要么把它归到既有标签上，界面却多绕了一圈。
+ *
+ * 与点选候选一样，收尾也收起候选列表并让输入框失焦：「添加」即这一轮选标签结束。
  */
 function commitDraft(): void {
   const name = draft.value.trim()
@@ -155,7 +190,7 @@ function commitDraft(): void {
   const hit = props.options.find((tag) => tag.name.toLowerCase() === name.toLowerCase())
   addTag(hit === undefined ? { id: NEW_TAG_ID, name } : { id: hit.id, name: hit.name })
   draft.value = ''
-  open.value = true
+  collapseOptions()
 }
 
 /** 移除一个已选标签。 */
@@ -189,6 +224,7 @@ function removeTag(tag: TagRef): void {
 
     <div class="entry">
       <input
+        ref="inputRef"
         :id="inputId"
         v-model="draft"
         type="text"
