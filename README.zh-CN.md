@@ -89,8 +89,18 @@ export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username
 | `HAMSTER_DB_CONNECTION` | *（空）* | 连接串；留空时按数据库类型生成默认连接串 |
 | `HAMSTER_DB_AUTOMIGRATE` | `true` | 启动时是否执行 CodeFirst 建表 |
 
-环境变量优先级始终高于 `appsettings.json`。自动建表失败（如数据库连不上）时仅记录告警，
-不会阻断应用启动。
+环境变量优先级始终高于 `appsettings.json`。自动建表失败（如数据库连不上）时**不会阻断应用启动**。
+
+初始化过程**逐步隔离**：建表（逐表）、币种播种、四处列回填各自独立执行，**一步失败不影响其余步骤**，
+失败时以 `ERROR` 级别记录该步的名字与异常，并在末尾汇总一条「有 N 步失败」——只看这一条即可知道
+本次启动缺了什么。之所以要隔离，是因为此前 14 张表挤在四次分组调用里、连同播种与回填共用一个
+`try/catch`：PostgreSQL 上给既有交易表加非空列被拒后，**排在其后的标签表与结算表从未被建立**，
+而日志只有一条告警，直到用户点开标签页才以 `relation "hamster_tag" does not exist` 暴露。
+
+> **PostgreSQL 的加列限制**：PostgreSQL 拒绝在非空表上新增 `NOT NULL` 列（无默认值可回填），
+> 故**给既有表新增的列在实体上一律标 `IsNullable = true`**（见 `Transaction.UpdatedAt`），
+> 再靠写入路径与启动回填保证「业务上永不为空」。SQLite 没有这条限制（它的加列语句根本没有
+> `NOT NULL` 槽位），同样的代码在 SQLite 上不会报错——这正是该故障只在 PostgreSQL 部署上出现的原因。
 
 健康探针：`GET /health`（存活探针，不访问数据库）与 `GET /health/db`（数据库连通性，
 不可用时返回 `503`）。

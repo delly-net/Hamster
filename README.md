@@ -90,7 +90,24 @@ export HAMSTER_DB_CONNECTION="Host=localhost;Port=5432;Database=hamster;Username
 | `HAMSTER_DB_AUTOMIGRATE` | `true` | Run CodeFirst table creation at startup |
 
 Environment variables always take precedence over `appsettings.json`. If auto-migration fails
-(e.g. the database is unreachable) the API logs a warning and keeps starting.
+(e.g. the database is unreachable) the API **still starts**.
+
+Initialization is **isolated step by step**: table creation (one table at a time), currency
+seeding and the four column backfills each run independently, so **one failure does not affect the
+others**. A failing step is logged at `ERROR` with the step's name and exception, followed by a
+single summary line ("N steps failed") — that one line is enough to see what this startup is
+missing. The isolation exists because all 14 tables used to sit in four grouped calls sharing one
+`try/catch` with seeding and backfills: when PostgreSQL rejected adding a `NOT NULL` column to the
+existing transaction table, **the tag and settlement tables after it were never created**, the log
+held a single warning, and the problem only surfaced as
+`relation "hamster_tag" does not exist` when the user opened the tag page.
+
+> **PostgreSQL column rule**: PostgreSQL refuses to add a `NOT NULL` column to a non-empty table
+> (there is no default to backfill it), so **every column added to an existing table is marked
+> `IsNullable = true` on the entity** (see `Transaction.UpdatedAt`), with the writer and the startup
+> backfill keeping it "never null" in business terms. SQLite has no such restriction (its ADD COLUMN
+> statement has no `NOT NULL` slot at all), so the same code passes there — which is exactly why this
+> failure only showed up on the PostgreSQL deployment.
 
 Health probes: `GET /health` (liveness, no database access) and `GET /health/db` (database
 connectivity, returns `503` when unavailable).

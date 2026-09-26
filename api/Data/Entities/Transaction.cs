@@ -105,7 +105,7 @@ public sealed class Transaction
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     /// <summary>
-    /// 最后修改时间（UTC），**永不为空**。
+    /// 最后修改时间（UTC），**业务语义上永不为空**（数据库列**可空**，见下方remarks）。
     /// </summary>
     /// <remarks>
     /// 与 <see cref="CreatedAt"/> 的分工：前者是「这笔账什么时候落库的」，后者是「这笔账最后一次被改动是什么时候」。
@@ -116,15 +116,32 @@ public sealed class Transaction
     /// 且 <see cref="CreatedAt"/> 一律不动。来源、目标账户、金额、发生时间、摘要、备注、分类的改动都算「修改」。
     /// </para>
     /// <para>
-    /// **本列是随本次功能才引入的，既有行必须回填**：SqlSugar 的增量加列只把新列追加为可空、
-    /// 不会为既有行补值，NULL 无法绑定到非空 <c>DateTime</c>，会让整个交易查询 500
-    /// （同 <see cref="Account.IsSystem"/>、<see cref="Account.CurrencyCode"/> 的先例）。
-    /// 回填取 <c>updated_at = created_at</c>：无法考证的历史交易视作「从未被改过」，
-    /// 这与本列引入前的语义完全一致。
+    /// **列标为可空（<c>IsNullable = true</c>）是为了让增量加列在 PostgreSQL 上能跑通**：
+    /// 本列是随功能迭代才加到**既有表**上的，SqlSugar 的增量加列会生成
+    /// <c>ALTER TABLE … ADD COLUMN "updated_at" timestamp NOT NULL</c>，而 PostgreSQL 拒绝
+    /// 在非空表上新增 NOT NULL 列（无默认值可回填）——语句被拒 → 建表步骤抛异常。
+    /// Sqlite 侧无此限制（它的加列语句根本没有 NOT NULL 槽位），故该故障只在 PostgreSQL 部署上出现。
+    /// 结果就是标签表与结算表**从未被建立**，直到用户点开标签页才以
+    /// <c>relation "hamster_tag" does not exist</c> 暴露（建表各步现已互相隔离，见
+    /// <c>DatabaseInitializer</c>）。
     /// </para>
     /// <para>
-    /// **刻意不进出参 DTO**：本次的要求是「交易记录数据库中加入字段」，
-    /// 界面是否呈现（明细页加列、修改时间列等）由后续任务决定，故不牵出前端的类型与列。
+    /// **勿把本标注删掉改成「非空列 + 默认值」**：SqlSugar 只有在实体列带 <c>DefaultValue</c> 时
+    /// 才把加列语句写成可空，而带 <c>DefaultValue</c> 的加列在既有库上实测会留下空串形态的脏值
+    /// （见 <c>DatabaseInitializer.UnbindableWhere</c> 对两种脏值形态的处理）。
+    /// 把「数据库列可空」与「业务上永不为空」分开表达，比给列塞一个默认值干净。
+    /// </para>
+    /// <para>
+    /// **可空不等于可以留空**：写入侧一律赋非空值（新建取 <see cref="CreatedAt"/>、改账取当前时刻），
+    /// 且 <c>DatabaseInitializer.BackfillTransactionUpdatedAt</c> 把升级前既有的行回填为
+    /// <c>updated_at = created_at</c>——「无法考证的历史交易视作从未被改过」，
+    /// 与本列引入前的语义完全一致。此前认为「增量加列只会追加为可空、故不会破坏既有行」的推论
+    /// **是错的**（那只是 Sqlite 的实现细节），本列的可空标注与这段回填才是让读取侧永远拿到
+    /// 可绑定 <see cref="DateTime"/> 的那对保证。
+    /// </para>
+    /// <para>
+    /// **刻意不进出参 DTO**：界面是否呈现（明细页加列、修改时间列等）由后续任务决定，
+    /// 故不牵出前端的类型与列。
     /// </para>
     /// <para>
     /// **明细表不加本列**（见 <see cref="TransactionEntry"/>）：改账时明细与交易头在同一
@@ -132,6 +149,6 @@ public sealed class Transaction
     /// 同一时刻在库里存两遍不含新信息。
     /// </para>
     /// </remarks>
-    [SugarColumn(ColumnName = "updated_at")]
+    [SugarColumn(ColumnName = "updated_at", IsNullable = true)]
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

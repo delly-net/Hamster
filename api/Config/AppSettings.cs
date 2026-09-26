@@ -34,8 +34,11 @@ public sealed class DatabaseOptions
 
     /// <summary>
     /// 是否在启动时执行 CodeFirst 自动建表，默认开启。
-    /// 连接失败时仅记录告警，不阻断应用启动。
     /// </summary>
+    /// <remarks>
+    /// 建表失败**不阻断应用启动**，且初始化各步**互相隔离**——某一步失败只记 ERROR、
+    /// 不影响其余步骤（见 <c>DatabaseInitializer.RunStep</c>）。
+    /// </remarks>
     public bool AutoMigrate { get; set; } = true;
 
     /// <summary>数据库类型标签，用于日志与健康探针输出。</summary>
