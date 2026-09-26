@@ -60,6 +60,21 @@ public static class ApiPathConst
     /// <summary>账目明细查询端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string ENTRY_GROUP = "/api/entries";
 
+    /// <summary>个人账套配置端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
+    /// <remarks>
+    /// 与上面几个分组的**关键差别是「按人」而不是「按账套」**：账户、分类、标签都是账套内所有成员共用的资源，
+    /// 而本分组读写的是「**我**在这本账套里的个人设置」——同一本账套里两个人各有一份。
+    /// 故本分组的端点既读账套（请求头）又取当前用户主键，两者缺一不可。
+    /// <para>
+    /// **不带管理员门槛**：这些设置描述的是「我习惯怎么看账」，与权限无关。
+    /// </para>
+    /// <para>
+    /// 路径里带 <c>account-set</c> 是刻意的：配置的**生存期与账套绑定**（成员被移出账套时配置保留，
+    /// 但不会再被读到），别把它挪到 <c>/api/users/{id}/preferences</c> 这种「只按人」的形态下。
+    /// </para>
+    /// </remarks>
+    public const string ACCOUNT_SET_PREFERENCE_GROUP = "/api/account-set-preferences";
+
     /// <summary>记账端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string TRANSACTION_GROUP = "/api/transactions";
 

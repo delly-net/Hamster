@@ -211,6 +211,49 @@ otherwise the endpoint degrades into "query the whole table".
 | `GET /api/admin/account-sets/{id}/members` | Admin | Linked user ids |
 | `PUT /api/admin/account-sets/{id}/members` | Admin | **Replace** the linked-user set with `{ userIds }` (204) |
 
+##### Personal account-set preferences
+
+A **personal account-set preference** records how **you** like to read the books in this account
+set. It is unique per **(account set, user)** — every member of the same account set keeps their
+own row, and none of them affects another. That is the exact opposite of account sets, accounts,
+categories and tags, which are shared within an account set, so both the account set **and** the
+user are read on every call: drop the account set and you read "my settings in some other account
+set"; drop the user and you read "somebody else's settings".
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/account-set-preferences/entry-filter` | Bearer | Read the entry-list filter; **two empty arrays when nothing was ever saved** |
+| `PUT /api/account-set-preferences/entry-filter` | Bearer | Save the entry-list filter (204); body `{ accountIds, tagIds }`, **inserted when absent, updated in place otherwise** |
+
+| Table | Contents |
+|---|---|
+| `hamster_account_set_preference` | One row per (account set, user): `entry_account_ids` and `entry_tag_ids`, comma-joined primary keys, plus created/updated timestamps. Unique on `(account_set_id, user_id)` |
+
+**Only accounts and tags are remembered — the date range deliberately is not.** A date range answers
+"which stretch do I want to look at *this time*" (after hunting down an old entry from last month,
+landing in that same range again next visit would look like the current month had no activity),
+whereas accounts and tags answer "how do I usually read my books". The time range therefore falls
+back to the default "1st of this month – today" on every visit, and the request body has no date
+field at all — sending one has no effect.
+
+**Writes converge against the current account set; reads do not.** On save, primary keys that do not
+belong to the current account set — and accounts the current user cannot see — are **silently
+dropped** rather than rejected, otherwise the endpoint would become a probe for "does this
+account/tag belong to somebody else's account set" (the same trade-off as `accountIds` / `tagIds`
+on `GET /api/entries`). Reads hand back exactly what is stored: convergence lives in one place, and
+writing it twice would drift. The two convergence criteria are **borrowed from the existing
+services** (visibility plus the money-account rule from the account service, the account-set-scoped
+dictionary from the tag service), so no second list of "what counts" exists here. **Deactivated
+items are kept**: accounts and tags are soft-deleted, historical entries on them are still listed on
+the entry page, and a saved filter holding one is a legitimate state.
+
+The preference table is deliberately **not** a set of columns on `hamster_account_set_member`:
+a membership row says "this person belongs to this account set" and disappears the moment an
+administrator unlinks them, whereas "how I read my books" should outlive a membership change — the
+two have different lifetimes. It is **not** a generic key-value store either: that would turn field
+names into runtime strings, losing type checking and defaults, so a typo would only surface when a
+user reports it. Columns it is, with "which page's settings" carried in the path.
+
 ##### Accounts
 
 An **account** is what money and debts hang off in the bookkeeping model. Every account belongs
@@ -911,6 +954,13 @@ The three settlement tables are likewise all-new (`hamster_settlement_task`,
 backfill** for them — nothing existing is altered. They start empty, and the first collection run
 fills them from the transaction tables. Nothing is added to `hamster_transaction` except the
 `updated_at` column handled above.
+
+The personal account-set preference table `hamster_account_set_preference` is a brand-new table too
+— another "add a table, alter no column" change — so it also needs **no migration and no backfill**:
+it starts at 0 rows on an upgraded database and is written the first time a user presses Query or
+Reset. **An empty table means "nothing was ever saved"**, exactly as a `GET` returning two empty
+arrays says, and the page falls back to the default view (this month, all accounts, no tag filter) —
+behaviourally identical to having saved an empty filter.
 
 ### Frontend Setup
 

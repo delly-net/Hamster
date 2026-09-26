@@ -222,16 +222,50 @@ const counterpartyOptions = computed(() =>
 )
 
 /**
- * 分类候选：**含已停用分类**。
+ * 分类候选：**只含启用中的分类，已停用的一律不出现在候选里**（本笔当前那一枚也不例外）。
  *
- * 这一笔可能正挂在一个已停用的分类上（停用是「不再供新记账选择」，不是「历史上从未用过」，
- * 见明细页的分类列口径）。候选里没有它，输入框的文本就会与候选项对不上，界面还会提示
- * 「不是已有分类，提交后将自动创建」——而那句话是错的：后端按名匹配时**含已停用分类**，
- * 会归到那个同名分类上。故这里宁可把停用项一并列出来。
+ * 停用即软删除，其语义是「不再供新记账选择」——改账同属「重新选一次分类」，
+ * 故候选里不该再给出已停用的项（记账表单与账户候选是同一口径：`categoriesStore.list(false)`）。
  *
- * 不做其他过滤：分类没有可见性维度，也不随币种变化，账套内的全量分类即是候选全集。
+ * **但「候选里没有」不等于「这一笔不能保持原样」**：本笔当前挂着的分类可能正是已停用的，
+ * 此时输入框仍回填它原本的名称（见 `initFields`，那个名字取自交易自己的数据而非候选表），
+ * 保存时后端按名匹配**含已停用分类**，会归到原来那一行上、**不会**新建一个同名的。
+ * 候选与输入框因此可能对不上，`CategorySearchSelect` 还会按自己的逻辑提示
+ * 「不是已有分类，提交后将自动创建」——那句话在这种情形下是不准确的，
+ * 故由 {@link showInactiveCategoryHint} 在字段下方补一句如实说明。
+ * **不改选择框那句文案**：它同时服务记账表单，为一个只在本弹窗成立的例外去改公共组件，
+ * 会让另外两处调用点也读到一句与它们无关的说明。
+ *
+ * 取数**仍取全量**（`loadDictionaries` 用 `list(true)`）：判「本笔那一枚是不是已停用的」
+ * 必须有全量在手，把取数一并收窄成 `list(false)` 就判不出来了。
+ *
+ * 不做其他过滤：分类没有可见性维度，也不随币种变化——停用状态是这里唯一的收窄条件。
  */
-const categoryOptions = computed(() => categoriesStore.categories)
+const categoryOptions = computed(() =>
+  categoriesStore.categories.filter((category) => category.isActive),
+)
+
+/**
+ * 是否要说明「本笔当前的分类已停用」。
+ *
+ * 成立条件是「输入框里有名字、且这个名字对应一枚已停用的分类」：此时该名字既不在候选里
+ * （故点开候选看不到它），保存后却又会**原样归到它上面**——不说明的话，
+ * 用户会以为自己正在把这个分类改成一个新分类。
+ *
+ * 按**名称**匹配而不是按主键：真正的判据是「输入框里的这串字会不会被后端归到某个已停用分类上」，
+ * 而用户完全可以在此处把名字改掉（改成一个启用分类的名字、或一个全新的名字），
+ * 那时这句话就不成立了。按名匹配与后端 `FindByNameAsync` 的口径一致（不区分大小写、比 Trim 后的值）。
+ */
+const showInactiveCategoryHint = computed(() => {
+  const name = categoryText.value.trim().toLowerCase()
+  if (name.length === 0) {
+    return false
+  }
+
+  return categoriesStore.categories.some(
+    (category) => !category.isActive && category.name.trim().toLowerCase() === name,
+  )
+})
 
 /**
  * 标签候选：**含已停用标签**，理由与 {@link categoryOptions} 逐字相同。
@@ -357,12 +391,18 @@ function parseAmount(raw: unknown): number | null {
 }
 
 /**
- * 拉取分类与标签候选（两者都**含已停用项**，理由见各自的 computed）。
+ * 拉取分类与标签的**全量**字典（`list(true)`，含已停用项）。
+ *
+ * 「取全量」与「候选列什么」是两件事，两张字典的理由并不相同：
+ * - 分类：**候选只要启用的**（见 `categoryOptions`），但取数必须全量——
+ *   判「本笔当前那一枚是不是已停用的」（`showInactiveCategoryHint`）要有全量在手，
+ *   取数一并收窄成 `list(false)` 就再也判不出来。
+ * - 标签：候选本身就含已停用（见 `tagOptions`），故取数同样必须全量。
  *
  * 账户候选不在这里拉：「账目明细」页已经取好了同一份（且口径一致、含已停用账户），
  * 本弹窗从页面上打开，那份列表必然已经在了——再拉一次只会多一次往返与一份可能不同步的数据。
- * 分类与标签在这两处不再共用：明细页的分类/标签筛选候选取的是**全量**（也含已停用），
- * 与这里的口径一致但用途不同（那边是筛选条件、这里是本笔的取值），故仍在此各拉一次。
+ * 分类与标签在这两处不再共用：明细页的分类/标签筛选候选取的也是**全量**，
+ * 与这里的取数口径一致但用途不同（那边是筛选条件、这里是本笔的取值），故仍在此各拉一次。
  */
 async function loadDictionaries(): Promise<boolean> {
   try {
@@ -593,6 +633,13 @@ onMounted(async () => {
               :options="categoryOptions"
               :placeholder="categoryPlaceholder"
             />
+            <!-- 候选里没有已停用分类，而本笔当前那一枚可能正是已停用的：
+                 此时选择框会提示「提交后将自动创建」，与后端按名归到原分类上的事实不符，
+                 故在字段下方如实说明（与账本账户那句 field-hint 同一做法） -->
+            <p v-if="showInactiveCategoryHint" class="field-hint">
+              「{{ categoryText.trim() }}」是已停用的分类，不在候选里；保持这个名字保存会<strong>原样归到它上面</strong>（不会新建同名的），
+              要换成别的分类请从候选中重选。
+            </p>
           </div>
 
           <div class="field">
@@ -681,10 +728,16 @@ onMounted(async () => {
   background-color: rgba(0, 0, 0, 0.32);
 }
 
-/* 26rem 与账套选择弹窗同宽：全站弹窗只有一种尺寸，且表单字段在本宽度下竖排正合适 */
+/* 比账套选择弹窗（26rem）宽：那里的内容是一个账户列表，一个窄列正合适；
+   而本弹窗要装 8 个字段，窄列下只能竖排、字段区必然要滚动几屏。
+   44rem = 704px，是本页`.fields`放下**两列 20rem**所需的最小宽度
+   （2 × 320px + 0.7rem 列间距 ≈ 651px，加两侧 1.35rem 内边距 ≈ 694px，留 10px 余量），
+   再宽也不会多出第三列（三列需要 971px，超过多数笔记本的可视区），故到此为止。
+   **全站弹窗不再只有一种尺寸**：这个取舍是刻意的——弹窗宽度跟着它的内容走，
+   而不是反过来让 8 个字段挤进 26rem 里去。 */
 .panel {
   width: 100%;
-  max-width: 26rem;
+  max-width: 44rem;
   max-height: 80vh;
   display: flex;
   flex-direction: column;
@@ -725,10 +778,17 @@ onMounted(async () => {
   gap: 0.7rem;
 }
 
+/* 两列自适应：窄屏自动并为一列，无需媒体查询（同记账表单 `EntryRecordForm` 的做法）。
+   列宽下限 20rem（320px）的算式见那里：账户选择框的候选行要装得下
+   「8 个汉字 + 归属范围 + 7 位数余额」≈ 308px，下限取 320px 留 12px 余量；
+   用 min(20rem, 100%) 而非直接写 20rem，是为了容器本身窄于 320px 时不撑破面板造成横向滚动。
+   `align-content: start` 不可省：字段区是定高滚动容器，默认的 stretch 会在字段少时
+   把几行拉高摊开，同一页出现两种行距。 */
 .fields {
   min-height: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
+  align-content: start;
   gap: 0.7rem;
   overflow-y: auto;
 }

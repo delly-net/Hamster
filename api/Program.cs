@@ -22,6 +22,7 @@ builder.Services.AddSingleton<IEntryQueryService, EntryQueryService>();
 builder.Services.AddSingleton<ICurrencyService, CurrencyService>();
 builder.Services.AddSingleton<ICategoryService, CategoryService>();
 builder.Services.AddSingleton<ITagService, TagService>();
+builder.Services.AddSingleton<IAccountSetPreferenceService, AccountSetPreferenceService>();
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 
 // 结算定时任务：配置（开关 / 触发时刻 / 节点名）、事件总线与订阅者、两个每日任务

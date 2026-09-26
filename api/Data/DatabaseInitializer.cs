@@ -22,10 +22,10 @@ public static class DatabaseInitializer
     /// 全部实体，供**逐表**建表使用；顺序沿用「先账号体系、再账套账目、后交易、最后标签与结算」。
     /// </summary>
     /// <remarks>
-    /// 用一份显式清单而不是四个 <c>InitTables&lt;…&gt;</c> 分组调用，理由有两条：
+    /// 用一份显式清单而不是若干个 <c>InitTables&lt;…&gt;</c> 分组调用，理由有两条：
     /// <list type="number">
     /// <item>
-    /// **分组只是绕开编译期限制**：SqlSugar 的泛型重载最多 5 个类型参数，14 张表因此被迫分四组。
+    /// **分组只是绕开编译期限制**：SqlSugar 的泛型重载最多 5 个类型参数，建表因此曾被拆成四组。
     /// 改为逐表调用（<c>InitTables(Type)</c>）后这条限制自然消失——分组调用在库内部本就是
     /// 「for 每个类型各调一次 <c>InitTables(type)</c>」，逐表调用与它**做的是同一件事**，不是另起一套。
     /// </item>
@@ -47,6 +47,7 @@ public static class DatabaseInitializer
         typeof(User),
         typeof(AccountSet),
         typeof(AccountSetMember),
+        typeof(AccountSetPreference),
         typeof(Account),
         typeof(Transaction),
         typeof(TransactionEntry),

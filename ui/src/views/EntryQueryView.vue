@@ -21,6 +21,16 @@
  * 筛选条件分「草稿」与「已应用」两份：改动输入不立刻发请求（避免边打字边查询），
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
  *
+ * **账户与标签的勾选会保存到「个人账套配置」里**（`hamster_account_set_preference`，
+ * 按「账套 + 用户」唯一），下次进入本页自动恢复上次的勾选并按它查询——日期区间**不在其中**，
+ * 每次都回到默认的「本月 1 日~今天」（日期是「我这次想看哪一段」，不是「我习惯怎么看账」）。
+ * 恢复发生在 {@link initialize}（进入页面 / 切换账套），**落库只发生在【查询】与【重置】两个
+ * 用户动作上**：进入页面时那一次查询是「读出来再查」，把同一份数据原样写回去只是白跑一次往返。
+ * 故「打开页面看到的是什么」与「库里存的是什么」可能不同：页面会把保存过的账户主键**与当前候选求交**
+ * （不在候选里的丢弃、一个都不剩则回落到全选），而库里那一份始终是保存当时的如实记录。
+ * 恢复所得与默认视图不同时才在提示位说一句「已恢复上次保存的筛选条件」——
+ * 恰好等于「全选 + 不限」时的这句话纯属噪音。
+ *
  * 「分类」列取自交易（不是明细）：同一笔交易的两条明细显示同一个分类，未分类显示 `—`。
  * 「标签」列同取处，但**是多值**：同一笔交易的两条明细显示同一组标签，没有标签显示 `—`。
  * 两者同属「这笔账的标注」，故在表格里并排、在卡片里同行，都用纯文本（顿号分隔）、读法一致。
@@ -70,6 +80,10 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import EntryEditDialog from '@/components/EntryEditDialog.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
+import {
+  useAccountSetPreferencesStore,
+  type EntryFilterPreference,
+} from '@/stores/accountSetPreferences'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import {
   COUNTERPARTY_KIND_LABELS,
@@ -85,6 +99,7 @@ const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
 const tagsStore = useTagsStore()
 const entriesStore = useEntriesStore()
+const preferences = useAccountSetPreferencesStore()
 
 /** 金额呈现：固定两位小数，与后端的 decimal(...,2) 对齐。 */
 const amountFormatter = new Intl.NumberFormat('zh-CN', {
@@ -111,6 +126,19 @@ const AMOUNT_UNAVAILABLE = '金额异常'
 
 const errorMessage = ref('')
 const notice = ref('')
+
+/**
+ * 提示位的补充说明：由「恢复了上次保存的条件」与「个人配置读写失败」两条路径写入。
+ *
+ * 与 {@link notice}（查询结果「共 N 条明细」）**拼成同一行**而不是另起一条提示：
+ * 这两件事都属于「本次查询附带的说明」，各占一行会让人以为页面上出了两个问题。
+ */
+const preferenceNote = ref('')
+
+/** 提示位的完整文案；两段都为空白时整行不显示。 */
+const noticeText = computed(() =>
+  [notice.value, preferenceNote.value].filter((part) => part.length > 0).join('；'),
+)
 
 /** 时间区间的草稿（本地日期文本，`YYYY-MM-DD`）。 */
 const draftFrom = ref('')
@@ -556,14 +584,20 @@ async function load(): Promise<void> {
  *
  * 三处校验都在前端拦下、**不发请求**：条件明显不完整时发出去只会拿到一个后端错误，
  * 而用户真正需要知道的是「哪个条件没填」。
+ *
+ * @param persist 是否把这次的条件保存到个人账套配置。默认 `true`（【查询】与【重置】这两个
+ * 用户动作都算「我以后也这么看」）；**进入页面时那次自动查询传 `false`**——
+ * 它只是把刚读出来的配置再查一遍，写回去是同一份数据的原样往返（见文件头注释）。
  */
-async function search(): Promise<void> {
+async function search({ persist = true }: { persist?: boolean } = {}): Promise<void> {
   if (!hasAccountSet.value) {
     return
   }
 
   errorMessage.value = ''
   notice.value = ''
+  // 用户自己发起的查询会让上一条「已恢复上次保存的条件」当场过期
+  preferenceNote.value = ''
 
   if (draftFrom.value.length === 0 || draftTo.value.length === 0) {
     errorMessage.value = '请选择完整的时间区间'
@@ -600,6 +634,10 @@ async function search(): Promise<void> {
   pageIndex.value = 1
 
   await load()
+
+  if (persist) {
+    await savePreference()
+  }
 }
 
 /** 翻页：复用已应用条件，只换页码。 */
@@ -632,8 +670,15 @@ function clearTags(): void {
   draftTagIds.value = []
 }
 
-/** 复位为「本月 + 全选可见账户 + 不限标签」并立即查询；这是进入页面与切换账套后的默认视图。 */
-async function resetToDefault(): Promise<void> {
+/**
+ * 清空筛选区与结果，并拉取账户与标签两份候选。
+ *
+ * 供「进入页面 / 切换账套」与【重置】两条路径共用：两者都要先把页面清干净、再拿到候选，
+ * 差别只在候选就绪之后（前者按保存的条件恢复，后者一律全选）。
+ *
+ * @returns 账户候选是否取到；未取到时页面无法确定「全选」选了哪些，调用方应中止。
+ */
+async function prepareCandidates(): Promise<boolean> {
   draftFrom.value = monthStartLocal()
   draftTo.value = todayLocal()
   selectedIds.value = []
@@ -642,11 +687,118 @@ async function resetToDefault(): Promise<void> {
   pageIndex.value = 1
   errorMessage.value = ''
   notice.value = ''
+  preferenceNote.value = ''
   entriesStore.clear()
 
   // 两份候选都要拉到：账户是必填条件（全选要用它），标签是筛选条件（没有也能正常查）
   const [accountsLoaded] = await Promise.all([loadAccounts(), loadTags()])
-  if (!accountsLoaded) {
+  return accountsLoaded
+}
+
+/**
+ * 把保存过的账户与标签条件落到草稿上。
+ *
+ * **账户主键一律与当前候选求交**：候选是「当前账套内我可见的钱账户」，
+ * 而保存下来的那一份可能来自账户被停用/改名之外更旧的状态。求交为空时**回落到全选**
+ * ——「至少选一个账户」是本页的硬校验，恢复出一个空账户集会让页面一进来就查不出东西，
+ * 而用户并未做错任何事。
+ *
+ * 标签同理求交（丢弃候选里没有的主键）：标签没有「至少选一个」的约束，故求交为空就是空，
+ * 正好落回它本来的默认值「不限标签」。
+ *
+ * @param saved 后端保存的筛选条件。
+ */
+function applySavedFilter(saved: EntryFilterPreference): void {
+  const availableAccounts = new Set(accountOptions.value.map((account) => account.id))
+  const restoredAccounts = saved.accountIds.filter((id) => availableAccounts.has(id))
+
+  selectedIds.value =
+    restoredAccounts.length > 0
+      ? restoredAccounts
+      : accountOptions.value.map((account) => account.id)
+
+  const availableTags = new Set(tagOptions.value.map((tag) => tag.id))
+  draftTagIds.value = saved.tagIds.filter((id) => availableTags.has(id))
+}
+
+/**
+ * 当前草稿是否就是默认视图（账户全选 + 不限标签）。
+ *
+ * 判据取「账户数是否等于候选总数」而不是「是否曾回落到全选」：恢复前后都拿这个口径看，
+ * 「恢复到一份与默认等价的配置」就不会被当成「恢复了一份特别的条件」。
+ */
+function isDefaultSelection(): boolean {
+  return selectedIds.value.length === accountOptions.value.length && draftTagIds.value.length === 0
+}
+
+/**
+ * 把已应用的条件保存到个人账套配置。
+ *
+ * **失败只补一句说明，不推翻刚查出来的结果**：账目已经查出来了，那是既成事实；
+ * 而这条提示的语气必须与「查询失败」区分开——用户下次进来看到的是旧条件，不是「账查不出来」。
+ * 与 #59「补拉失败的通知拼进同一条提示」同一口径。
+ */
+async function savePreference(): Promise<void> {
+  const filter = applied.value
+  if (filter === null) {
+    return
+  }
+
+  try {
+    await preferences.saveEntryFilter({
+      accountIds: filter.accountIds,
+      tagIds: filter.tagIds,
+    })
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '保存失败'
+    preferenceNote.value = `筛选条件未能保存（${reason}），下次进入仍按上次保存的条件`
+  }
+}
+
+/**
+ * 进入页面 / 切换账套后的初始化：按**上次保存的筛选条件**恢复，并立即查询。
+ *
+ * 与 {@link resetToDefault} 的分工是本页最要紧的一条：这里是「回到我上次看的样子」，
+ * 那边是「回到出厂样子」，两者都用 {@link search} 取数，但只有后者（以及用户点【查询】）
+ * 会把条件写回个人配置。
+ *
+ * **读配置失败不阻断页面**：回落到全选 + 不限标签照常查一次，并在提示位说明，
+ * 用户手上仍然是一个能用的页面（同「补拉候选失败」的处置）。
+ */
+async function initialize(): Promise<void> {
+  if (!(await prepareCandidates())) {
+    return
+  }
+
+  // 提示要在 `search` 之后才写：`search` 开头会清掉上一次的补充说明，
+  // 而这一次的补充说明正是它跑完之后才成立的（同 `onEdited` 把提示放在最后的理由）。
+  let restoredNote = ''
+
+  try {
+    applySavedFilter(await preferences.loadEntryFilter())
+    if (!isDefaultSelection()) {
+      restoredNote = '已恢复上次保存的筛选条件'
+    }
+  } catch (error) {
+    // 读不到配置时的兜底：账户全选（否则 `search` 的「至少选一个账户」会把页面挡在门口）
+    selectAllAccounts()
+    restoredNote = `${
+      error instanceof ApiError ? error.message : '读取个人筛选设置失败'
+    }（本次按默认条件查询）`
+  }
+
+  await search({ persist: false })
+  preferenceNote.value = restoredNote
+}
+
+/**
+ * 复位为「本月 + 全选可见账户 + 不限标签」并立即查询；这是【重置】按钮的行为。
+ *
+ * **它总是保存这一份**（`search` 的默认 `persist: true`）：否则下次进入又会恢复成重置前的条件，
+ * 按钮看起来像没生效——用户点【重置】的意思正是「我以后也要这个视图」。
+ */
+async function resetToDefault(): Promise<void> {
+  if (!(await prepareCandidates())) {
     return
   }
 
@@ -654,7 +806,8 @@ async function resetToDefault(): Promise<void> {
   await search()
 }
 
-// 账套切换后必须重来一遍：明细按账套隔离，沿用旧结果会显示上一账套的数据。
+// 账套切换后必须重来一遍：明细按账套隔离，沿用旧结果会显示上一账套的数据；
+// **个人配置同样按账套隔离**，故恢复的是「这个账套里的那一份」，不是上一个账套的。
 // 未选择账套时清空，避免退出登录后仍残留可见数据。
 watch(
   () => accountSets.currentId,
@@ -668,16 +821,17 @@ watch(
       draftTagIds.value = []
       errorMessage.value = ''
       notice.value = ''
+      preferenceNote.value = ''
       return
     }
 
-    await resetToDefault()
+    await initialize()
   },
 )
 
 onMounted(() => {
   if (hasAccountSet.value) {
-    void resetToDefault()
+    void initialize()
   }
 })
 </script>
@@ -720,7 +874,9 @@ onMounted(() => {
 
         <div class="filter-actions">
           <!-- 查询是页面的主操作：条件改动后需用户点它才生效，避免边改边查 -->
-          <button type="button" class="submit" :disabled="entriesStore.loading" @click="search">
+          <!-- 显式写成 `search()` 而不是 `search`：后者会把点击事件当作第一个实参传进去，
+               正好落进 `search` 的那个选项对象参数上 -->
+          <button type="button" class="submit" :disabled="entriesStore.loading" @click="search()">
             {{ entriesStore.loading ? '查询中…' : '查询' }}
           </button>
           <button
@@ -814,8 +970,17 @@ onMounted(() => {
         </p>
       </section>
 
+      <!-- 保存口径写在两块面板**之外**：它管的是账户与标签两处的勾选，
+           塞进任何一块都会让人以为只管那一块。用独立类名而不是复用 `.picker-hint`：
+           本行不属于任何一块面板，类名如实反映它所处的位置 -->
+      <p class="save-note">
+        账户与标签的勾选会按<strong>「你 + 当前账套」</strong>保存，下次进入本页自动恢复并按它查询；
+        点【重置】即回到「本月 1 日至今天 + 账户全选 + 不限标签」（并保存这一份默认视图）。
+        <strong>日期区间不保存</strong>：每次进入都是本月 1 日至今天。
+      </p>
+
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
-      <p v-if="notice" class="notice">{{ notice }}</p>
+      <p v-if="noticeText" class="notice">{{ noticeText }}</p>
 
       <!-- 金额字段缺失时必须说明标记的含义：三列表的空白本身是语义，
            缺字段却留空会让异常看起来像「这些行真的没有收支」 -->
@@ -1186,7 +1351,10 @@ onMounted(() => {
   opacity: 0.6;
 }
 
-.picker-hint {
+/* 面板内的字段说明与页面级的保存口径说明共用同一套排版：
+   两者都是「次要说明」，字号与透明度必须一致，否则同一页会出现两种「小字」 */
+.picker-hint,
+.save-note {
   font-size: 12.5px;
   line-height: 1.7;
   opacity: 0.7;
