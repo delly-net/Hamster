@@ -41,6 +41,7 @@ public sealed class EntryEndpoints : IEndpoint
                 string? from,
                 string? to,
                 int[]? accountIds,
+                int[]? tagIds,
                 int? page,
                 int? pageSize,
                 HttpContext context,
@@ -96,6 +97,7 @@ public sealed class EntryEndpoints : IEndpoint
                     hasFrom ? fromValue : null,
                     hasTo ? toValue : null,
                     accountIds,
+                    tagIds,
                     currentPage,
                     currentPageSize,
                     cancellationToken);
@@ -133,6 +135,16 @@ public sealed class EntryEndpoints : IEndpoint
                 "分类是可选的，null 是正常的，不是数据缺失。" +
                 "分类名由后端随行下发（分类改名后历史明细自动显示新名字），" +
                 "**已停用分类的名称照常给出**：停用是「不再供新记账选择」，不是「历史上从未用过」。" +
+                "**tags 为交易级属性**（标签挂在交易而非明细上，落在子表里）：" +
+                "一笔交易的两条明细会拿到同一份标签，**没有标签时是空数组**——标签是可选的，空数组是正常的。" +
+                "标签名同样由后端随行下发（标签改名后历史明细自动显示新名字），" +
+                "**已停用的标签名称照常给出**（与分类同一口径）。" +
+                "标签的**次序**即用户当初提交的次序，界面照此呈现即可，不必自己排序。" +
+                "tagIds 可重复传参、省略即不限标签；**匹配语义是「任一命中」**而非「全部命中」——" +
+                "多选标签的常规意图是「这几类我都想看看」，而不是「同时具备这几个标签的账」。" +
+                "与 accountIds 一样，**不属于本账套的标签主键会被静默忽略**（不报错、只是匹配不到），" +
+                "否则这个参数就成了探测「某标签是否属于他人账套」的探针；" +
+                "tagIds 与 accountIds **同时给出时是「且」的关系**，两个维度各自收窄。" +
                 "**账户筛选项请直接用 `GET /api/accounts?includeInactive=true`**：" +
                 "明细页的筛选需要含已停用账户（软删除的账户上仍有历史明细），该参数已经提供该能力，" +
                 "不另设一套平行接口。" +
@@ -263,13 +275,28 @@ public sealed class EntryEndpoints : IEndpoint
 /// 这条明细是否挂在**主账户**上（主账户 = 用户记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
 /// 一笔交易的两条明细里恰有一行为 <c>true</c>（期初余额的行恒为 <c>false</c>）。
 /// </param>
+/// <param name="Tags">
+/// 这笔交易挂着的标签（主键 + 名称），**没有标签时为空数组**；同一笔交易的两条明细拿到同一份。
+/// 次序即用户当初提交的次序，照此呈现即可。
+/// <para>
+/// 与 <see cref="TransactionDto"/> 共用 <see cref="TagRefDto"/> 这一个形状：
+/// 「某笔交易上的一个标签」在两个端点上就是同一件事，
+/// 各定义一个记录只会让前端为同一份 JSON 写两套类型。
+/// </para>
+/// </param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
 /// 对手方分档而非「给名称或给 null」：<c>Ledger</c> 与 <c>Hidden</c> 都不给主键与名称，
 /// 「不可见」这件事本身不携带任何可辨识信息。
 /// <para>
-/// **分类不分档**：它没有可见性维度（账套内所有成员共用同一份字典），
+/// **分类与标签都不分档**：两者都没有可见性维度（账套内所有成员共用同一份字典），
 /// 故直接给出主键与名称，不像对手方那样需要 <c>Ledger</c> / <c>Hidden</c> 这类遮罩档位。
+/// </para>
+/// <para>
+/// <see cref="Tags"/> **不带 <c>isActive</c>**：交易挂着的标签可能是已停用的
+/// （停用是「不再供新记账选择」，不是「历史上从未用过」）。本页一律按现有名字原样呈现，
+/// 不给已停用的标签加灰或划线——用户看的是「这笔账当时标了什么」，
+/// 不是「这份词汇表现在长什么样」。停用状态只在标签管理页里呈现。
 /// </para>
 /// <para>
 /// <see cref="IsPrimary"/> 是为**改账**下发的：一笔交易可能占两行（转账的两端都会呈现），
@@ -297,7 +324,8 @@ public sealed record EntryDto(
     string? CounterpartyName,
     int? CategoryId,
     string? CategoryName,
-    bool IsPrimary)
+    bool IsPrimary,
+    TagRefDto[] Tags)
 {
     /// <summary>由查询结果构造 DTO。</summary>
     /// <param name="row">明细行。</param>
@@ -329,7 +357,10 @@ public sealed record EntryDto(
         row.CategoryName,
         // 原样透传：判据在查询侧算得（见 EntryQueryRow.IsPrimary 的说明），
         // DTO 不重算——两处各算一遍正是它要避免的漂移
-        row.IsPrimary);
+        row.IsPrimary,
+        // 服务层的 EntryTag 与端点的 TagRefDto 形状相同但类型不同：依赖方向是端点 → 服务，
+        // 让服务层引用端点的 DTO 会把这个方向反过来。转换点只有这一处，成本是一个 Select
+        [.. row.Tags.Select(tag => new TagRefDto(tag.Id, tag.Name))]);
 }
 
 /// <summary>一页账目明细。</summary>

@@ -25,6 +25,9 @@ export const menuItems: MenuItem[] = [
   // 分类与账户同属记账的基础字典（记账时要选它），故紧随账户管理；
   // 同样面向所有登录用户、不设 adminOnly——记账时手工输入即会自动建分类
   { label: '分类管理', routeName: 'categories' },
+  // 标签与分类是同一层的记账基础字典（记账时都要选它们），故紧随分类管理；
+  // 同样面向所有登录用户、不设 adminOnly——记账时手工输入一个新标签名即会自动建标签
+  { label: '标签管理', routeName: 'tags' },
   // 查账入口，与账户管理同属面向所有登录用户的日常功能
   { label: '账目明细', routeName: 'entries' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },

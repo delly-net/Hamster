@@ -42,6 +42,14 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/tags',
+      name: 'tags',
+      // 标签管理（新建/改名/停用，归属当前账套），面向所有登录用户，故不设 requiresAdmin：
+      // 与分类同理——标签也是账套内成员共用的词汇表，且记账时手工输入即会自动建标签
+      component: () => import('../views/TagView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/income',
       name: 'income',
       // 记一笔收入（选定账户 + 金额 + 摘要即落表），面向所有登录用户，故不设 requiresAdmin。

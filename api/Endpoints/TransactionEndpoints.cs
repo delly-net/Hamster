@@ -37,6 +37,9 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <summary>分类名最大长度，与 <see cref="Category.Name"/> 的列长一致。</summary>
     private const int CATEGORY_NAME_MAX_LENGTH = 32;
 
+    /// <summary>标签名最大长度，与 <see cref="Tag.Name"/> 的列长一致。</summary>
+    private const int TAG_NAME_MAX_LENGTH = 32;
+
     /// <summary>金额绝对值上限，防止超出 decimal(18,2) 的表示范围（与账户端点同一口径）。</summary>
     private const decimal AMOUNT_ABS_LIMIT = 999_999_999_999.99M;
 
@@ -99,6 +102,16 @@ public sealed class TransactionEndpoints : IEndpoint
     private static readonly string[] CATEGORY_ERROR =
         ["所选分类在当前账套内不存在，请重新选择或改用分类名"];
 
+    /// <summary>标签主键在当前账套内不存在时的字段错误。</summary>
+    /// <remarks>
+    /// 与 <see cref="CATEGORY_ERROR"/> 同一取舍：标签同样**没有可见性维度**，
+    /// 分不出「不存在」与「无权访问」，故用 400 而非账户路径上的 404。
+    /// 文案里的「改用标签名」不是客套——手工输入标签名会**自动创建**，
+    /// 是用户面对一个失效标签时真正可用的退路。
+    /// </remarks>
+    private static readonly string[] TAG_ERROR =
+        ["所选标签在当前账套内不存在，请重新选择或改用标签名"];
+
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
     {
@@ -115,6 +128,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 IAccountService accounts,
                 ICurrencyService currencies,
                 ICategoryService categories,
+                ITagService tags,
                 ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
@@ -147,6 +161,8 @@ public sealed class TransactionEndpoints : IEndpoint
                 ValidateText(request.Remark, REMARK_MAX_LENGTH, "remark", "备注", errors, required: false);
                 // 分类可选（留空即「未分类」），但给了名字就得在列长以内——超长的名字要在建之前拦下
                 ValidateText(request.CategoryName, CATEGORY_NAME_MAX_LENGTH, "categoryName", "分类名", errors, required: false);
+                // 标签可选（一个不给即「没有标签」），同样只校验名字的列长
+                ValidateTagNames(request.TagNames, errors);
 
                 // 币种须是**存在的启用币种**：停用币种不接受新记账，
                 // 否则「停用」就挡不住新数据继续引用它（与账户新建同一口径）
@@ -222,10 +238,21 @@ public sealed class TransactionEndpoints : IEndpoint
                     return categoryFailure;
                 }
 
+                // 标签同理，也在所有校验之后解析：按名给的新标签会被**自动创建**，
+                // 放在校验闸门之前会让一个注定被拒的请求在标签表里留下痕迹
+                var (tagList, tagFailure) = await ResolveTagsAsync(
+                    request.TagIds, request.TagNames, accountSet.Id, tags, cancellationToken);
+
+                if (tagFailure is not null)
+                {
+                    return tagFailure;
+                }
+
                 var transaction = await transactions.RecordUserTransactionAsync(
                     account,
                     counterparty,
                     category,
+                    tagList,
                     type,
                     request.Amount,
                     hasOccurredAt ? occurredAt : DateTime.UtcNow,
@@ -236,7 +263,7 @@ public sealed class TransactionEndpoints : IEndpoint
 
                 return Results.Created(
                     $"{ApiPathConst.TRANSACTION_GROUP}/{transaction.Id}",
-                    TransactionDto.From(transaction, account, counterparty, category));
+                    TransactionDto.From(transaction, account, counterparty, category, tagList));
             })
             .WithName("RecordTransaction")
             .WithSummary("记一笔收入、支出或转账")
@@ -259,6 +286,15 @@ public sealed class TransactionEndpoints : IEndpoint
                 "只给了名字时，命中既有分类就用它（**含已停用的**，手工指名即归到它上面，不另建同名的），" +
                 "否则**自动创建**（这正是「记账时顺手建分类」的入口），名字 32 位以内。" +
                 "分类挂在**交易**而非明细上——一笔转账只带一个分类，因为「这笔账因何而发生」是整笔的属性。" +
+                "**标签可选且可有多个**（tagIds / tagNames，两者皆空即「没有标签」）：" +
+                "tagIds 是用户从候选中选中的，任一主键取不到即 400（标签按账套隔离）；" +
+                "tagNames 是用户手工输入的，命中既有标签就用它（**含已停用的**），否则**自动创建**（名字 32 位以内）。" +
+                "**两者是合并关系而非二选一**（与分类的「主键优先」刻意不同）：" +
+                "「从候选里选了一个、又手打了一个」是最常见的用法，按「有主键就忽略名字」处理会让手打的那个静默丢失；" +
+                "两者指向同一个标签时按主键去重，只挂一条。" +
+                "标签落在**子表**（hamster_transaction_tag）里而非交易表的一列上——" +
+                "多值标注塞进一个字符串列，既无法按标签精确筛选，改名后历史也会停在旧名字上；" +
+                "标签与交易头、两条明细**同一个事务**写入，故不存在「账记下了、标签没挂上」的半成品。" +
                 $"交易类型只能是 {RECORDABLE_TYPE_HINT}，期初余额（OpeningBalance）由系统在账户创建时自动生成，" +
                 "传它会被拒绝。" +
                 "amount **恒为正**：增减由 type 表达，不靠金额符号，故负数金额没有语义。" +
@@ -281,6 +317,7 @@ public sealed class TransactionEndpoints : IEndpoint
                 IAccountSetService accountSets,
                 IAccountService accounts,
                 ICategoryService categories,
+                ITagService tags,
                 ITransactionService transactions,
                 CancellationToken cancellationToken) =>
             {
@@ -331,6 +368,8 @@ public sealed class TransactionEndpoints : IEndpoint
                 ValidateText(request.Remark, REMARK_MAX_LENGTH, "remark", "备注", errors, required: false);
                 // 分类可选（留空即「未分类」），但给了名字就得在列长以内——超长的名字要在建之前拦下
                 ValidateText(request.CategoryName, CATEGORY_NAME_MAX_LENGTH, "categoryName", "分类名", errors, required: false);
+                // 标签可选：一个不给即「把这笔交易的标签清空」——**是覆盖而非保留**，与备注同一语义
+                ValidateTagNames(request.TagNames, errors);
 
                 // 发生时间在改账时**必填**，与新建时「省略即取当前时刻」刻意不同：
                 // 本次请求是**全量替换**（空备注即清空备注），若把缺时间解释成「保持原值」，
@@ -431,6 +470,14 @@ public sealed class TransactionEndpoints : IEndpoint
                     return categoryFailure;
                 }
 
+                var (tagList, tagFailure) = await ResolveTagsAsync(
+                    request.TagIds, request.TagNames, accountSet.Id, tags, cancellationToken);
+
+                if (tagFailure is not null)
+                {
+                    return tagFailure;
+                }
+
                 // 改写**整笔交易**（交易头 + 借贷两条明细），而非只改这一行：
                 // 复式记账的两条明细恒等额反向，只改一条即账不平。
                 // 余额无需任何额外动作——它是明细的派生值，改完下次查询即为新值
@@ -439,6 +486,7 @@ public sealed class TransactionEndpoints : IEndpoint
                     account,
                     counterparty,
                     category,
+                    tagList,
                     request.Amount,
                     occurredAt,
                     request.Summary!.Trim(),
@@ -451,7 +499,7 @@ public sealed class TransactionEndpoints : IEndpoint
                     return Results.NotFound(new { message = "账目不存在" });
                 }
 
-                return Results.Ok(TransactionDto.From(updated, account, counterparty, category));
+                return Results.Ok(TransactionDto.From(updated, account, counterparty, category, tagList));
             })
             .WithName("UpdateTransaction")
             .WithSummary("修改一笔已记账的收入、支出或转账")
@@ -471,6 +519,10 @@ public sealed class TransactionEndpoints : IEndpoint
                 TRANSFER_ACCOUNT_TYPE_HINT + "，收支留空即落该币种账本账户，按名命不中会新建个人往来账户）。" +
                 "**请求体不含 currencyCode**：交易表没有币种列，币种由主账户决定，" +
                 "对手方账户的币种必须与主账户一致（否则 400，与新建同一口径）。" +
+                "**标签（tagIds / tagNames）是整体替换**：本字段代表这笔交易改完之后**应有的全部标签**，" +
+                "原有关联中不在此列的一律被摘掉；两者都为空即「清空标签」——与备注同一语义（覆盖而非保留），" +
+                "要保留原标签就把它们原样传回来。解析口径与新建逐条一致（按名命不中会新建、" +
+                "命中含已停用、两者合并去重）。" +
                 "occurredAt 在本端点**必填**（与新建的「省略即取当前时刻」不同）：本次是全量替换，" +
                 "缺字段的含义只能是错误，要保留原时间就原样传回。" +
                 "**accountId 与 counterpartyAccountId 沿用新建的全部约束**（账户类型、同账户、可见性、币种）：" +
@@ -646,6 +698,142 @@ public sealed class TransactionEndpoints : IEndpoint
     /// <returns>400 响应。</returns>
     private static IResult CategoryProblem(string[] errors) =>
         Results.ValidationProblem(new Dictionary<string, string[]> { ["categoryId"] = errors });
+
+    /// <summary>
+    /// 解析本次记账要挂的标签集合——<c>tagIds</c> 与 <c>tagNames</c> **合并**成一个去重后的集合。
+    /// </summary>
+    /// <param name="tagIds">标签主键集合；用户从候选中**选中**时传它。未给出时为 <c>null</c>。</param>
+    /// <param name="tagNames">标签名集合；用户**手工输入**时传它。未给出时为 <c>null</c>。</param>
+    /// <param name="accountSetId">当前账套主键。</param>
+    /// <param name="tags">标签服务。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>
+    /// 标签集合（**空集合即「没有标签」**，是合法状态——记账时标签可选）与失败响应；
+    /// 成功时失败响应为 <c>null</c>。
+    /// </returns>
+    /// <remarks>
+    /// **与分类的「主键优先」刻意不同：这里两条来路是合并而非二选一。** 分类至多一个，
+    /// 「按主键取还是按名建」必须有先后；而一笔交易可以有多个标签，
+    /// 「从候选里选了『出差』、又手打了一个『报销』」是**最常见的用法**，
+    /// 按「有主键就忽略名字」处理会让手打的那个标签静默丢失。
+    /// <para>
+    /// 去重发生在**两处**，且各自都不能省：
+    /// <list type="bullet">
+    ///   <item>本方法内按主键去重（<c>seen</c>）：同一次请求里选了同一个标签两次、
+    ///   或「选中的标签」与「手打的名字」指向同一个标签，都归成一条。</item>
+    ///   <item>按名解析时用 <c>byName</c> 记下**本次请求刚创建/命中的标签**：
+    ///   手打两个同名标签（如 <c>["出差","出差"]</c>）时，第二次必须复用第一次的结果，
+    ///   否则会在标签表里建出两行同名标签——查重口径是「账套内不区分大小写」，
+    ///   同一个请求里建出两份正是它要杜绝的。</item>
+    /// </list>
+    /// </para>
+    /// <para>
+    /// **顺序 = 首次出现的顺序**（先 <paramref name="tagIds"/> 后 <paramref name="tagNames"/>）：
+    /// 关联行按插入顺序落库，查询侧按关联行主键升序取回，故界面上的标签次序与用户提交的一致。
+    /// </para>
+    /// <para>
+    /// **按名解析不限于启用标签**（<see cref="ITagService.FindByNameAsync"/> 刻意连停用的一并返回）：
+    /// 与分类同一口径——用户既然一字不差地打出了这个名字，意图就是归到那个标签上；
+    /// 此时若因它被停用而另建一个同名标签，历史流水就裂成了两份。
+    /// 停用挡的是「从候选里被选中」，不是「被手工指名」。
+    /// </para>
+    /// <para>
+    /// 这里**不需要**账户路径那样的可见性判定：标签没有归属人、也没有可见性维度
+    /// （见 <see cref="Tag"/>），账套内的标签对所有成员一视同仁。
+    /// </para>
+    /// </remarks>
+    private static async Task<(IReadOnlyCollection<Tag>? Tags, IResult? Failure)> ResolveTagsAsync(
+        int[]? tagIds,
+        string[]? tagNames,
+        int accountSetId,
+        ITagService tags,
+        CancellationToken cancellationToken)
+    {
+        var resolved = new List<Tag>();
+        var seen = new HashSet<int>();
+
+        foreach (var id in tagIds ?? [])
+        {
+            var byId = await tags.FindAsync(accountSetId, id, cancellationToken);
+
+            if (byId is null)
+            {
+                return (null, TagProblem(TAG_ERROR));
+            }
+
+            if (seen.Add(byId.Id))
+            {
+                resolved.Add(byId);
+            }
+        }
+
+        // 本次请求内按名命中的标签，归一化名称 → 实体。**必须在循环外持有**：
+        // 它的作用正是跨「同一个名字出现多次」复用结果（见上方 remarks）
+        var byName = new Dictionary<string, Tag>(StringComparer.Ordinal);
+
+        foreach (var raw in tagNames ?? [])
+        {
+            var name = raw?.Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                // 空串/纯空白项直接跳过：它既不是一次「选中」也不是一个「名字」。
+                // 不报错是因为锚点在于「列长」与「个数」没有语义约束——前端也不会发出这种项，
+                // 走到这里只可能是手写请求，静默忽略比给一条用户看不懂的 400 更合适
+                continue;
+            }
+
+            var normalized = name.ToLowerInvariant();
+
+            if (!byName.TryGetValue(normalized, out var tag))
+            {
+                // 不存在即创建：记账时顺手建标签是这个能力的**主用途**，不是兜底。
+                // 不预先判重名：FindByNameAsync 已覆盖同一范围（账套 + 不区分大小写），命中就返回了
+                tag = await tags.FindByNameAsync(accountSetId, name, cancellationToken)
+                    ?? await tags.CreateAsync(accountSetId, name, cancellationToken);
+                byName[normalized] = tag;
+            }
+
+            if (seen.Add(tag.Id))
+            {
+                resolved.Add(tag);
+            }
+        }
+
+        return (resolved, null);
+    }
+
+    /// <summary>构造标签校验失败的字段级 400。</summary>
+    /// <param name="errors">字段错误文案。</param>
+    /// <returns>400 响应。</returns>
+    /// <remarks>
+    /// 错误落在 <c>tagIds</c> 而不是 <c>tagNames</c>：文案说的是「所选标签不存在」，
+    /// 手工输入的名字不存在会走自动创建、根本不报错，故这条只可能因主键失效而触发。
+    /// </remarks>
+    private static IResult TagProblem(string[] errors) =>
+        Results.ValidationProblem(new Dictionary<string, string[]> { ["tagIds"] = errors });
+
+    /// <summary>校验标签名集合的每一项，把错误写入错误字典。</summary>
+    /// <param name="names">标签名集合；可为 <c>null</c>。</param>
+    /// <param name="errors">按字段聚合的错误字典。</param>
+    /// <remarks>
+    /// **只校验列长，不校验个数**：用户已确认单笔交易的标签数量不设上限
+    /// （标签是多值标注，人为设一个数字只会让用户在想多标的时候改不了账）。
+    /// <para>
+    /// 空串与纯空白项**不报错**：它们会被 <see cref="ResolveTagsAsync"/> 跳过，
+    /// 报一条「标签名不能为空」只会让用户对着一个自己没输入过的项莫名其妙。
+    /// </para>
+    /// </remarks>
+    private static void ValidateTagNames(string[]? names, Dictionary<string, string[]> errors)
+    {
+        foreach (var raw in names ?? [])
+        {
+            if ((raw?.Trim().Length ?? 0) > TAG_NAME_MAX_LENGTH)
+            {
+                errors["tagNames"] = [$"标签名不能超过 {TAG_NAME_MAX_LENGTH} 位"];
+                return;
+            }
+        }
+    }
 
     /// <summary>构造「账户币种与交易币种不一致」的字段级错误响应。</summary>
     /// <param name="actual">账户实际所属的币种代码。</param>
@@ -986,6 +1174,22 @@ public sealed class TransactionEndpoints : IEndpoint
 /// 按名解析**不限于启用分类**：手工指名一个已停用的分类会归到它上面，而不是另建一个同名的。
 /// </para>
 /// </param>
+/// <param name="TagIds">
+/// 要挂到这笔交易上的标签主键集合，可选；用户从候选中**选中**时传它。
+/// 其中任一主键在当前账套内取不到即 400（标签按账套隔离，越界的主键在库里不该存在）。
+/// </param>
+/// <param name="TagNames">
+/// 要挂到这笔交易上的标签名集合，可选；用户**手工输入**（未命中候选）时传它，
+/// **不存在则自动创建**，这就是「记账时顺手建标签」的入口。每项 32 位以内，与 <c>Tag.Name</c> 同长。
+/// <para>
+/// **与 <paramref name="TagIds"/> 是合并关系而非二选一**（与分类的「主键优先」刻意不同）：
+/// 「从候选里选了一个、又手打了一个」是最常见的用法，按「有主键就忽略名字」处理会让手打的那个静默丢失。
+/// 两者指向同一个标签时按主键去重，只挂一条。
+/// </para>
+/// <para>
+/// 按名解析**不限于启用标签**：手工指名一个已停用的标签会归到它上面，而不是另建一个同名的。
+/// </para>
+/// </param>
 public sealed record TransactionRequest(
     string? Type,
     int AccountId,
@@ -997,7 +1201,9 @@ public sealed record TransactionRequest(
     int? CounterpartyAccountId,
     string? CounterpartyName,
     int? CategoryId,
-    string? CategoryName);
+    string? CategoryName,
+    int[]? TagIds,
+    string[]? TagNames);
 
 /// <summary>改账请求体。</summary>
 /// <param name="AccountId">
@@ -1026,6 +1232,20 @@ public sealed record TransactionRequest(
 /// 取不到（不属于当前账套）则 400。两者皆空即「未分类」，是合法状态。
 /// </param>
 /// <param name="CategoryName">分类名，可选；不存在则**自动创建**，32 位以内。</param>
+/// <param name="TagIds">
+/// 标签主键集合，可选；语义与新建完全一致（取不到即 400）。
+/// **整体替换**：本字段代表这笔交易改完之后**应有的全部标签**，
+/// 原有关联中不在此列的一律被摘掉。
+/// </param>
+/// <param name="TagNames">
+/// 标签名集合，可选；不存在则**自动创建**，每项 32 位以内。与 <paramref name="TagIds"/> 合并。
+/// <para>
+/// 两者**都为空即「清空标签」**——是覆盖而非保留（与 <c>Remark</c> 同一语义）：
+/// 要保留原标签就把它们原样传回来。这里刻意不做「没传就保持原值」的区分，
+/// 否则同一份契约里会并存「全量替换」与「缺省保留」两套语义，
+/// 而改账的其余字段（备注、分类）都是前者。
+/// </para>
+/// </param>
 /// <remarks>
 /// **刻意不含 <c>Type</c>**：交易类型不可改——它决定两条明细的方向，而「收支互改」在语义上
 /// 是两笔不同的账。Minimal API 对多余字段静默忽略，故把不可改字段从契约中**整个删掉**，
@@ -1049,7 +1269,9 @@ public sealed record TransactionUpdateRequest(
     int? CounterpartyAccountId,
     string? CounterpartyName,
     int? CategoryId,
-    string? CategoryName);
+    string? CategoryName,
+    int[]? TagIds,
+    string[]? TagNames);
 
 /// <summary>交易（对外暴露）。</summary>
 /// <param name="Id">交易主键。</param>
@@ -1068,6 +1290,10 @@ public sealed record TransactionUpdateRequest(
 /// </param>
 /// <param name="CategoryId">分类主键；**未分类**时为 <c>null</c>。</param>
 /// <param name="CategoryName">分类名；**未分类**时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭。</param>
+/// <param name="Tags">
+/// 这笔交易挂着的标签（主键 + 名称），**没有标签时为空数组**。
+/// 顺序即关联行的落库顺序，与用户提交时的次序一致。
+/// </param>
 /// <param name="CreatedAt">落库时间（UTC，ISO 8601）。</param>
 /// <remarks>
 /// 枚举一律**以字符串**对外，前端据此映射中文标签，前后端不共同维护数值对照表。
@@ -1093,6 +1319,7 @@ public sealed record TransactionDto(
     string? CounterpartyName,
     int? CategoryId,
     string? CategoryName,
+    IReadOnlyList<TagRefDto> Tags,
     DateTime CreatedAt)
 {
     /// <summary>由实体构造 DTO。</summary>
@@ -1106,17 +1333,28 @@ public sealed record TransactionDto(
     /// 分类；**为 <c>null</c> 即「未分类」**，此时出参的两个分类字段均为 <c>null</c>。
     /// 由调用方把刚存下的分类实体传进来（它可能正是本次按名新建的），避免为取一个名字再查一次库。
     /// </param>
+    /// <param name="tags">
+    /// 这笔交易挂着的标签；**为 <c>null</c> 或空集合即「没有标签」**，此时出参为空数组。
+    /// 同样是调用方刚解析/写入的那一份（其中可能有本次按名新建的标签），
+    /// 避免为取几个名字再查一次库——与 <paramref name="category"/> 同一取舍。
+    /// </param>
     /// <returns>交易 DTO。</returns>
     /// <remarks>
     /// <see cref="CategoryId"/> 与 <see cref="CategoryName"/> 由参数 <paramref name="category"/>
     /// 同时给出或同时为 <c>null</c>：分类名是给界面直接显示的，主键是给后续改分类用的，
     /// 前端拿到两者就能既显示、又不必为改名再查一次。
+    /// <para>
+    /// 标签同理，且**出参恒为数组而非 <c>null</c>**：标签是多值的，
+    /// 「没有标签」在界面上的呈现是一片空白，让前端为它写一个判空分支没有任何信息量，
+    /// 空数组与「没有标签」是一一对应的。
+    /// </para>
     /// </remarks>
     public static TransactionDto From(
         Transaction transaction,
         Account account,
         Account? counterparty = null,
-        Category? category = null) => new(
+        Category? category = null,
+        IReadOnlyCollection<Tag>? tags = null) => new(
         transaction.Id,
         transaction.AccountSetId,
         transaction.Type.ToString(),
@@ -1135,5 +1373,29 @@ public sealed record TransactionDto(
         // 但从实体取能保证「回传的名字」与「落库的主键」出自同一条记录
         category?.Id,
         category?.Name,
+        // 标签恒转成数组（null → 空数组），不把「没有标签」编码成 null
+        [.. (tags ?? []).Select(TagRefDto.From)],
         DateTime.SpecifyKind(transaction.CreatedAt, DateTimeKind.Utc));
+}
+
+/// <summary>交易挂着的标签（标签主键 + 名称）。</summary>
+/// <param name="Id">标签主键。</param>
+/// <param name="Name">标签名称。</param>
+/// <remarks>
+/// 与 <see cref="TagDto"/> 分开是刻意的：那个描述的是**字典里的一条标签**
+/// （带账套、启用状态、创建时间），此处描述的是**某笔交易上的一个标注**——
+/// 界面需要的只有「显示什么名字」与「回传什么主键」，账套与创建时间在这里是噪音。
+/// <para>
+/// **没有 <c>isActive</c>**：交易挂着的标签可能是已停用的（停用是「不再供新记账选择」，
+/// 不是「历史上从未用过」）。前端拿到的标签**一律按现有名字原样呈现**，
+/// 不给已停用的标签加灰或划线——用户看的是「这笔账当时标了什么」，不是「这份词汇表现在长什么样」。
+/// 停用状态只在标签管理页里呈现。
+/// </para>
+/// </remarks>
+public sealed record TagRefDto(int Id, string Name)
+{
+    /// <summary>由实体构造 DTO。</summary>
+    /// <param name="tag">标签实体。</param>
+    /// <returns>标签引用 DTO。</returns>
+    public static TagRefDto From(Tag tag) => new(tag.Id, tag.Name);
 }

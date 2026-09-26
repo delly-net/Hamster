@@ -36,11 +36,16 @@ public static class DatabaseInitializer
         try
         {
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
-            // 分两次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
+            // 分三次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
+            // （第二组正好 4 个，加标签两张表会到 6 个而超限，故标签单独一组——
+            //   勿把它们硬塞进第二组，那样编译期就会撞上「找不到匹配的重载」）
             db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
             db.CodeFirst.InitTables<Transaction, TransactionEntry, Currency, Category>();
+            // 标签：字典表 + 交易标签子表。两者要一起建——子表带指向 hamster_tag 的唯一索引，
+            // 表不存在时索引自然也建不出来。
+            db.CodeFirst.InitTables<Tag, TransactionTag>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency、hamster_category",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency、hamster_category、hamster_tag、hamster_transaction_tag",
                 options.DbTypeLabel);
 
             // 播种**必须先于账户币种回填**：回填要用默认币种代码，而默认币种正是播种时标出来的

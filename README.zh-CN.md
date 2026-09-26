@@ -297,6 +297,45 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 确有其共识，故 `CurrencySeeder` 成立）。空字典 + **记账时手工输入自动创建**，正好覆盖「开箱可用」。
 `category_id` 同理不必回填：它是可空 `int`，既有行取到 NULL 正是「未分类」这一合法值。
 
+##### 标签
+
+**标签**是挂在交易上的**批注**（「可报销」「日本旅行」「与小张分摊」）——自由、多值，与分类回答的
+「这笔账因何而发生」彼此正交。它与分类一样归属且仅归属一个账套，故每个账套各有一份自己的词汇。
+
+| 接口 | 鉴权 | 说明 |
+|---|---|---|
+| `GET /api/tags?includeInactive=false` | Bearer | 当前账套内的标签，按创建顺序正序；`includeInactive=true` 一并返回已停用的标签 |
+| `POST /api/tags` | Bearer | 新建（201）；请求体 `{ name }`，32 位以内 |
+| `PUT /api/tags/{id}` | Bearer | 仅改名（204）——请求体只有 `{ name }`；账套不可改，且**不在请求记录上**，传了也不会被读取 |
+| `POST /api/tags/{id}/deactivate` | Bearer | 停用（软删除，204） |
+| `POST /api/tags/{id}/activate` | Bearer | 启用（204） |
+
+错误契约与分类**逐条相同**：未带账套请求头 400、`name` 不合法 400；账套不存在或无权 403；
+标签不存在或属于其他账套 404；同一账套内重名 409（名称比对去空白后**不区分大小写**）。
+
+字典接口**刻意就是全部接口**：**没有「挂标签」端点**，也没有按交易挂标签的路由。标签在记交易时一并写入
+（见下），因为「带着标签记一笔账」与「记一笔账」是同一个动作而不是两个——分成两次往返，中间会留出一个
+「账已记下、标签还没挂上」的窗口。
+
+与分类的**唯一结构性差异是基数**。分类至多一个（它是交易头上的一列），而一笔交易可以挂**任意多个标签、
+不设上限**，故标签落在子表里：
+
+| 表 | 内容 |
+|---|---|
+| `hamster_tag` | 标签字典：所属账套、名称、启用标记、创建时间 |
+| `hamster_transaction_tag` | 关联行：交易、标签。`(transaction_id, tag_id)` 唯一 |
+
+**关联行挂在交易上而非明细上**（理由同分类）：标签描述的是记账这一行为本身，而一笔转账会落两条明细——
+挂在明细上会逼一笔转账把标签选两遍。由此带来一个需要知道的结果：
+**同一笔交易的两条明细携带同一组标签。**
+
+`(transaction_id, tag_id)` 上的唯一索引使这层关系是一个**集合**：同一个标签挂两次是空操作而不是重复行，
+且写入前会先归一（按主键去重、保持提交次序）。改名安全的前提与分类相同：关联行存的是**主键**，
+历史明细因此跟着同一行走、改完即显示新名称。
+
+标签同样**只停用、不物理删除**（历史挂在它上面）、**不播种**（空字典 + 记账时按名自动创建就是预期的起点），
+且**账套内任何成员都可维护**——与分类一样不拆用户侧 / 管理侧。
+
 ##### 交易与流水
 
 记账采用**复式记账**：**每一笔交易都有借贷两条明细**，借方金额合计恒等于贷方金额合计。
@@ -372,7 +411,7 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 | 端点 | 认证 | 说明 |
 |---|---|---|
-| `POST /api/transactions` | Bearer | 记一笔收入、支出或转账（201）。请求体 `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName, categoryId, categoryName }`：`type` 只能是 `Income` / `Expense` / `Transfer`（字符串，传数字或 `OpeningBalance` 一律 400）；`amount` 须 `> 0` 且至多两位小数；`occurredAt` 为 ISO 8601 时间，取**业务发生时间**（可补记往日）；`summary` 必填（≤128）、`remark` 可选（≤256）；`currencyCode` 必填且**须与两个账户的币种一致**；`counterpartyAccountId` 与 `counterpartyName` 两者皆空即「未指定对手方」，同时给出时**以主键为准**（主键比名称精确）；`categoryId` 与 `categoryName` 两者皆空即「未分类」。返回落库后的交易（含 `id` / `accountName` / `counterpartyName` / `categoryName`） |
+| `POST /api/transactions` | Bearer | 记一笔收入、支出或转账（201）。请求体 `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName, categoryId, categoryName, tagIds, tagNames }`：`type` 只能是 `Income` / `Expense` / `Transfer`（字符串，传数字或 `OpeningBalance` 一律 400）；`amount` 须 `> 0` 且至多两位小数；`occurredAt` 为 ISO 8601 时间，取**业务发生时间**（可补记往日）；`summary` 必填（≤128）、`remark` 可选（≤256）；`currencyCode` 必填且**须与两个账户的币种一致**；`counterpartyAccountId` 与 `counterpartyName` 两者皆空即「未指定对手方」，同时给出时**以主键为准**（主键比名称精确）；`categoryId` 与 `categoryName` 两者皆空即「未分类」；`tagIds` 与 `tagNames` 取**并集**（见下），标签全空即「不挂标签」。返回落库后的交易（含 `id` / `accountName` / `counterpartyName` / `categoryName` / `tags`） |
 
 该端点同时落成两条明细、金额相等方向相反，方向由 `type` 推出（见上表），故 `amount` 恒为正。
 `accountId` 是**目标账户**：收入时是收入账户（余额增加），支出时是支出账户、**转账时是转出账户**
@@ -405,6 +444,16 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 **一笔转账只带一个分类、不是两个**——分类挂在交易头上，两条明细共用它。
 
+标签按同样的「主键优先，否则按名」规则解析，但两个字段是**并集**而非二选一：
+调用方可能一部分从候选里点、一部分现场手打，两半都必须生效。`tagIds` 逐个查、每个都须
+**在当前账套内**存在（否则 400 落在 `tagIds` 字段上）；`tagNames` 在**当前账套内含已停用**的标签里匹配
+（理由同分类），查不到即**自动创建**。同一次请求里同一个名字只建一次——两个都写同一个新名字时归到同一行，
+不会撞出两个同名标签。整组写入前按主键去重、保持提交次序；标签全空即「不挂标签」，是合法状态。
+标签与分类**在同一步、即所有校验闸门之后**解析，并与交易头、两条明细**写在同一个事务里**：
+被拒的请求不在标签表留下任何行，成功的也不会「挂了一半」。
+
+**一笔转账的两条明细携带同一组标签**，理由与它只带一个分类相同。
+
 **转账只走第一支**：它的两个端点都是真实账户，没有「账套之外」这一说，故除 `type` 外只多四条专有校验
 （其余字段规则与收支完全共用）：
 
@@ -418,9 +467,9 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 第二条不是可有可无的洁癖：按名新建出来的是**往来账户**，若放行（或只是忽略该字段），
 转账的对手方就会绕开「只允许资金/负债」这条限制。
 
-错误契约：未选账套 400；`type` / `amount` / `occurredAt` / 文本不合法 400；
+错误契约：未选账套 400；`type` / `amount` / `occurredAt` / 文本 / 标签名（≤32）不合法 400；
 **两个账户币种不一致**（含 `currencyCode` 与账户对不上）返回 400；转账的上述四条专有校验返回 400；
-`categoryId` **在当前账套内不存在**亦返回 400（落在 `categoryId` 字段上，**不是 404**，理由见下）；
+`categoryId` 或 `tagIds` 中任一主键 **在当前账套内不存在**亦返回 400（落在对应字段上，**不是 404**，理由见下）；
 **账户不可见、不存在或属于其他账套一律 404**（三种情形回答相同，避免被用来探测他人账户）；
 
 分类的失败码**刻意与账户不一致**：账户解析不到回 404，是为了不让端点被用来探测他人账户；
@@ -438,7 +487,7 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 | 端点 | 认证 | 说明 |
 |---|---|---|
-| `GET /api/entries?from=&to=&accountIds=&page=&pageSize=` | Bearer | 当前账套内的交易明细，按发生时间正序分页；`from` / `to` 为 ISO 8601 时间、与交易的**业务发生时间**（`occurred_at`）比较且**均为闭区间**，省略即该侧不限；`accountIds` 可重复传参、也可整体省略；`page` 默认 1，`pageSize` 默认 50（上限 **200**）。返回 `{ items, total, page, pageSize }` |
+| `GET /api/entries?from=&to=&accountIds=&tagIds=&page=&pageSize=` | Bearer | 当前账套内的交易明细，按发生时间正序分页；`from` / `to` 为 ISO 8601 时间、与交易的**业务发生时间**（`occurred_at`）比较且**均为闭区间**，省略即该侧不限；`accountIds` 可重复传参、也可整体省略；`tagIds` 同样可重复传参、可整体省略，一笔交易**命中其中任一标签**即算匹配（用 `EXISTS` 而非连表——挂三个命中标签的交易仍只贡献每条明细一行，`total` 恒等于真正渲染的行数）。账户与标签两个维度是**且**的关系，各自独立收窄；`page` 默认 1，`pageSize` 默认 50（上限 **200**）。返回 `{ items, total, page, pageSize }` |
 
 **一行是一条明细，不是一笔交易。** 一笔交易由借贷两条明细构成，当两侧都落在所选账户上时就会呈现
 两行。`amount` **恒为正**、`direction`（`Debit` / `Credit`）为借贷方向，两者是账本的底层事实
@@ -512,14 +561,22 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 那些账确实发生过，藏起标签只会让历史读不通。因为分类是交易级的，**同一笔交易的两条明细携带同一对值**——
 转账的两行共用一个分类。
 
+每行同时携带 `tags`：一组 `{ id, name }`，**按提交次序**排列，未挂标签的交易为空数组。
+与分类一样，标签**没有档位之分**（没有需要遮的东西），且**名称由后端给出**，
+故改名会反映到历史明细上、**已停用**标签的名称照常返回。标签是交易级的，
+**同一笔交易的两条明细携带同一组标签**——这不是重复，而是同一个事实从两侧读到的结果。
+标签由额外一次查询取回（关联表 `LEFT JOIN` + 按交易分组），而不是并进主投影的连表里，
+故挂多个标签的交易仍只贡献每条明细一行。
+
 失败约定：未带账套请求头 400（「请先选择账套」）；账套不存在或无权 403；用户查不到 401；
 `from` / `to` 格式非法、`from` 晚于 `to`、`page < 1`、`pageSize` 超出 `1..200` 一律 400 字段级错误。
+`tagIds` 里给一个不存在的主键只是匹配不到任何行（标签没有可见性维度可探测），不是错误。
 
 ###### 修改一笔账目
 
 | 端点 | 认证 | 说明 |
 |---|---|---|
-| `PUT /api/transactions/{id}` | Bearer | 改写一笔已记账的收入、支出或转账（200）。请求体与 `POST` 同形但**没有 `type` 与 `currencyCode`**：`{ accountId, amount, occurredAt, summary, remark, counterpartyAccountId, counterpartyName, categoryId, categoryName }`，各字段规则与 `POST` 逐条相同。返回改写后的交易（含 `id` / `accountName` / `counterpartyName` / `categoryName`） |
+| `PUT /api/transactions/{id}` | Bearer | 改写一笔已记账的收入、支出或转账（200）。请求体与 `POST` 同形但**没有 `type` 与 `currencyCode`**：`{ accountId, amount, occurredAt, summary, remark, counterpartyAccountId, counterpartyName, categoryId, categoryName, tagIds, tagNames }`，各字段规则与 `POST` 逐条相同。返回改写后的交易（含 `id` / `accountName` / `counterpartyName` / `categoryName` / `tags`） |
 
 **改的是整笔交易，不是单独一行明细。** 一笔交易由借贷两条等额反向的明细构成，故两条**一并改写**、
 方向保持不变，复式配平在改完后仍然成立——只改一条即账不平，这正是「同步复式记账的其他关联明细」
@@ -551,6 +608,10 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 会把绝大多数收支判成不可编辑）。不满足时与「交易不存在」同响应 404，不泄露存在性：
 对手方是他人个人账户时，那笔账的另一半在别人名下，改它等于替别人改账。
 
+**标签是整组替换，不是增量挂载**：本次写入的标签就是改写后的全部——没带上即是去掉。
+这是「全量替换」的必然推论（与 `remark` 相同），而「只增不减」会让一个挂错的标签再也摘不掉。
+故空数组的含义是「这一笔现在不挂标签」，是一个明确的指令而不是「这个字段没传」。
+
 **只做 UPDATE，不删旧插新**：交易主键与两条明细主键**保持不变**（明细主键是明细查询的
 稳定排序键，换它会让翻页行序漂移），也不新增任何行。改完的明细照常从 `GET /api/entries` 读到，
 同一 `transactionId` 的两行会同步变化。失败约定与 `GET /api/entries` 一致（未带账套 400、
@@ -567,6 +628,11 @@ SqlSugar 的增量加列只会把新列补成**可空**，不会为既有行填�
 `is_admin` / `is_active` 回填为 `false`，即**本次升级前已注册的账号一律是「非管理员 + 未激活」**，
 需由管理员在用户管理页激活后才能登录。同理，历史账户行的 `is_system` 回填为 `false`
 （升级前的账户不可能是系统账户）；不补这一步，`is_system` 为 NULL 会让账户列表因无法绑定而 500。
+
+标签**无需任何回填**：标签不是 `hamster_transaction` 上的列，故没有既有表要改——
+`hamster_tag` 与 `hamster_transaction_tag` 是两张全新的表，由同一趟 `InitTables` 建出，
+而「没有关联行」本就精确地表示「未挂标签」这一合法值。从未用过标签的账套只是空字典，
+那正是预期的起点。
 
 ### 前端设置
 

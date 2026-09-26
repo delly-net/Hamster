@@ -24,9 +24,11 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
+import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { isEntryEditable, type Entry } from '@/stores/entries'
+import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
 import {
   transactionModeMeta,
   useTransactionsStore,
@@ -47,6 +49,7 @@ const emit = defineEmits<{
 
 const accountsStore = useAccountsStore()
 const categoriesStore = useCategoriesStore()
+const tagsStore = useTagsStore()
 const transactionsStore = useTransactionsStore()
 
 /** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
@@ -54,6 +57,9 @@ const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
 
 /** 分类名最大长度，与后端 `Category.Name` 的列长一致。前端拦一道只是为了少一次往返。 */
 const CATEGORY_NAME_MAX_LENGTH = 32
+
+/** 标签名最大长度，与后端 `Tag.Name` 的列长一致。 */
+const TAG_NAME_MAX_LENGTH = 32
 
 /**
  * 取不到账户角色名时的兜底文案。
@@ -103,6 +109,15 @@ const counterpartyAccountText = ref('')
 const categoryId = ref<number | null>(null)
 const categoryText = ref('')
 
+/**
+ * 已选标签，初值即这笔交易当前挂着的那些。
+ *
+ * **改账下标签是「覆盖」而不是「追加」**（与备注同一口径）：提交的 `tagIds` + `tagNames`
+ * 代表这笔交易改完之后**应有的全部标签**，全删空即清空标签。故初值必须把现有标签**全部**填进来，
+ * 少填一个就等于在保存时把它删掉了。
+ */
+const selectedTags = ref<TagRef[]>([])
+
 /** 金额草稿。**声明为 `string`**：输入框用 `type="text"`，v-model 不转型，恒为字符串。 */
 const draftAmount = ref('')
 const draftOccurredAt = ref('')
@@ -148,6 +163,11 @@ function initFields(): void {
   // 分类主键与名称同生同灭（后端保证），故「有名字必有主键」，不存在只有名字没有主键的中间态
   categoryId.value = entry.categoryId
   categoryText.value = entry.categoryName ?? ''
+
+  // 标签原样带着走：它们**都已经落库**（后端下发的是关联行对应的真实主键），
+  // 故此处不带 NEW_TAG_ID 的项，直接沿用 id 即可——不重新按名字去候选里找一遍
+  // （重复一遍匹配只会引入「改名之后对不上」这种自找的分支）
+  selectedTags.value = [...entry.tags]
 }
 
 /**
@@ -213,6 +233,17 @@ const counterpartyOptions = computed(() =>
  */
 const categoryOptions = computed(() => categoriesStore.categories)
 
+/**
+ * 标签候选：**含已停用标签**，理由与 {@link categoryOptions} 逐字相同。
+ *
+ * 还有一条标签专有的理由：芯片按交易自己的 `tags` 渲染、不查候选表，故停用标签**已经**能正确显示；
+ * 但用户把它删掉之后若想再加回来，候选里没有它就只能重新敲一遍名字（敲名字也能归到那个标签上，
+ * 后端按名匹配含已停用项），多这一步纯属自找。此处一并列出。
+ *
+ * 不做其他过滤：标签没有可见性维度，也不随币种变化。
+ */
+const tagOptions = computed(() => tagsStore.tags)
+
 /** 主账户字段的提示文案。 */
 const primaryPlaceholder = computed(() =>
   primaryAccountOptions.value.length === 0
@@ -232,6 +263,11 @@ const counterpartyPlaceholder = computed(() =>
 /** 分类字段的提示文案。 */
 const categoryPlaceholder = computed(() =>
   categoryOptions.value.length === 0 ? '暂无分类，可直接输入新分类名' : '可留空，或输入新分类名',
+)
+
+/** 标签字段的提示文案。 */
+const tagPlaceholder = computed(() =>
+  tagOptions.value.length === 0 ? '暂无标签，可直接输入新标签名' : '可留空，或输入新标签名',
 )
 
 /**
@@ -321,17 +357,19 @@ function parseAmount(raw: unknown): number | null {
 }
 
 /**
- * 拉取分类候选。
+ * 拉取分类与标签候选（两者都**含已停用项**，理由见各自的 computed）。
  *
  * 账户候选不在这里拉：「账目明细」页已经取好了同一份（且口径一致、含已停用账户），
  * 本弹窗从页面上打开，那份列表必然已经在了——再拉一次只会多一次往返与一份可能不同步的数据。
+ * 分类与标签在这两处不再共用：明细页的分类/标签筛选候选取的是**全量**（也含已停用），
+ * 与这里的口径一致但用途不同（那边是筛选条件、这里是本笔的取值），故仍在此各拉一次。
  */
-async function loadCategories(): Promise<boolean> {
+async function loadDictionaries(): Promise<boolean> {
   try {
-    await categoriesStore.list(true)
+    await Promise.all([categoriesStore.list(true), tagsStore.list(true)])
     return true
   } catch (error) {
-    errorMessage.value = error instanceof ApiError ? error.message : '加载分类失败'
+    errorMessage.value = error instanceof ApiError ? error.message : '加载分类与标签失败'
     return false
   }
 }
@@ -384,6 +422,14 @@ async function submit(): Promise<void> {
     return
   }
 
+  // 标签：切成接口要的两份载荷（已有主键的 + 待按名创建的），与记账表单同一份判据与函数。
+  // 超长同样先在本机拦下——选择框的输入框已带 maxlength，但载荷的合法性不该依赖子组件的一个属性
+  const { tagIds, tagNames } = splitTagRefs(selectedTags.value)
+  if (tagNames.some((name) => name.length > TAG_NAME_MAX_LENGTH)) {
+    errorMessage.value = `标签名不能超过 ${TAG_NAME_MAX_LENGTH} 位`
+    return
+  }
+
   // 转账的两个端点都是真实账户，没有「账套之外」这一说，故转入账户必须选定（后端同样会拒）
   if (isTransfer.value && counterpartyAccountId.value === null) {
     errorMessage.value = `请选择${meta.value.counterpartyLabel}`
@@ -419,6 +465,10 @@ async function submit(): Promise<void> {
       categoryId: categoryId.value,
       categoryName:
         categoryId.value === null && categoryNameDraft.length > 0 ? categoryNameDraft : null,
+      // 标签是**覆盖**而非追加：这两份载荷就是「改完之后应有的全部标签」，全删空即清空标签。
+      // 两份都上报、由后端合并去重（多值与分类的二选一刻意不同，理由见 store）
+      tagIds,
+      tagNames,
     })
 
     // 提示读法沿用记账表单：转账读作「转出 A → 转入 B」，收支读作「主账户（对手方）」；
@@ -426,13 +476,18 @@ async function submit(): Promise<void> {
     // 分类回显的是**后端落定的那个分类**（本次手工输入的名字可能是刚被自动创建的），
     // 而不是输入框里的文本：只有后端才知道这个名字最终归到了哪一条记录上。未分类时不显示这一段
     const categorySuffix = updated.categoryName === null ? '' : ` · 分类：${updated.categoryName}`
+    // 标签同记账表单：回显**后端落定的那些**（本次手打的、被合并到既有标签上的都在其中），
+    // 次序即提交次序；一个都没有时整段不显示——这正是「标签被清空了」的呈现
+    const tagSuffix =
+      updated.tags.length === 0 ? '' : ` · 标签：${updated.tags.map((tag) => tag.name).join('、')}`
+    const metaSuffix = `${categorySuffix}${tagSuffix}`
 
     emit(
       'saved',
       isTransfer.value
-        ? `已修改一笔转账：${updated.summary} 转出 ${updated.accountName} → 转入 ${updated.counterpartyName ?? '—'}${categorySuffix}`
+        ? `已修改一笔转账：${updated.summary} 转出 ${updated.accountName} → 转入 ${updated.counterpartyName ?? '—'}${metaSuffix}`
         : `已修改一笔${modeLabel.value}：${updated.summary} ${updated.accountName}` +
-            `（${meta.value.counterpartyLabel}：${updated.counterpartyName ?? '账本账户'}）${categorySuffix}`,
+            `（${meta.value.counterpartyLabel}：${updated.counterpartyName ?? '账本账户'}）${metaSuffix}`,
     )
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '保存失败'
@@ -465,12 +520,12 @@ onMounted(async () => {
   // 初值已在 setup 里落好，挂载后先让弹窗按初值渲染出来，再补齐会变化的部分（候选列表）
   await nextTick()
 
-  // **先聚焦，再拉分类**：聚焦是本弹窗的打开语义——Esc 关闭挂在**面板**的 keydown 上，
+  // **先聚焦，再拉候选**：聚焦是本弹窗的打开语义——Esc 关闭挂在**面板**的 keydown 上，
   // 焦点不在面板里键盘就整段失效（取消按钮仍可用，故只是部分能力失效，更难被发现）。
   // 把它挂在一次网络请求之后，就等于让「能不能按 Esc」取决于那次请求的快慢与成败。
   panelRef.value?.focus()
 
-  await loadCategories()
+  await loadDictionaries()
 })
 </script>
 
@@ -537,6 +592,17 @@ onMounted(async () => {
               input-id="edit-category"
               :options="categoryOptions"
               :placeholder="categoryPlaceholder"
+            />
+          </div>
+
+          <div class="field">
+            <label class="label" for="edit-tags">标签（可选，可多个）</label>
+            <!-- 初值即这笔交易当前挂着的全部标签，删芯片即「这笔账不再标它」——改账下标签是覆盖语义 -->
+            <TagMultiSelect
+              v-model:selected="selectedTags"
+              input-id="edit-tags"
+              :options="tagOptions"
+              :placeholder="tagPlaceholder"
             />
           </div>
 

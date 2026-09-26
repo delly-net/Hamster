@@ -51,6 +51,21 @@ public interface IEntryQueryService
     /// （与 <see cref="IAccountService.FindVisibleAsync"/>「不存在、不属于本账套、不可见三种情形同响应」
     /// 的取舍一致）；而往来账户本就不作为明细行出现，为它报错只会让调用方以为「传错了参数」。
     /// </param>
+    /// <param name="tagIds">
+    /// 标签主键集合；<c>null</c> 或空集合表示不限标签。
+    /// **匹配语义是「任一命中」**（交易挂着的标签中有任意一个在集合内即入选），
+    /// 不是要求全部命中——多选标签的常规意图是「这几类我都想看看」，而不是「同时具备这几个标签的账」。
+    /// <para>
+    /// 集合同样**静默求交**：不属于本账套的标签主键不会报错，只是匹配不到任何交易。
+    /// 理由与 <paramref name="accountIds"/> 逐字相同：标签主键按账套分配，
+    /// 对「传了别人的标签主键」报错、对「传了不存在的标签主键」报错、而对存在的沉默，
+    /// 三者组合起来就是一个能探出「某主键是否属于别人」的探针。
+    /// </para>
+    /// <para>
+    /// 与 <paramref name="accountIds"/> **同时给出时是「且」的关系**：
+    /// 两个筛选维度各自收窄，是筛选区的常规语义。
+    /// </para>
+    /// </param>
     /// <param name="page">页码，从 1 开始。</param>
     /// <param name="pageSize">每页条数。</param>
     /// <param name="cancellationToken">取消令牌。</param>
@@ -70,6 +85,7 @@ public interface IEntryQueryService
         DateTime? from,
         DateTime? to,
         IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
         int page,
         int pageSize,
         CancellationToken cancellationToken = default);
@@ -96,6 +112,10 @@ public interface IEntryQueryService
 /// <param name="IsPrimary">
 /// 这条明细是否挂在**主账户**上（主账户 = 用户记账时选定的那个账户：收入账户 / 支出账户 / 转出账户）。
 /// </param>
+/// <param name="Tags">
+/// 这笔交易挂着的标签，**没有标签时为空列表**。同一笔交易的两条明细会得到同一份标签——
+/// 与 <paramref name="CategoryId"/> 同理：标签挂在**交易**上。
+/// </param>
 /// <remarks>
 /// 分类挂在**交易**上而非明细上（见 <see cref="Transaction.CategoryId"/>），
 /// 故同一笔交易的两条明细会得到同一个分类——这是刻意的：一笔转账只应有一个分类。
@@ -116,6 +136,11 @@ public interface IEntryQueryService
 /// <see cref="TransactionType.OpeningBalance"/> 的行恒为 <c>false</c>——期初没有「主账户」这一概念
 /// （它的方向由期初金额的符号决定），而期初本就不支持编辑，故该字段对它无意义。
 /// </para>
+/// <para>
+/// 标签**没有可见性档位**（与分类同理、与对手方相反）：标签表没有可见性维度，
+/// 且此处只给「这笔账当时标了什么」——**已停用的标签照常给出名称**，
+/// 停用是「不再供新记账选择」，不是「历史上从未用过」。
+/// </para>
 /// </remarks>
 public sealed record EntryQueryRow(
     int Id,
@@ -133,7 +158,21 @@ public sealed record EntryQueryRow(
     string? CounterpartyName,
     int? CategoryId,
     string? CategoryName,
-    bool IsPrimary);
+    bool IsPrimary,
+    IReadOnlyList<EntryTag> Tags);
+
+/// <summary>某笔交易挂着的一个标签（服务层表示）。</summary>
+/// <param name="Id">标签主键。</param>
+/// <param name="Name">标签名称（可能是已停用标签的名称）。</param>
+/// <remarks>
+/// 与 <see cref="Category"/> 那一路不同，此处刻意**不返回标签实体**：交易挂着的标签在界面上只用于显示，
+/// 账套归属、启用状态、创建时间在这里都是噪音，而实体类型会把它们一并带出去。
+/// <para>
+/// 与端点层的 <c>TagRefDto</c> 形状相同却各自定义：服务层不引用端点层的类型
+/// （依赖方向是端点 → 服务，反过来会让服务层无法独立演进）。
+/// </para>
+/// </remarks>
+public sealed record EntryTag(int Id, string Name);
 
 /// <summary>一页明细。</summary>
 /// <param name="Items">本页明细。</param>

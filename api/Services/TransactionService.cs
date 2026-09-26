@@ -98,6 +98,8 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             ledger,
             ledgerDirection,
             amount,
+            // 期初分录是系统按账户建档动作生成的，没有「用户给它打标签」这一说法，故恒无标签
+            tags: null,
             cancellationToken);
 
         return true;
@@ -108,6 +110,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         Account account,
         Account? counterpartyAccount,
         Category? category,
+        IReadOnlyCollection<Tag>? tags,
         TransactionType type,
         decimal amount,
         DateTime occurredAt,
@@ -116,7 +119,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         int createdByUserId,
         CancellationToken cancellationToken = default)
     {
-        EnsureWriteInvariants(account, counterpartyAccount, category);
+        EnsureWriteInvariants(account, counterpartyAccount, category, tags);
 
         // 未指定对手方 → 用该账户币种的系统账本账户，语义即「款项来自/去往账套之外」。
         // 指定了对手方 → 直接用：此时这是一笔两个真实账户之间的转账，账本账户完全不参与。
@@ -154,6 +157,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             counterparty,
             counterpartyDirection,
             Math.Abs(amount),
+            tags,
             cancellationToken);
 
         return transaction;
@@ -240,6 +244,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         Account account,
         Account? counterpartyAccount,
         Category? category,
+        IReadOnlyCollection<Tag>? tags,
         decimal amount,
         DateTime occurredAt,
         string summary,
@@ -255,9 +260,9 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             throw new ArgumentException($"交易类型 {transaction.Type} 不支持修改", nameof(transaction));
         }
 
-        // 币种一致与分类同账套两条不变量与新建**共用同一份判据**：改一笔账与记一笔账
-        // 在这两点上是同一件事，各写一份迟早只改一处
-        EnsureWriteInvariants(account, counterpartyAccount, category);
+        // 币种一致与分类/标签同账套几条不变量与新建**共用同一份判据**：改一笔账与记一笔账
+        // 在这几点上是同一件事，各写一份迟早只改一处
+        EnsureWriteInvariants(account, counterpartyAccount, category, tags);
 
         // 对手方为空 → 按**新主账户**的币种取账本账户：这样「把一笔支出从 CNY 账户改到 USD 账户」
         // 也不会把人民币的金额记到美元的账本上（跨币种配平是没有意义的数）。
@@ -310,28 +315,134 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
 
             await db.Updateable(new List<TransactionEntry> { primary, other })
                 .ExecuteCommandAsync(cancellationToken);
+
+            // 标签**整体替换**，且必须在**本事务内**：删掉旧的与插上新的之间若能被别的请求看见，
+            // 那一刻这笔账看上去就是「标签丢了」。与明细的就地 UPDATE 不同，关联行没有排序依赖，
+            // 故先删后插是安全的（见 TransactionTag 的类头注释）。
+            await ReplaceTagsAsync(transaction.Id, tags, cancellationToken);
         });
 
         return transaction;
     }
 
     /// <summary>
-    /// 校验「唯一写账入口」的两条不变量：币种一致、分类同账套。
+    /// 把一笔交易的标签关联整体替换为 <paramref name="tags"/>（先删全部旧关联，再按集合插入）。
+    /// </summary>
+    /// <param name="transactionId">交易主键。</param>
+    /// <param name="tags">新的标签集合；<c>null</c> 或空集合即「清空标签」。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>
+    /// **必须在调用方的事务内执行**：本方法自身不开事务，「删完没插上」的空窗只能由外层挡住。
+    /// 新建路径不调本方法——它没有旧关联要删，直接在 <see cref="WriteBalancedTransactionAsync"/>
+    /// 里插入即可。
+    /// <para>
+    /// 无论新集合是否为空都先删：**清空标签**是一个正常操作（用户把标签全删掉），
+    /// 「空集合就直接返回」会让这个操作静默失效——旧关联留着不动。
+    /// </para>
+    /// </remarks>
+    private async Task ReplaceTagsAsync(
+        int transactionId,
+        IReadOnlyCollection<Tag>? tags,
+        CancellationToken cancellationToken)
+    {
+        await db.Deleteable<TransactionTag>()
+            .Where(link => link.TransactionId == transactionId)
+            .ExecuteCommandAsync(cancellationToken);
+
+        await InsertTagsAsync(transactionId, tags, cancellationToken);
+    }
+
+    /// <summary>
+    /// 为一笔交易插入标签关联行（空集合即什么都不做）。
+    /// </summary>
+    /// <param name="transactionId">交易主键（须已落库）。</param>
+    /// <param name="tags">标签集合；<c>null</c> 与空集合同义。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>
+    /// 插入前按主键去重：同一笔账挂同一个标签是「同一事实记两遍」，
+    /// 关联表上的唯一索引也只会在写入时抛异常（那是一个 500，而不是用户能理解的结果）。
+    /// 在写入前静默去重，比让用户看到「记一笔账失败」更符合本表单的既有口径。
+    /// <para>
+    /// 去重**保留首次出现的顺序**：虽然关联行没有排序依赖，但按去重后的顺序插入能让
+    /// 日志与库内主键分配更容易对照，且实现上比用 <c>HashSet</c> 打乱顺序更直白。
+    /// </para>
+    /// </remarks>
+    private async Task InsertTagsAsync(
+        int transactionId,
+        IReadOnlyCollection<Tag>? tags,
+        CancellationToken cancellationToken)
+    {
+        var unique = NormalizeTags(tags);
+        if (unique.Count == 0)
+        {
+            return;
+        }
+
+        await db.Insertable(unique
+            .Select(tag => new TransactionTag
+            {
+                TransactionId = transactionId,
+                TagId = tag.Id,
+            })
+            .ToList()).ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// 归一化标签集合：去掉 <c>null</c>、按主键去重、保持首次出现的顺序。
+    /// </summary>
+    /// <param name="tags">原始集合，可为 <c>null</c>。</param>
+    /// <returns>可安全写库的标签列表；无标签时为空列表。</returns>
+    /// <remarks>
+    /// <c>null</c> 与空集合统一成空列表：调用方在「没有标签」这一点上不该有两条不同的写路径。
+    /// </remarks>
+    private static List<Tag> NormalizeTags(IReadOnlyCollection<Tag>? tags)
+    {
+        if (tags is null || tags.Count == 0)
+        {
+            return [];
+        }
+
+        var seen = new HashSet<int>();
+        var unique = new List<Tag>(tags.Count);
+        foreach (var tag in tags)
+        {
+            if (seen.Add(tag.Id))
+            {
+                unique.Add(tag);
+            }
+        }
+
+        return unique;
+    }
+
+    /// <summary>
+    /// 校验「唯一写账入口」的几条不变量：币种一致、分类同账套、标签同账套。
     /// </summary>
     /// <param name="account">目标账户（收入账户 / 支出账户 / 转出账户）。</param>
     /// <param name="counterpartyAccount">对手方账户；<c>null</c> 即「未指定」，不看币种。</param>
     /// <param name="category">分类；<c>null</c> 即「未分类」。</param>
+    /// <param name="tags">标签集合；<c>null</c> 与空集合同义，即「没有标签」。</param>
     /// <remarks>
-    /// 新建与修改两条写入路径**共用本方法**：这两条不变量在两处是同一件事，
+    /// 新建与修改两条写入路径**共用本方法**：这几条不变量在两处是同一件事，
     /// 各写一份则只会在改其一的时候漏掉另一处。
     /// <para>
     /// **抛异常而非返回 null**：调用方传错参数是编码错误，不是用户可以修正的输入错误，
     /// 静默降级只会掩盖 bug。端点层已先判一次并给出 400，此处再判是因为本方法是唯一的写入口——
-    /// 把它守在这里，「跨币种交易」与「跨账套分类」在库里就不可能存在，
-    /// 与「配平由等额反向保证」同一性质（分类表没有可见性维度可依赖，这道卡只能设在写入路径上）。
+    /// 把它守在这里，「跨币种交易」「跨账套分类」「跨账套标签」在库里就不可能存在，
+    /// 与「配平由等额反向保证」同一性质（分类表与标签表都没有可见性维度可依赖，
+    /// 这道卡只能设在写入路径上）。
+    /// </para>
+    /// <para>
+    /// 标签**只判归属、不判启用状态**：停用是「不再出现在候选里」，不是「不可再被引用」。
+    /// 用户在编辑弹窗里保留一个已被停用的历史标签是合法操作，此处拦下它会让这类账无法保存
+    /// （与 <c>TagService.FindByNameAsync</c> 命中已停用标签照常返回它同一口径）。
     /// </para>
     /// </remarks>
-    private static void EnsureWriteInvariants(Account account, Account? counterpartyAccount, Category? category)
+    private static void EnsureWriteInvariants(
+        Account account,
+        Account? counterpartyAccount,
+        Category? category,
+        IReadOnlyCollection<Tag>? tags)
     {
         if (counterpartyAccount is not null
             && !string.Equals(counterpartyAccount.CurrencyCode, account.CurrencyCode, StringComparison.OrdinalIgnoreCase))
@@ -347,6 +458,18 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
                 $"分类（主键 {category.Id}）属于账套 {category.AccountSetId}，与交易所在账套 {account.AccountSetId} 不一致",
                 nameof(category));
         }
+
+        // 逐个判而不是只判第一个：调用方（端点层）取得的是「一组按名解析出来的标签」，
+        // 其中任何一个落在别的账套都是同一个编码错误，报出是哪一个比只报「有错」更有用
+        foreach (var tag in tags ?? [])
+        {
+            if (tag.AccountSetId != account.AccountSetId)
+            {
+                throw new ArgumentException(
+                    $"标签「{tag.Name}」（主键 {tag.Id}）属于账套 {tag.AccountSetId}，与交易所在账套 {account.AccountSetId} 不一致",
+                    nameof(tags));
+            }
+        }
     }
 
     /// <summary>
@@ -361,13 +484,18 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     /// </param>
     /// <param name="counterpartyDirection">对手方账户的借贷方向，须与 <paramref name="targetDirection"/> 相反。</param>
     /// <param name="amount">两条明细的金额（恒为正、且相等）。</param>
+    /// <param name="tags">
+    /// 要挂到这笔交易上的标签，<c>null</c> 与空集合同义；
+    /// 期初余额路径恒传 <c>null</c>——期初分录是系统生成的，没有标签可言。
+    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <remarks>
     /// 期初余额与用户记账两条写入路径共用本方法：两者的差异只在「方向怎么定」与「对手方是谁」，
     /// 落库动作完全相同，故收敛在此处，避免两份「插交易 + 插两条明细」的代码各自漂移。
     /// <para>
-    /// **交易与其明细同事务写入**：否则中途失败会留下一笔没有任何明细的「空交易」，
-    /// 它既进不了余额汇总，又会让回填的查重判定误以为该账户已经入账。
+    /// **交易、明细与标签关联同事务写入**：否则中途失败会留下一笔没有任何明细的「空交易」，
+    /// 它既进不了余额汇总，又会让回填的查重判定误以为该账户已经入账；
+    /// 标签若在事务外插，还会多出一种「账记好了但标签没挂上」的半成品。
     /// </para>
     /// <para>
     /// **本方法不校验两个账户的币种是否一致**：那是调用方（<see cref="RecordUserTransactionAsync"/>）
@@ -381,6 +509,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         Account counterpartyAccount,
         EntryDirection counterpartyDirection,
         decimal amount,
+        IReadOnlyCollection<Tag>? tags,
         CancellationToken cancellationToken)
     {
         await db.Ado.UseTranAsync(async () =>
@@ -404,6 +533,9 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
                     Amount = amount,
                 },
             }).ExecuteCommandAsync(cancellationToken);
+
+            // 新建路径没有旧关联要删，故直接插（替换走 ReplaceTagsAsync）
+            await InsertTagsAsync(transaction.Id, tags, cancellationToken);
         });
     }
 

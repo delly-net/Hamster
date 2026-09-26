@@ -45,6 +45,18 @@ public static class ApiPathConst
     /// </remarks>
     public const string CATEGORY_GROUP = "/api/categories";
 
+    /// <summary>标签端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
+    /// <remarks>
+    /// 口径与 <see cref="CATEGORY_GROUP"/> **逐条相同**：标签按账套隔离、软删除、
+    /// 账套内所有成员共用一份，且记账时手工输入的新名字会被自动创建，
+    /// 故读写不拆成两个分组、也不带管理员门槛。
+    /// <para>
+    /// 与分类**唯一的差别是基数**：一笔交易至多一个分类（分类是交易头上的一列），
+    /// 而一笔交易可以有多个标签（落在 <c>hamster_transaction_tag</c> 子表里）。
+    /// </para>
+    /// </remarks>
+    public const string TAG_GROUP = "/api/tags";
+
     /// <summary>账目明细查询端点路由分组前缀（任意已登录用户，须携带当前账套请求头）。</summary>
     public const string ENTRY_GROUP = "/api/entries";
 

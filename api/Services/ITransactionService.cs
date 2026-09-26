@@ -71,6 +71,18 @@ public interface ITransactionService
     /// 分类挂在**交易**而非明细上，故一笔转账只带一个分类。
     /// </para>
     /// </param>
+    /// <param name="tags">
+    /// 要挂到这笔交易上的标签集合，**可空**（<c>null</c> 与空集合同义，即「没有标签」，
+    /// 是正常状态——记账时标签是可选的）。
+    /// 非空时其中每个标签都必须是**同一账套**内的标签，否则抛 <see cref="ArgumentException"/>
+    /// （见下方「不变量」）。
+    /// <para>
+    /// 标签由端点层解析后传入（可能是用户选中的、也可能是按名自动创建的），
+    /// 本服务不查标签表——与 <paramref name="category"/> 同一取舍。
+    /// 与分类**唯一的差别是基数**：分类至多一个（交易头的一列），标签可以有多个
+    /// （落在 <c>hamster_transaction_tag</c> 子表里）。
+    /// </para>
+    /// </param>
     /// <param name="type">
     /// 交易类型，取值须满足 <see cref="TransactionTypeExtensions.IsUserRecordable"/>
     /// （<see cref="TransactionType.Income"/> / <see cref="TransactionType.Expense"/> /
@@ -100,10 +112,15 @@ public interface ITransactionService
     /// 把它守在这里，「跨币种交易」在库里就不可能存在，与「配平由等额反向保证」同一性质。
     /// </para>
     /// <para>
-    /// **不变量：分类不会跨账套。** <paramref name="category"/> 非空时其
+    /// **不变量：分类与标签都不会跨账套。** <paramref name="category"/> 非空时其
     /// <see cref="Category.AccountSetId"/> 必须与 <paramref name="account"/> 的一致，
-    /// 否则抛 <see cref="ArgumentException"/>。分类表没有可见性维度可依赖（与账户不同），
-    /// 这道卡只能设在写入路径上。
+    /// <paramref name="tags"/> 中的每个标签同理，否则抛 <see cref="ArgumentException"/>。
+    /// 分类表与标签表都没有可见性维度可依赖（与账户不同），这道卡只能设在写入路径上。
+    /// </para>
+    /// <para>
+    /// **标签与交易头、两条明细同处一个事务**（<c>db.Ado.UseTranAsync</c>）：
+    /// 否则中途失败会留下「交易记下了、标签没挂上」的半成品，而用户看到的是那一笔账已经记好了。
+    /// 标签没有单独的写入端点，正是为了不让这条原子性有被绕过的可能。
     /// </para>
     /// <para>
     /// **其余前置条件**（本方法不重复校验，与 <see cref="IAccountService"/> 的取舍一致）：
@@ -127,6 +144,7 @@ public interface ITransactionService
         Account account,
         Account? counterpartyAccount,
         Category? category,
+        IReadOnlyCollection<Tag>? tags,
         TransactionType type,
         decimal amount,
         DateTime occurredAt,
@@ -204,6 +222,10 @@ public interface ITransactionService
     /// 按新主账户的币种取，故改到一个不同币种的账户上也不会跨币种）。
     /// </param>
     /// <param name="category">新的分类，<c>null</c> 即「未分类」；非空时须与交易同账套。</param>
+    /// <param name="tags">
+    /// 新的标签集合，<c>null</c> 与空集合同义，即「把这笔交易的标签清空」——
+    /// **是覆盖而非保留**，与 <paramref name="remark"/> 同一语义（要保留原标签就把它们原样传回来）。
+    /// </param>
     /// <param name="amount">新的金额，**恒为正**。</param>
     /// <param name="occurredAt">新的业务发生时间（UTC）。</param>
     /// <param name="summary">新的摘要（调用方需保证已 Trim 且非空）。</param>
@@ -232,7 +254,13 @@ public interface ITransactionService
     /// 有符号汇总），明细一改，新旧账户的余额下次查询即为新值。库里没有余额列可写，也不该有。
     /// </para>
     /// <para>
-    /// **不变量与 <see cref="RecordUserTransactionAsync"/> 同源**（币种一致、分类同账套），
+    /// **标签整体替换**（先删全部关联行再按新集合插入），与明细的就地 UPDATE **刻意不同**：
+    /// 明细主键是查询侧的排序键、换不得，而标签关联行不参与任何排序或翻页，没有别的东西依赖它的主键。
+    /// 两条口径的差异源自「有没有别的东西依赖这个主键」，不是随意的松紧不一
+    /// （见 <c>TransactionTag</c> 的类头注释）。删除与插入都在同一个事务内，故不存在「删完没插上」的空窗。
+    /// </para>
+    /// <para>
+    /// **不变量与 <see cref="RecordUserTransactionAsync"/> 同源**（币种一致、分类与标签同账套），
     /// 由同一份判定守卫；<paramref name="transaction"/>.Type 不满足
     /// <see cref="TransactionTypeExtensions.IsUserRecordable"/> 时抛 <see cref="ArgumentException"/>
     /// ——期初余额交易改不得（它的金额恒等于账户的期初余额、且每账户至多一条，
@@ -245,6 +273,7 @@ public interface ITransactionService
         Account account,
         Account? counterpartyAccount,
         Category? category,
+        IReadOnlyCollection<Tag>? tags,
         decimal amount,
         DateTime occurredAt,
         string summary,

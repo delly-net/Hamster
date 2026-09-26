@@ -21,9 +21,12 @@
  *   填了不存在的名字则由后端自动创建为个人往来账户。
  * - **分类**：可留空（即「未分类」），也可输入一个不存在的名字——后端会在当前账套内自动创建它。
  *   它与币种无关（换币种不清空），也不区分收入/支出/转账，故不参与上面那套联动。
+ * - **标签**：可选、**可多个**、**不设上限**。与分类一样接受候选之外的新名字（后端自动创建），
+ *   与分类的差别只有两处：基数（多值）与提交形状（`tagIds` + `tagNames` **两份合并**，
+ *   而分类是「有主键就不传名字」的二选一）。同样与币种无关、不区分收入/支出/转账。
  *
- * 候选数据（账户与分类）的生命周期与本表单的字段是两件事：字段在每次复位时留空，而**候选缓存
- * 在提交成功后作废**——一笔交易会改变账户余额、还可能按名新建往来账户与分类，留着旧候选就是拿
+ * 候选数据（账户、分类与标签）的生命周期与本表单的字段是两件事：字段在每次复位时留空，而**候选缓存
+ * 在提交成功后作废**——一笔交易会改变账户余额、还可能按名新建往来账户、分类与标签，留着旧候选就是拿
  * 记账前的数回答「这笔钱从哪出」。作废后不立即重拉，由下一次需要候选时补上（见 `onFormFocusIn`）；
  * 币种缓存不参与，理由见 `loadMutableDictionaries`。
  */
@@ -31,10 +34,12 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
+import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
+import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
 import {
   TRANSACTION_MODE_META,
   useTransactionsStore,
@@ -56,6 +61,7 @@ const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
 const currenciesStore = useCurrenciesStore()
 const categoriesStore = useCategoriesStore()
+const tagsStore = useTagsStore()
 const transactionsStore = useTransactionsStore()
 
 /** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
@@ -76,11 +82,17 @@ const ACCOUNTS_RELOADING_PLACEHOLDER = '正在加载账户…'
 /** 分类候选处于同一空窗时的占位文案；理由同 {@link ACCOUNTS_RELOADING_PLACEHOLDER}。 */
 const CATEGORIES_RELOADING_PLACEHOLDER = '正在加载分类…'
 
+/** 标签候选处于同一空窗时的占位文案；理由同 {@link ACCOUNTS_RELOADING_PLACEHOLDER}。 */
+const TAGS_RELOADING_PLACEHOLDER = '正在加载标签…'
+
+/** 标签名最大长度，与后端 `Tag.Name` 的列长一致。前端拦一道只是为了少一次往返。 */
+const TAG_NAME_MAX_LENGTH = 32
+
 const errorMessage = ref('')
 const notice = ref('')
 
 /**
- * 账户与分类的候选缓存是否已被「提交成功」清空、尚未补拉。
+ * 账户、分类与标签的候选缓存是否已被「提交成功」清空、尚未补拉。
  *
  * **清空与补拉分成两步是刻意的**：清空是「不留旧值」的动作（提交一笔账之后这两份字典必定陈旧，
  * 见 `clearOptionCaches`），补拉则发生在**下一次需要候选**的时候（见 `onFormFocusIn`），
@@ -123,6 +135,16 @@ const counterpartyAccountText = ref('')
  */
 const categoryId = ref<number | null>(null)
 const categoryText = ref('')
+
+/**
+ * 已选标签。
+ *
+ * **一个数组而不是「主键集 + 名字串」两个 ref**：界面上的已选标签是同一个集合，
+ * 里面混着「已落库的（有真实主键）」与「刚敲下还没落库的（`NEW_TAG_ID`）」两种——把它们
+ * 拆成两份状态，删掉一个芯片就要记得删两处，漏一处即出现「芯片没了、名字还跟着提交」。
+ * 切分成接口要的两份载荷是**提交那一刻**的事，由 `splitTagRefs` 现算。
+ */
+const selectedTags = ref<TagRef[]>([])
 
 /** 金额草稿。**声明为 `string`**：输入框用 `type="text"`，v-model 不转型，恒为字符串。 */
 const draftAmount = ref('')
@@ -205,6 +227,22 @@ const categoryPlaceholder = computed(() =>
     : categoryOptions.value.length === 0
       ? '暂无分类，可直接输入新分类名'
       : '可留空，或输入新分类名',
+)
+
+/**
+ * 标签候选：当前账套内的**启用**标签（停用的不再供新记账选择）。
+ *
+ * 不做任何本地过滤——标签与分类同理，没有可见性维度，也不随币种变化。
+ */
+const tagOptions = computed(() => tagsStore.tags)
+
+/** 标签字段的提示文案；空窗分支的理由同 {@link categoryPlaceholder}。 */
+const tagPlaceholder = computed(() =>
+  optionsCleared.value
+    ? TAGS_RELOADING_PLACEHOLDER
+    : tagOptions.value.length === 0
+      ? '暂无标签，可直接输入新标签名'
+      : '可留空，或输入新标签名',
 )
 
 /** 主账户字段的提示文案；空窗分支的理由同 {@link categoryPlaceholder}。 */
@@ -303,14 +341,14 @@ function parseAmount(raw: unknown): number | null {
 }
 
 /**
- * 拉取**记账会改变的两份字典**：账户与分类。
+ * 拉取**记账会改变的三份字典**：账户、分类与标签。
  *
- * 记账改变的事实正好都落在这两份字典上——一笔交易必然改变相关账户的余额，对手方按名新建时
- * 后端还会多出一个本账套的往来账户；分类同样可能被后端按名自动创建。单独抽出来是因为它有两个
- * 触发时机、语义并不相同：
+ * 记账改变的事实正好都落在这三份字典上——一笔交易必然改变相关账户的余额，对手方按名新建时
+ * 后端还会多出一个本账套的往来账户；分类与标签同样可能被后端按名自动创建。单独抽出来是因为它
+ * 有两个触发时机、语义并不相同：
  * 1. 进入记账页 / 切换账套——连同币种一起拉齐（见 {@link loadOptions}）；
- * 2. 提交记账成功后这两份缓存已被清空，下一次需要候选时补拉（见 {@link onFormFocusIn}）。
- * 两处若各写一份清单，迟早漂移成「补拉了账户、忘了分类」。
+ * 2. 提交记账成功后这三份缓存已被清空，下一次需要候选时补拉（见 {@link onFormFocusIn}）。
+ * 两处若各写一份清单，迟早漂移成「补拉了账户、忘了标签」。
  *
  * **刻意不含币种**：它是全局字典，记账不会新建它；且它是账户候选的筛选前提（换币种要清空账户选择），
  * 清空它只会让币种下拉当场空白，与「币种回到默认值」的既有口径（#55）也相冲。
@@ -318,23 +356,28 @@ function parseAmount(raw: unknown): number | null {
  * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
  */
 async function loadMutableDictionaries(): Promise<void> {
-  await Promise.all([accountsStore.list(false), categoriesStore.list(false)])
+  await Promise.all([
+    accountsStore.list(false),
+    categoriesStore.list(false),
+    tagsStore.list(false),
+  ])
 }
 
-/** 拉取币种字典、记账可选的账户与分类（三者都只要启用的）。 */
+/** 拉取币种字典、记账可选的账户、分类与标签（都只要启用的）。 */
 async function loadOptions(): Promise<boolean> {
   try {
     // 并发拉取：三者互不依赖（账户的币种过滤在前端做），串行只是白白多等几次往返
     await Promise.all([currenciesStore.loadActive(), loadMutableDictionaries()])
     return true
   } catch (error) {
-    errorMessage.value = error instanceof ApiError ? error.message : '加载币种、账户与分类失败'
+    errorMessage.value =
+      error instanceof ApiError ? error.message : '加载币种、账户、分类与标签失败'
     return false
   }
 }
 
 /**
- * 复位表单：币种回到默认币种、**主账户留空**、对手方清空、时间回到此刻。
+ * 复位表单：币种回到默认币种、**主账户留空**、对手方清空、分类与标签清空、时间回到此刻。
  *
  * **账户一律不预填第一个候选**（初始打开、提交成功后、点【重置】三处同此口径，均由本函数达成）。
  * 账户是「这笔钱记到哪」的决定性信息，预填一个用户没有选过的账户，等于把一个默认值伪装成
@@ -359,6 +402,10 @@ function resetFields(): void {
   categoryId.value = null
   categoryText.value = ''
 
+  // 标签同理，且它比分类更不能沿用：一笔可以有多个标签，留着上一笔的那几个芯片
+  // 极容易被当成「这一笔也是这些」而直接提交
+  selectedTags.value = []
+
   draftAmount.value = ''
   draftOccurredAt.value = nowLocalInput()
   draftSummary.value = ''
@@ -366,9 +413,9 @@ function resetFields(): void {
 }
 
 /**
- * 作废账户与分类的候选缓存。
+ * 作废账户、分类与标签的候选缓存。
  *
- * 记账成功后调用（**失败路径一律不调**：账没记下，缓存就不陈旧）。两个 store 的 `clear()`
+ * 记账成功后调用（**失败路径一律不调**：账没记下，缓存就不陈旧）。三个 store 的 `clear()`
  * 原本只有「退出登录 / 账套失效」一个调用方，此处是第二个，两处说的是同一件事——手上这份列表
  * 已不再是事实。
  *
@@ -378,6 +425,7 @@ function resetFields(): void {
 function clearOptionCaches(): void {
   accountsStore.clear()
   categoriesStore.clear()
+  tagsStore.clear()
   optionsCleared.value = true
   cacheNote.value = ''
 }
@@ -407,7 +455,7 @@ async function onFormFocusIn(): Promise<void> {
     cacheNote.value = ''
   } catch (error) {
     const reason = error instanceof ApiError ? error.message : '网络异常'
-    cacheNote.value = `（账户与分类列表刷新失败：${reason}，候选可能不是最新）`
+    cacheNote.value = `（账户、分类与标签列表刷新失败：${reason}，候选可能不是最新）`
   } finally {
     optionsReloading.value = false
   }
@@ -485,6 +533,14 @@ async function submit(): Promise<void> {
     return
   }
 
+  // 标签与分类同理：可留空、可多个、可输入新名字。这里把它切成接口要的两份载荷（已有主键的 + 待按名创建的），
+  // 超长同样先在本机拦下——选择框的输入框已带 maxlength，但载荷的合法性不该依赖子组件的一个属性
+  const { tagIds, tagNames } = splitTagRefs(selectedTags.value)
+  if (tagNames.some((name) => name.length > TAG_NAME_MAX_LENGTH)) {
+    errorMessage.value = `标签名不能超过 ${TAG_NAME_MAX_LENGTH} 位`
+    return
+  }
+
   // 转账的两个端点都是真实账户，没有「账套之外」这一说，故转入账户必须选定（后端同样会拒）
   if (isTransfer.value && counterpartyAccountId.value === null) {
     errorMessage.value = `请选择${counterpartyLabel.value}`
@@ -524,6 +580,10 @@ async function submit(): Promise<void> {
       categoryId: categoryId.value,
       categoryName:
         categoryId.value === null && categoryNameDraft.length > 0 ? categoryNameDraft : null,
+      // 标签是**多值**，与分类的取值规则刻意不同：这里两份载荷都上报、由后端合并去重
+      //（「从候选里选了一个、又手打了一个」是最常见的用法，二选一会让其中一个被悄悄丢掉）
+      tagIds,
+      tagNames,
     })
 
     // 记账后清空并可立即接着记下一笔：金额与摘要是逐笔的，沿用上一笔只会导致误提交
@@ -537,11 +597,16 @@ async function submit(): Promise<void> {
     // 而不是输入框里的文本：只有后端才知道这个名字最终归到了哪一条记录上。
     // 未分类时不显示这一段——空括号不如什么都不要
     const categorySuffix = created.categoryName === null ? '' : ` · 分类：${created.categoryName}`
+    // 标签同理回显后端落定的那些（含刚被自动创建的、以及被归到既有同名标签上的），
+    // 次序即提交次序；一个标签都没有时整段不显示
+    const tagSuffix =
+      created.tags.length === 0 ? '' : ` · 标签：${created.tags.map((tag) => tag.name).join('、')}`
+    const metaSuffix = `${categorySuffix}${tagSuffix}`
 
     notice.value = isTransfer.value
-      ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}${categorySuffix}`
+      ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}${metaSuffix}`
       : `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
-        `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）${categorySuffix}`
+        `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）${metaSuffix}`
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '记账失败'
   }
@@ -559,6 +624,7 @@ watch(
       accountsStore.clear()
       currenciesStore.clear()
       categoriesStore.clear()
+      tagsStore.clear()
       return
     }
 
@@ -636,6 +702,19 @@ onMounted(async () => {
             input-id="record-category"
             :options="categoryOptions"
             :placeholder="categoryPlaceholder"
+          />
+        </div>
+
+        <div class="field field-wide">
+          <label class="label" for="record-tags">标签（可选，可多个）</label>
+          <!-- 标签是多值的：候选中点选与手工输入新名字可以**同时**发生，两者都上报、由后端合并。
+               已选中的标签以芯片呈现，去掉一个即从数组里删掉——不做「文本 + 主键」那套单值契约，
+               理由见 TagMultiSelect 的文件头 -->
+          <TagMultiSelect
+            v-model:selected="selectedTags"
+            input-id="record-tags"
+            :options="tagOptions"
+            :placeholder="tagPlaceholder"
           />
         </div>
 
@@ -720,6 +799,16 @@ onMounted(async () => {
         <strong>分类可以留空</strong>（留空即「未分类」），也可以直接输入一个新名字——
         它会在当前账套内被自动创建；分类不区分收入/支出/转账，同一份字典三类共用。
       </p>
+
+      <!-- 标签这段话与记账类型无关（三种记账的标签口径完全一致），故写在 v-if/v-else 之外、
+           只写一遍——塞进上面两段会让同一句话出现两份，改一处漏一处 -->
+      <p class="hint">
+        <strong>标签可以留空，也可以选多个、输入新名字</strong>：它与分类同属「这笔账的标注」，
+        同样不区分收入/支出/转账，区别是<strong>一笔可以标任意多个（不设上限）</strong>——
+        从候选里选了几个、又手打了一个新名字，它们会一起挂上去。手打的新名字会在当前账套内
+        自动创建为标签；若这个名字已经有了（哪怕是已停用的），会归到它上面，不会另建一个同名的。
+        标签在「账目明细」页随交易整体呈现，也可按它筛选。
+      </p>
     </template>
   </section>
 </template>
@@ -733,8 +822,16 @@ onMounted(async () => {
 
 .form {
   display: grid;
-  /* 两列自适应：窄屏自动并为一列，无需媒体查询 */
-  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  /* 两列自适应：窄屏自动并为一列，无需媒体查询。
+     列宽下限是 20rem（320px）而不是原来的 12rem（192px）——**账户选择框的候选行要装得下**：
+     姓名 8 个汉字（13px × 8 = 104px）+ 归属范围「个人账户」（12px × 4 = 48px）
+     + 7 位数余额「9,999,999.99 CNY」（等宽数字约 106px）+ 两道 0.75rem 间隙（24px）
+     + 候选行内边距（17.6px）+ 浮层内边距与边框（8.4px）≈ 308px。
+     下限取 320px，留 12px 余量；下限若是 12rem，候选行会把账户名截到只剩 4 个汉字左右。
+     **为什么用 min(20rem, 100%) 而不是直接写 20rem**：容器本身窄于 320px 时（如 320px 宽的
+     手机，内容区仅约 288px），固定下限会撑破容器、造成整页横向滚动；min() 让下限随容器收敛，
+     溢出优先于截断。窄于 320px 时账户名用省略号截断——那是屏幕真的放不下，不是列宽没给够。 */
+  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
   gap: 0.85rem;
   padding: 1rem 1.15rem;
   border: 1px solid var(--color-border);

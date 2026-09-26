@@ -22,6 +22,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         DateTime? from,
         DateTime? to,
         IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
         int page,
         int pageSize,
         CancellationToken cancellationToken = default)
@@ -67,6 +68,13 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             return EmptyPage(page, pageSize);
         }
 
+        // 标签筛选集：去重后即条件用的一份（**不与任何集合求交**，与 targetIds 的处理刻意不同）。
+        // 不属于本账套的标签主键在这里不需要被剔除：它匹配不到任何关联行，
+        // 结果与「该标签在库里不存在」完全相同，而这正是想要的——报错才会变成探针（见接口注释）。
+        var tagFilter = tagIds is null || tagIds.Count == 0
+            ? []
+            : tagIds.Distinct().ToArray();
+
         // 条件先落到非空局部变量再进表达式树：SqlSugar 对「DateTime 与 DateTime? 比较」的翻译不可靠，
         // 拆开后表达式里只剩两个 DateTime 的比较。
         var hasFrom = from is not null;
@@ -76,7 +84,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         // 计数与取数各自新建查询对象：ISugarQueryable 是会被链式方法改写的，
         // 复用同一个实例会让计数结果带上分页条件。
-        var total = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue)
+        var total = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter)
             .CountAsync(cancellationToken);
 
         if (total == 0)
@@ -92,7 +100,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // ——这是该异常提示给出的官方出路。投影里的每个属性都直接来自某个表的列，故排序键仍是确切的表列。
         // 三级排序键的最后一级是明细主键，它让「同一时刻的多条明细」也有确定次序——
         // 否则翻页时同一行可能在两页里各出现一次。
-        var rows = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue)
+        var rows = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter)
             .Select((entry, tx) => new EntryRow
             {
                 EntryId = entry.Id,
@@ -119,6 +127,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         var counterparties = await ResolveCounterpartiesAsync(rows, nameById, cancellationToken);
         var categoryNames = await ResolveCategoryNamesAsync(rows, cancellationToken);
+        var tagsByTransaction = await ResolveTagsAsync(rows, cancellationToken);
 
         var items = rows
             .Select(row =>
@@ -159,7 +168,10 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                     counterparty.Name,
                     categoryId,
                     categoryName,
-                    isPrimary);
+                    isPrimary,
+                    // 标签按**交易**取（同一笔交易的两条明细得到同一份），查不到即空列表。
+                    // 与分类一样「没有标签」是合法常态，故不做任何占位
+                    tagsByTransaction.TryGetValue(row.TransactionId, out var tags) ? tags : []);
             })
             .ToArray();
 
@@ -175,12 +187,24 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <param name="fromValue">下界（含）。</param>
     /// <param name="hasTo">是否限制上界。</param>
     /// <param name="toValue">上界（含）。</param>
+    /// <param name="tagIds">标签筛选集；**空数组表示不限标签**（与 <paramref name="targetIds"/> 不同，
+    /// 后者空数组是不可达状态——调用方在它为空时就返回空页了）。</param>
     /// <returns>每次调用**新建**的查询对象。</returns>
     /// <remarks>
     /// 每次新建而非复用：计数与分页取数用的是两份互不干扰的查询。
     /// <para>
     /// 时间条件写在**父交易的业务发生时间**上（<see cref="Transaction.OccurredAt"/>）：
     /// 不是落库时间，也不是明细上的字段——明细刻意没有自己的时间列。
+    /// </para>
+    /// <para>
+    /// **标签条件用相关子查询，不用联表**：一笔交易可以挂多个标签，把
+    /// <see cref="TransactionTag"/> 联进来会让一笔多标签的交易在结果里**出现多行**
+    /// （每个标签一行），于是 <c>CountAsync</c> 得到的总数比真正渲染的行数大，
+    /// 页数也跟着说谎——而本页的口径是「total 与真正渲染的行数恒等」（见 #46 对明细行过滤的注释）。
+    /// <c>EXISTS</c> 形式的子查询只判有无、不产生行，这个口径不受标签个数影响。
+    /// </para>
+    /// <para>
+    /// 匹配语义是「**任一命中**」而不是「全部命中」：多选标签的常规意图是「这几类我都想看看」。
     /// </para>
     /// </remarks>
     private ISugarQueryable<TransactionEntry, Transaction> BuildBaseQuery(
@@ -189,12 +213,18 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         bool hasFrom,
         DateTime fromValue,
         bool hasTo,
-        DateTime toValue) =>
+        DateTime toValue,
+        int[] tagIds) =>
         db.Queryable<TransactionEntry>()
             .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
             .Where((entry, tx) => tx.AccountSetId == accountSetId && targetIds.Contains(entry.AccountId))
             .WhereIF(hasFrom, (entry, tx) => tx.OccurredAt >= fromValue)
-            .WhereIF(hasTo, (entry, tx) => tx.OccurredAt <= toValue);
+            .WhereIF(hasTo, (entry, tx) => tx.OccurredAt <= toValue)
+            .WhereIF(
+                tagIds.Length > 0,
+                (entry, tx) => SqlFunc.Subqueryable<TransactionTag>()
+                    .Where(link => link.TransactionId == tx.Id && tagIds.Contains(link.TagId))
+                    .Any());
 
     /// <summary>
     /// 解析本页每条明细的对手方。
@@ -347,6 +377,67 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         return categories.ToDictionary(row => row.Id, row => row.Name);
     }
 
+    /// <summary>
+    /// 批量取本页交易挂着的标签。
+    /// </summary>
+    /// <param name="rows">本页明细。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>交易主键到其标签列表的映射；不带标签的交易**不出现在映射里**（调用方按空列表处理）。</returns>
+    /// <remarks>
+    /// 与 <see cref="ResolveCategoryNamesAsync"/> 同一取舍：**查名称而不是随投影联表带出**——
+    /// 给 <see cref="BuildBaseQuery"/> 再挂一张表会让它变成三表联查，且标签是多值的，
+    /// 联表会像标签筛选那样把行数乘开。一次 <c>IN</c> 查询批量取回，代价与页大小同阶。
+    /// <para>
+    /// **不过滤 <see cref="Tag.IsActive"/>**：停用是「不再出现在候选里」，
+    /// 不是「历史上从未用过」。给历史明细隐藏标签名，等于让用户的旧账凭空少了这一层标注
+    /// （与分类名同一口径）。
+    /// </para>
+    /// <para>
+    /// 排序在**内存里按关联行主键**做：SqlSugar 在投影后的联表查询上做 <c>OrderBy</c>
+    /// 会撞上别名一致性检查（与 <c>QueryAsync</c> 里 <c>MergeTable()</c> 那段注释同一问题），
+    /// 而这里的数据量受页大小约束，排序代价可以忽略。
+    /// 按关联行主键（而非标签名或标签主键）升序 = **用户当初提交标签的次序**，
+    /// 界面上标签的先后与记账时填的一致。
+    /// </para>
+    /// <para>
+    /// 本页一笔交易都没挂标签时不查库：那是常态（标签是可选的）。
+    /// </para>
+    /// </remarks>
+    private async Task<IReadOnlyDictionary<int, IReadOnlyList<EntryTag>>> ResolveTagsAsync(
+        IReadOnlyList<EntryRow> rows,
+        CancellationToken cancellationToken)
+    {
+        var transactionIds = rows.Select(row => row.TransactionId).Distinct().ToArray();
+        if (transactionIds.Length == 0)
+        {
+            return new Dictionary<int, IReadOnlyList<EntryTag>>();
+        }
+
+        // 标签名取的是关联**指向的那条标签行**的当前名字（改名后历史明细自动显示新名字），
+        // 而不是把名字冗余在关联行上——关联行刻意只有两个主键（见 TransactionTag 的类头注释）
+        var links = await db.Queryable<TransactionTag>()
+            .LeftJoin<Tag>((link, tag) => link.TagId == tag.Id)
+            .Where((link, tag) => transactionIds.Contains(link.TransactionId))
+            .Select((link, tag) => new EntryTagLink
+            {
+                LinkId = link.Id,
+                TransactionId = link.TransactionId,
+                TagId = link.TagId,
+                Name = tag.Name,
+            })
+            .ToListAsync(cancellationToken);
+
+        return links
+            // 标签行缺失（外键未被数据库强制，且本系统只软删除标签、正常不会有）时静默跳过该关联行：
+            // 造不出名字的标签对界面毫无意义，而 Name 为 null 的标签会渲染成一片空白
+            .Where(link => !string.IsNullOrEmpty(link.Name))
+            .OrderBy(link => link.LinkId)
+            .GroupBy(link => link.TransactionId)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<EntryTag>)[.. group.Select(link => new EntryTag(link.TagId, link.Name))]);
+    }
+
     /// <summary>空页（无匹配明细，或目标账户集为空时直接给出，不必查库）。</summary>
     /// <param name="page">页码。</param>
     /// <param name="pageSize">每页条数。</param>
@@ -426,6 +517,30 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         public int Id { get; set; }
 
         /// <summary>分类名称。</summary>
+        public string Name { get; set; } = string.Empty;
+    }
+
+    /// <summary>标签关联的查询结果（关联行主键 + 交易主键 + 标签主键与名称）。</summary>
+    /// <remarks>
+    /// <see cref="LinkId"/> 只在内存里当排序键用，不会出现在 <see cref="EntryTag"/> 里——
+    /// 界面上标签的先后已由列表次序表达，再给一个主键只会诱使调用方自己排序。
+    /// <para>
+    /// <see cref="Name"/> 声明为非空 <c>string</c>：SqlSugar 的 <c>Select</c> 靠属性赋值，
+    /// 左联未命中时会写入 <c>null</c>，故调用方仍须判空（见 <c>ResolveTagsAsync</c>）。
+    /// </para>
+    /// </remarks>
+    private sealed class EntryTagLink
+    {
+        /// <summary>关联行主键（仅用于排序）。</summary>
+        public int LinkId { get; set; }
+
+        /// <summary>所属交易主键。</summary>
+        public int TransactionId { get; set; }
+
+        /// <summary>标签主键。</summary>
+        public int TagId { get; set; }
+
+        /// <summary>标签名称。</summary>
         public string Name { get; set; } = string.Empty;
     }
 

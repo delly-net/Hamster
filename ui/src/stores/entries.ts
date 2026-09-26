@@ -17,11 +17,15 @@
  * **分类挂在交易上**（不是明细上）：一笔交易的两条明细会拿到同一个 `categoryId` / `categoryName`。
  * 这不是重复，而是「一笔转账只应有一个分类」在明细视图下的如实呈现；未分类时两者均为 `null`，
  * 那是**正常状态**而不是数据缺失。
+ *
+ * **标签同理，且是多值的**：同一笔交易的两条明细会拿到同一个 `tags` 数组，没有标签时是**空数组**。
+ * 数组次序即用户当初提交标签的次序（后端按关联行主键升序取回），界面照此呈现即可、**不必自己排序**。
  */
 
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { request } from '@/api/http'
+import type { TagRef } from '@/stores/tags'
 
 /**
  * 借贷方向。
@@ -149,6 +153,17 @@ export interface Entry {
    * ——后端算好给出，前端只消费。
    */
   isPrimary: boolean
+  /**
+   * 这笔交易挂着的标签；**没有标签时是空数组**（标签挂在交易上，故同笔交易的两条明细拿到同一份）。
+   *
+   * 次序即用户当初提交的次序，**界面照此呈现即可，不必自己排序**。
+   *
+   * 标签**没有可见性档位**（与分类同理、与对手方相反）：账套内所有成员共用同一份标签词汇表，
+   * 没有「他人私有的标签」这一概念。
+   * **已停用标签的名称照常展示**：停用是「不再供新记账选择」，不是「历史上从未用过」——
+   * 用户看的是「这笔账当时标了什么」，不是「这份词汇表现在长什么样」，故不下发也不呈现启用状态。
+   */
+  tags: TagRef[]
 }
 
 /** 查询条件；`from` / `to` 均为 **ISO 8601 UTC** 且为闭区间端点。 */
@@ -157,6 +172,16 @@ export interface EntryQueryParams {
   to?: string
   /** 目标账户主键；省略即全部可见账户。不可见的账户会被后端静默剔除（不报错）。 */
   accountIds?: number[]
+  /**
+   * 目标标签主键；省略即不限标签。
+   *
+   * 匹配语义是「**任一命中**」而非「全部命中」——多选标签的常规意图是「这几类我都想看看」，
+   * 后端据此实现，前端不要另行收窄。
+   *
+   * 与 `accountIds` 一样，不属于当前账套的标签主键会被后端静默忽略（不报错、只是匹配不到）；
+   * 与 `accountIds` **同时给出时是「且」的关系**，两个维度各自收窄。
+   */
+  tagIds?: number[]
   page?: number
   pageSize?: number
 }
@@ -223,6 +248,10 @@ export const useEntriesStore = defineStore('entries', () => {
     }
     for (const accountId of params.accountIds ?? []) {
       search.append('accountIds', String(accountId))
+    }
+    // tagIds 同 accountIds：**重复键**逐个 append，不能拼成逗号串
+    for (const tagId of params.tagIds ?? []) {
+      search.append('tagIds', String(tagId))
     }
     search.set('page', String(params.page ?? 1))
     search.set('pageSize', String(params.pageSize ?? ENTRY_PAGE_SIZE))

@@ -22,6 +22,8 @@
  * 点【查询】才把草稿落成已应用条件；翻页复用已应用条件，不会因草稿被改动而查错页。
  *
  * 「分类」列取自交易（不是明细）：同一笔交易的两条明细显示同一个分类，未分类显示 `—`。
+ * 「标签」列同取处，但**是多值**：同一笔交易的两条明细显示同一组标签，没有标签显示 `—`。
+ * 两者同属「这笔账的标注」，故在表格里并排、在卡片里同行，都用纯文本（顿号分隔）、读法一致。
  *
  * 金额字段（`signedAmount`）缺失时**不允许静默留空**：三列表的全部语义都建立在「空白 vs 有值」上，
  * 留空会把「字段没取到」呈现成「这行真的没有收支」。故缺失一律换成可见的 {@link AMOUNT_UNAVAILABLE}
@@ -30,6 +32,13 @@
  * 本页不做任何可见性过滤：后端只返回「挂在我可见账户上」的明细，前端过滤只会造出一道假防线。
  * 账户多选的候选含**已停用账户**（软删除后历史明细仍在，漏掉它们会让过去的账凭空消失），
  * 并排除账本账户——它是系统内部账户，后端从不返回它，本页无需为此写过滤逻辑。
+ * **标签筛选的候选同样含已停用标签**（同一条理由：停用是「不再供新记账选择」而不是「历史上从未用过」，
+ * 而本页查的正是历史）；标签与账户两个维度是**且**的关系，各自独立收窄，都不传即两个维度都不限。
+ * 标签**不校验「至少选一个」**——空即「不限标签」，与账户的必选刻意不同：没有标签的账占多数，
+ * 把它当漏填的条件会让默认视图查不出东西来。
+ *
+ * **标签的匹配是「任一命中」**（后端实现，前端不另行收窄）：勾了三个标签想问的是「这三类我都想看看」，
+ * 而不是「必须同时标着这三个」。
  *
  * **窄屏（<1024px）呈现为卡片流**，表格只在宽屏呈现：10 列表格在手机上必须左右拖动才看得见金额，
  * 等于「查得到但读不了」。两份 DOM 并存，由 `display` 在 `App.vue` 定的 1023px 断点上切换
@@ -70,9 +79,11 @@ import {
   useEntriesStore,
   type Entry,
 } from '@/stores/entries'
+import { useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
+const tagsStore = useTagsStore()
 const entriesStore = useEntriesStore()
 
 /** 金额呈现：固定两位小数，与后端的 decimal(...,2) 对齐。 */
@@ -108,6 +119,14 @@ const draftTo = ref('')
 /** 账户多选的草稿：勾选中的账户主键。 */
 const selectedIds = ref<number[]>([])
 
+/**
+ * 标签多选的草稿：勾选中的标签主键。
+ *
+ * **空数组是合法条件**（即「不限标签」），这与账户的「至少选一个」刻意不同：
+ * 没有标签的交易是多数的正常状态，把它当作「漏填的条件」会让默认视图查不出东西来。
+ */
+const draftTagIds = ref<number[]>([])
+
 /** 已应用的条件；`null` 表示本次进入页面后还没查过。 */
 interface AppliedFilter {
   /** 呈现用的本地日期，仅用于空态与提示文案。 */
@@ -118,6 +137,8 @@ interface AppliedFilter {
   to: string
   /** 本次筛选的账户主键。 */
   accountIds: number[]
+  /** 本次筛选的标签主键；空数组即不限标签。 */
+  tagIds: number[]
 }
 
 const applied = ref<AppliedFilter | null>(null)
@@ -143,6 +164,15 @@ const hasAccountSet = computed(() => accountSets.currentId !== null)
 const accountOptions = computed(() =>
   accountsStore.accounts.filter((account) => MONEY_ACCOUNT_TYPES.includes(account.type)),
 )
+
+/**
+ * 标签筛选的候选：当前账套内的标签，**含已停用**。
+ *
+ * 含已停用项的理由与账户候选逐字相同：停用是「不再供新记账选择」，不是「历史上从未用过」，
+ * 而本页查的正是历史——停用的标签仍挂在过去的账上，漏掉它会让那些账筛不出来。
+ * 与账户候选的差别是**无需排除任何一类**：标签没有账本/往来那样的系统项，也没有可见性维度。
+ */
+const tagOptions = computed(() => tagsStore.tags)
 
 const items = computed(() => entriesStore.page?.items ?? [])
 const totalCount = computed(() => entriesStore.page?.total ?? 0)
@@ -184,7 +214,12 @@ const emptyText = computed(() => {
     return '请选择时间区间与账户后点击【查询】。'
   }
 
-  return `${filter.fromDate} ~ ${filter.toDate} 内所选 ${filter.accountIds.length} 个账户没有交易明细。`
+  // 标签只在**这次真的按标签筛了**时才写进概要：空手写「不限标签」既啰嗦，
+  // 也会让用户去核对一个自己根本没设过的条件
+  const tagPart =
+    filter.tagIds.length === 0 ? '' : `、标签 ${filter.tagIds.length} 个（任一命中）`
+
+  return `${filter.fromDate} ~ ${filter.toDate} 内所选 ${filter.accountIds.length} 个账户${tagPart}没有交易明细。`
 })
 
 /** 补零到两位。 */
@@ -337,6 +372,20 @@ function categoryText(entry: Entry): string {
 }
 
 /**
+ * 标签呈现文案：**顿号连接**，没有标签时显示 `—`。
+ *
+ * 用纯文本而不是一排小徽标：本列与【分类】列同属「这笔账的标注」，两列并排时读法应当一致
+ * （一列是徽标、一列是文字，会让人以为两者不是同一类东西）；且标签数量不设上限，
+ * 徽标在窄列里会挤成一片。顿号正是中文里列举的写法，读起来就是「标了这几个」。
+ *
+ * 不改名、不过滤：**已停用标签的名称照常显示**（同分类列口径）；次序即用户当初提交的次序，
+ * 后端已按此下发，本页不再排序。标签是交易级属性，一笔交易的两条明细显示同一份，这不是重复。
+ */
+function tagText(entry: Entry): string {
+  return entry.tags.length === 0 ? '—' : entry.tags.map((tag) => tag.name).join('、')
+}
+
+/**
  * 收入列文本：只有正数行有值，其余行留空。
  *
  * 「留空」是这一列的正常语义（这行不是收入），故仅在**金额字段不可用**时才给标记——
@@ -439,19 +488,21 @@ function openEdit(entry: Entry): void {
 }
 
 /**
- * 改账成功后的收尾：关弹窗、重取本页与账户候选，最后给出提示。
+ * 改账成功后的收尾：关弹窗、重取本页与两份筛选候选，最后给出提示。
  *
- * 明细与账户**两者都要重取**：
- * - 明细：改过的金额、时间、分类、账户都会反映在行上，改账户或时间还可能让这一行移出当前的
+ * 三者**都要重取**：
+ * - 明细：改过的金额、时间、分类、标签、账户都会反映在行上，改账户或时间还可能让这一行移出当前的
  *   筛选条件——不重取就会停在旧数据上。
  * - 账户：账户行上的余额是明细的派生值，这一改已经让它变了，而候选列表里的余额正是「选哪个账户」
  *   的依据（见 `AccountSearchSelect`），留着旧值会让人按错的余额做决定。
+ * - 标签：改账时可以手打一个新标签名，后端会当场在当前账套内建出它来（与记账同一口径），
+ *   留着旧词汇表会让筛选区里少一个刚被用过的标签。
  *
  * 提示放在最后：`load()` 会把 `notice` 改写成「共 N 条明细」，先写提示会被它盖掉。
  */
 async function onEdited(message: string): Promise<void> {
   editingEntry.value = null
-  await Promise.all([load(), loadAccounts()])
+  await Promise.all([load(), loadAccounts(), loadTags()])
   notice.value = message
 }
 
@@ -462,6 +513,17 @@ async function loadAccounts(): Promise<boolean> {
     return true
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '加载账户失败'
+    return false
+  }
+}
+
+/** 拉取标签筛选候选；含已停用标签（理由见 `tagOptions`）。 */
+async function loadTags(): Promise<boolean> {
+  try {
+    await tagsStore.list(true)
+    return true
+  } catch (error) {
+    errorMessage.value = error instanceof ApiError ? error.message : '加载标签失败'
     return false
   }
 }
@@ -479,6 +541,7 @@ async function load(): Promise<void> {
       from: filter.from,
       to: filter.to,
       accountIds: filter.accountIds,
+      tagIds: filter.tagIds,
       page: pageIndex.value,
       pageSize: ENTRY_PAGE_SIZE,
     })
@@ -531,6 +594,8 @@ async function search(): Promise<void> {
     from,
     to,
     accountIds: [...selectedIds.value],
+    // 标签**不校验「至少选一个」**：空即「不限标签」，那是默认的、也是最常见的条件
+    tagIds: [...draftTagIds.value],
   }
   pageIndex.value = 1
 
@@ -557,18 +622,31 @@ function clearAccounts(): void {
   selectedIds.value = []
 }
 
-/** 复位为「本月 + 全选可见账户」并立即查询；这是进入页面与切换账套后的默认视图。 */
+/**
+ * 标签改为「不限」。
+ *
+ * **本页不给【全选】**（账户那份才有）：标签的「全选」与「不限」只差「含不含没标签的账」，
+ * 而没标签的账通常占多数，给一个【全选】会让人以为「这就是全部」；要按标签查就逐个勾。
+ */
+function clearTags(): void {
+  draftTagIds.value = []
+}
+
+/** 复位为「本月 + 全选可见账户 + 不限标签」并立即查询；这是进入页面与切换账套后的默认视图。 */
 async function resetToDefault(): Promise<void> {
   draftFrom.value = monthStartLocal()
   draftTo.value = todayLocal()
   selectedIds.value = []
+  draftTagIds.value = []
   applied.value = null
   pageIndex.value = 1
   errorMessage.value = ''
   notice.value = ''
   entriesStore.clear()
 
-  if (!(await loadAccounts())) {
+  // 两份候选都要拉到：账户是必填条件（全选要用它），标签是筛选条件（没有也能正常查）
+  const [accountsLoaded] = await Promise.all([loadAccounts(), loadTags()])
+  if (!accountsLoaded) {
     return
   }
 
@@ -583,9 +661,11 @@ watch(
   async (currentId) => {
     if (currentId === null) {
       accountsStore.clear()
+      tagsStore.clear()
       entriesStore.clear()
       applied.value = null
       selectedIds.value = []
+      draftTagIds.value = []
       errorMessage.value = ''
       notice.value = ''
       return
@@ -608,10 +688,12 @@ onMounted(() => {
       <div>
         <h1 class="title">账目明细</h1>
         <p class="subtitle">
-          在当前账套内按时间区间与账户（可多选）查询交易明细，按业务发生时间正序排列。
+          在当前账套内按时间区间、账户（可多选）与标签（可多选）查询交易明细，按业务发生时间正序排列。
           钱进来记在【收入】列（绿色，带 + 号），钱出去记在【支出】列（红色，带 − 号），
           【净额】列是这一行的增减合计；表格底部给出当页小计。
-          【分类】列是这笔交易的分类（记账时可选，未分类显示 —）。
+          【分类】列是这笔交易的分类（记账时可选，未分类显示 —），【标签】列是这笔账标着的标签
+          （同样可选、可多个，没有标签显示 —）。标签不选即不限，选了则「任一命中」——
+          标着其中任意一个的被查出来。
           一笔交易涉及两个所选账户时会呈现两行。时间取业务发生时间，可补记往日收支。
           每行末尾的【修改】用于改这一笔：借贷两条明细会一并改写，相关账户的余额随之重算；
           期初余额行与对手方不在我名下的行不提供修改。
@@ -695,6 +777,43 @@ onMounted(() => {
         </p>
       </section>
 
+      <!-- 标签是第二个筛选维度，与账户那栏同构但两处口径不同（账户必选、标签可不选），
+           故并列成两块面板而不塞进同一块——塞在一起会让「至少选一个」这条规则看起来也管着标签 -->
+      <section class="picker">
+        <div class="picker-head">
+          <span class="label">标签（可多选，不选即不限）</span>
+          <span class="picker-count">已选 {{ draftTagIds.length }} / {{ tagOptions.length }}</span>
+          <div class="picker-actions">
+            <button
+              type="button"
+              class="ghost"
+              :disabled="draftTagIds.length === 0"
+              @click="clearTags"
+            >
+              不限
+            </button>
+          </div>
+        </div>
+
+        <div class="picker-list">
+          <label v-for="tag in tagOptions" :key="tag.id" class="picker-item">
+            <input v-model="draftTagIds" type="checkbox" :value="tag.id" />
+            <span class="picker-name">{{ tag.name }}</span>
+            <!-- 已停用标签照常可选：停用是「不再供新记账选择」，不是「历史上从未用过」，
+                 而本页查的正是历史 -->
+            <span v-if="!tag.isActive" class="badge badge-inactive">已停用</span>
+          </label>
+          <p v-if="tagOptions.length === 0" class="picker-empty">当前账套内还没有标签。</p>
+        </div>
+
+        <p class="picker-hint">
+          不勾选任何标签即<strong>不限标签</strong>（不过滤）；勾选多个时是<strong>任一命中</strong>
+          ——标着其中任意一个的账都会被查出来，而不是「必须同时标着全部」。标签与账户是
+          <strong>且</strong>的关系：两个维度各自收窄。标签不区分收入/支出/转账，同一份词汇表三类共用；
+          它挂在<strong>整笔交易</strong>上，故一笔交易的两条明细显示同一组标签。
+        </p>
+      </section>
+
       <p v-if="errorMessage" class="error">{{ errorMessage }}</p>
       <p v-if="notice" class="notice">{{ notice }}</p>
 
@@ -718,6 +837,7 @@ onMounted(() => {
             <th>对手方</th>
             <th>摘要</th>
             <th>分类</th>
+            <th>标签</th>
             <th>备注</th>
             <th>操作</th>
           </tr>
@@ -747,6 +867,8 @@ onMounted(() => {
             </td>
             <!-- 分类是交易级属性：一笔交易的两条明细会显示同一个分类，这不是重复 -->
             <td class="category">{{ categoryText(entry) }}</td>
+            <!-- 标签同为交易级属性、且是多值，故与分类列并排：两列读法一致（纯文本、顿号分隔） -->
+            <td class="tags-cell">{{ tagText(entry) }}</td>
             <td class="remark">{{ entry.remark || '—' }}</td>
             <!-- 不可编辑的行留空而不是给一个禁用按钮：期初余额行、对手方不在我名下的行
                  都不是用户在本页能解决的问题，禁用的控件只会让人去猜为什么点不动 -->
@@ -762,7 +884,7 @@ onMounted(() => {
             </td>
           </tr>
           <tr v-if="items.length === 0">
-            <td colspan="11" class="empty">{{ emptyText }}</td>
+            <td colspan="12" class="empty">{{ emptyText }}</td>
           </tr>
         </tbody>
         <!-- 小计只统计**当页**：跨页合计会让「本页小计」这个标题名不副实，
@@ -780,7 +902,8 @@ onMounted(() => {
             <td class="amount" :class="signedCellClass(pageTotals.net, 'net')">
               {{ formatSigned(pageTotals.net) }}
             </td>
-            <td colspan="5"></td>
+            <!-- 剩下的 6 列（对手方/摘要/分类/标签/备注/操作）不参与小计 -->
+            <td colspan="6"></td>
           </tr>
         </tfoot>
       </table>
@@ -817,6 +940,7 @@ onMounted(() => {
           <p class="card-meta">
             <span class="card-time">{{ formatDateTime(entry.occurredAt) }}</span>
             <span class="card-category">分类：{{ categoryText(entry) }}</span>
+            <span class="card-tags">标签：{{ tagText(entry) }}</span>
             <span class="card-remark">备注：{{ entry.remark || '—' }}</span>
           </p>
 
@@ -1177,6 +1301,15 @@ onMounted(() => {
   opacity: 0.75;
 }
 
+/* 标签列与分类列同档次要，但**允许折行**（不加 white-space: nowrap）：标签数量不设上限，
+   一整行标签撑宽单元格会把金额几列挤出视野；折行后单元格变高，其余列不受影响。
+   换行点用 overflow-wrap 兜底长标签名（上限 32 位），避免单个长标签顶穿表格宽度 */
+.tags-cell {
+  opacity: 0.75;
+  min-width: 6rem;
+  overflow-wrap: anywhere;
+}
+
 .remark {
   opacity: 0.75;
 }
@@ -1385,7 +1518,7 @@ onMounted(() => {
   overflow-wrap: anywhere;
 }
 
-/* 时间 / 分类 / 备注同属「每行都要读得到、又都不抢金额视线」的次要信息，排一行 */
+/* 时间 / 分类 / 标签 / 备注同属「每行都要读得到、又都不抢金额视线」的次要信息，排一行 */
 .card-meta {
   display: flex;
   flex-wrap: wrap;

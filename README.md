@@ -340,6 +340,54 @@ dictionary plus **create-on-type while recording** covers "usable out of the box
 `category_id` is unnecessary for the same structural reason: it is a nullable `int`, so NULL on a
 pre-existing row is precisely the legitimate value — "unclassified".
 
+##### Tags
+
+A **tag** is an *annotation* on a transaction ("reimbursable", "trip to Japan", "split with Sam") —
+free-form, multi-valued, and orthogonal to what a category answers. It belongs to exactly one
+account set, exactly like a category, so each account set keeps its own vocabulary.
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/tags?includeInactive=false` | Bearer | Tags in the current account set, oldest first. `includeInactive=true` also returns deactivated ones |
+| `POST /api/tags` | Bearer | Create (201); body `{ name }`, at most 32 characters |
+| `PUT /api/tags/{id}` | Bearer | Rename only (204) — the body is just `{ name }`; the account set is immutable and **not on the request record**, so sending one has no effect |
+| `POST /api/tags/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
+| `POST /api/tags/{id}/activate` | Bearer | Reactivate (204) |
+
+Failure contract: identical to categories — 400 without the account-set header or for an invalid
+`name`; 403 when the account set is unknown or not yours; 404 when the tag does not exist or belongs
+to another account set; 409 when the name repeats within the same account set, matched
+**case-insensitively** after trimming.
+
+The dictionary endpoints are **deliberately the whole surface**: there is **no "attach tag" endpoint**
+and no per-transaction tag route. Tags are set on the transaction itself (see below), because
+"recording a posting with its tags" and "recording a posting" are one act, not two — a second round
+trip would leave a window in which the posting exists untagged.
+
+The one structural difference from a category is **arity**. A category is at most one (it is a column
+on the transaction header), whereas a transaction may carry **any number of tags, with no upper
+bound**, so tags live in a sub-table:
+
+| Table | Contents |
+|---|---|
+| `hamster_tag` | Tag dictionary: account set, name, active flag, created at |
+| `hamster_transaction_tag` | Link row: transaction, tag. Unique on `(transaction_id, tag_id)` |
+
+**The link hangs off the transaction, not off the entry** (same reasoning as the category): a tag
+describes the act of recording, and a transfer posts two entries — a tag on the entry would make one
+transfer ask for its tags twice. One consequence worth knowing: **both entry rows of a transaction
+carry the same tags.**
+
+The unique index on `(transaction_id, tag_id)` makes the relation a **set**: attaching the same tag
+twice is a no-op rather than a duplicate row, and the payload is normalized (deduplicated by id,
+submission order preserved) before it is written. Renaming a tag is safe for the same reason renaming
+a category is: the link stores the **primary key**, so history follows the row and displays the new
+name.
+
+Like categories, tags are **soft-deleted, never physically deleted** (history hangs off them), are
+**not seeded** (an empty dictionary plus create-on-type is the intended start), and are maintained by
+**any member of the account set** — there is no user-side / admin-side split.
+
 ##### Transactions and entries
 
 Bookkeeping is **double-entry**: **every transaction carries two entries, one debit and one
@@ -431,7 +479,7 @@ single-transaction read endpoint:
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `POST /api/transactions` | Bearer | Record one income, expense or transfer (201). Body `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName, categoryId, categoryName }`: `type` is `Income` / `Expense` / `Transfer` (as a **string** — a number or `OpeningBalance` is a 400); `amount` must be `> 0` with at most two decimals; `occurredAt` is an ISO 8601 timestamp taken as the **business time** (back-dating is allowed); `summary` is required (≤128), `remark` optional (≤256); `currencyCode` is required and **must match both accounts**; leaving both `counterpartyAccountId` and `counterpartyName` empty means "no counterparty", and when both are given the **primary key wins** (it is more precise than a name); leaving both `categoryId` and `categoryName` empty means "unclassified". Returns the persisted transaction (with `id` / `accountName` / `counterpartyName` / `categoryName`) |
+| `POST /api/transactions` | Bearer | Record one income, expense or transfer (201). Body `{ type, accountId, amount, occurredAt, summary, remark, currencyCode, counterpartyAccountId, counterpartyName, categoryId, categoryName, tagIds, tagNames }`: `type` is `Income` / `Expense` / `Transfer` (as a **string** — a number or `OpeningBalance` is a 400); `amount` must be `> 0` with at most two decimals; `occurredAt` is an ISO 8601 timestamp taken as the **business time** (back-dating is allowed); `summary` is required (≤128), `remark` optional (≤256); `currencyCode` is required and **must match both accounts**; leaving both `counterpartyAccountId` and `counterpartyName` empty means "no counterparty", and when both are given the **primary key wins** (it is more precise than a name); leaving both `categoryId` and `categoryName` empty means "unclassified"; `tagIds` / `tagNames` are the **union** of the two (see below), an empty tag list meaning "untagged". Returns the persisted transaction (with `id` / `accountName` / `counterpartyName` / `categoryName` / `tags`) |
 
 The endpoint writes **both entries at once**, equal amounts and opposite directions, with the
 direction derived from `type` (see the table above) — which is why `amount` is always positive.
@@ -471,6 +519,20 @@ so a request that is destined to be refused must not leave a trace in the catego
 **A transfer carries one category**, not two — the category lives on the transaction header, so both
 of its entries share it.
 
+Tags take the same "primary key wins, otherwise by name" rule **per field**, but the two fields are
+**unioned** rather than one-or-the-other: a caller may pick some tags from a list and type the rest,
+so both halves have to take effect. `tagIds` are looked up one by one and each must exist **in the
+current account set** (otherwise a 400 on the field `tagIds`); `tagNames` are matched within the
+current account set **including deactivated ones** (the same reasoning as categories) and are
+**auto-created** on a miss. Within one request a name is only created once — two entries naming the
+same tag resolve to the same row rather than racing to create twins. The whole list is deduplicated
+by id before it is written, preserving submission order; an empty list means "untagged", which is a
+legitimate state. Tags are resolved at the same point as the category — **after every validation
+gate** — and are written **inside the same transaction** as the header and the two entries, so a
+refused request leaves no rows behind and a successful one is never half-tagged.
+
+**A transfer carries the same tags on both entries**, for the same reason it carries one category.
+
 **A transfer only ever takes the first branch**: both of its accounts are real, so there is no
 "outside the account set" to fall back on. Beyond `type` it adds exactly four validations (every
 other field rule is shared with income and expenses):
@@ -487,11 +549,12 @@ through (or merely ignoring the field) would let a transfer's counterparty walk 
 "Fund/Liability only" restriction.
 
 Failure contract: 400 without the account-set header, or for an invalid `type` / `amount` /
-`occurredAt` / text, or when **the two accounts disagree on currency** (including a `currencyCode`
-that does not match them), or on any of the four transfer-specific validations above, or when a
-`categoryId` **does not exist in the current account set** (a 400 on the `categoryId` field, *not* a
-404 — see below); **404 when an account is invisible, missing, or belongs to another account set**
-(all three answer alike so the endpoint cannot be used to probe for other people's accounts).
+`occurredAt` / text / tag name (≤32), or when **the two accounts disagree on currency** (including a
+`currencyCode` that does not match them), or on any of the four transfer-specific validations above,
+or when a `categoryId` — or any id in `tagIds` — **does not exist in the current account set** (a 400
+on that field, *not* a 404 — see below); **404 when an account is invisible, missing, or belongs to
+another account set** (all three answer alike so the endpoint cannot be used to probe for other
+people's accounts).
 
 The category's failure code **deliberately diverges from the accounts'**: an unresolvable account is
 a 404 so the endpoint cannot be probed for other people's accounts, but a category has **no
@@ -513,7 +576,7 @@ Entries are read back through one endpoint, which answers "what moved, when, on 
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/entries?from=&to=&accountIds=&page=&pageSize=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `page` defaults to 1 and `pageSize` to 50 (max **200**). Returns `{ items, total, page, pageSize }` |
+| `GET /api/entries?from=&to=&accountIds=&tagIds=&page=&pageSize=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `tagIds` may likewise be repeated and omitted entirely, and a transaction matches when it carries **any** of the given tags (`EXISTS`, not a join — so a transaction with three matching tags still yields one row per entry and `total` stays equal to the number of rows rendered). Account and tag filters are **ANDed**: each narrows independently. `page` defaults to 1 and `pageSize` to 50 (max **200**). Returns `{ items, total, page, pageSize }` |
 
 **One row is one entry, not one transaction.** A transaction consists of a debit and a credit; when
 both sides sit on accounts you selected, both appear as rows. `amount` is always **positive** and
@@ -610,15 +673,24 @@ category's name is still returned: those postings happened, and hiding the label
 unreadable. Because the category is transaction-level, **both entry rows of one transaction carry
 the same pair** — a transfer's two rows share one category.
 
+Each row also carries `tags`: an array of `{ id, name }`, in **submission order**, empty for an
+untagged transaction. Like the category, tags have **no visibility tier** (nothing to hide) and the
+**names come from the backend**, so a rename propagates to past entries and a **deactivated** tag's
+name is still returned. Being transaction-level, **both entry rows of one transaction carry the same
+tag array** — that is not duplication but the same fact read from either side. Tags are resolved in
+one extra query (`LEFT JOIN` on the link table, grouped by transaction) rather than by a join in the
+main projection, so a transaction with several tags still contributes exactly one row per entry.
+
 Failure contract: 400 without the account-set header ("请先选择账套"); the account set unknown or not
 yours → 403; caller not found → 401; a malformed `from` / `to`, `from` later than `to`, `page < 1`, or
-`pageSize` outside `1..200` → 400 as a field-level error.
+`pageSize` outside `1..200` → 400 as a field-level error. An unknown tag id in `tagIds` simply
+matches nothing (there is no tag visibility dimension to probe), so it is not an error.
 
 ###### Updating an entry
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `PUT /api/transactions/{id}` | Bearer | Rewrites an already-recorded income, expense or transfer (200). The body mirrors `POST` but carries **no `type` and no `currencyCode`**: `{ accountId, amount, occurredAt, summary, remark, counterpartyAccountId, counterpartyName, categoryId, categoryName }`, every field governed by the same rules as `POST`. Returns the rewritten transaction (with `id` / `accountName` / `counterpartyName` / `categoryName`) |
+| `PUT /api/transactions/{id}` | Bearer | Rewrites an already-recorded income, expense or transfer (200). The body mirrors `POST` but carries **no `type` and no `currencyCode`**: `{ accountId, amount, occurredAt, summary, remark, counterpartyAccountId, counterpartyName, categoryId, categoryName, tagIds, tagNames }`, every field governed by the same rules as `POST`. Returns the rewritten transaction (with `id` / `accountName` / `counterpartyName` / `categoryName` / `tags`) |
 
 **What is rewritten is the whole transaction, not a single entry row.** A transaction consists of one
 debit and one credit; both are **rewritten together** with their directions unchanged, so
@@ -662,6 +734,11 @@ mark most of them uneditable). Otherwise the response is the same 404 as "no suc
 leaking no existence: when the counterparty is someone else's personal account, the other half of
 that posting is in their name, and editing it would be editing their books.
 
+**Tags are replaced as a whole set, not merged**: the update writes exactly the tags it is given —
+what is left out is removed. This follows from the request being a full replacement (as `remark` is);
+"add but never remove" would make it impossible to untag a posting. An empty list therefore means
+"this posting is now untagged", a deliberate instruction rather than a field that was not sent.
+
 **UPDATE only — no delete-and-reinsert**: the transaction id and both entry ids are **unchanged**
 (entry ids are the stable sort key of the entry query, and changing them would make page ordering
 drift), and no row is added. The rewritten entries read back from `GET /api/entries` as usual, with
@@ -685,6 +762,11 @@ not activated"** and need an administrator to activate them. For the same reason
 `is_system` to `false` on older account rows (no account created before this version can be a
 system account); without that, a NULL `is_system` makes the account list fail to bind and return
 500.
+
+Tags need **no backfill**: a tag is not a column on `hamster_transaction`, so there is no existing
+table to alter — `hamster_tag` and `hamster_transaction_tag` are brand-new tables created by the same
+`InitTables` pass, and "no link row" already means exactly "untagged", which is the legitimate value.
+An account set that has never used tags simply has an empty dictionary, which is the intended start.
 
 ### Frontend Setup
 
