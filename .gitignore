@@ -361,6 +361,8 @@ coverage
 Generated/
 
 .mcp.json
+.claude\settings.*.json
+
 # 本地 Sqlite 数据库文件（运行期生成，不入库）
 hamster.db
 hamster.db-shm
