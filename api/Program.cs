@@ -2,6 +2,8 @@ using System.Text;
 using Hamster.Api.Config;
 using Hamster.Api.Data;
 using Hamster.Api.Endpoints;
+using Hamster.Api.Events;
+using Hamster.Api.Jobs;
 using Hamster.Api.Security;
 using Hamster.Api.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -20,6 +22,18 @@ builder.Services.AddSingleton<IEntryQueryService, EntryQueryService>();
 builder.Services.AddSingleton<ICurrencyService, CurrencyService>();
 builder.Services.AddSingleton<ICategoryService, CategoryService>();
 builder.Services.AddSingleton<ITagService, TagService>();
+builder.Services.AddSingleton<ISettlementService, SettlementService>();
+
+// 结算定时任务：配置（开关 / 触发时刻 / 节点名）、事件总线与订阅者、两个每日任务
+// 配置用工厂方式注册（同 DatabaseOptions）：解析时从容器取日志记录器，
+// 使「取值无法识别」的告警走应用自己的日志管道，而不是另建一个日志工厂。
+builder.Services.AddSingleton(provider => SettlementOptions.From(
+    builder.Configuration,
+    provider.GetRequiredService<ILoggerFactory>().CreateLogger("Hamster.Api.Config")));
+builder.Services.AddSingleton<IEventBus, EventBus>();
+builder.Services.AddHamsterEventHandlers();
+builder.Services.AddHostedService<SettlementCollectionJob>();
+builder.Services.AddHostedService<SettlementExecutionJob>();
 
 // 默认管理员播种与密码重置链接所需配置（均由环境变量优先）
 builder.Services.AddSingleton(AdminSeedOptions.From(builder.Configuration));
@@ -124,6 +138,42 @@ static void LogStartupInfo(WebApplication app)
     {
         logger.LogWarning("JWT 签名密钥长度不足 32 字节，建议改用 32 字节以上的随机密钥");
     }
+
+    // 结算定时任务：把「实际生效」的开关、时刻与节点身份打出来。
+    // 这几项平时都读环境变量，日志里没有的话，运维无从判断「这个实例到底会不会干活」。
+    var settlement = app.Services.GetRequiredService<SettlementOptions>();
+    logger.LogInformation(
+        "结算定时任务：交易统计（{CollectEnabled}，每天 {CollectTime}）、结算执行（{ExecuteEnabled}，每天 {ExecuteTime}）",
+        settlement.CollectEnabled ? "已开启" : "已关闭",
+        settlement.CollectTime.ToString("HH\\:mm"),
+        settlement.ExecuteEnabled ? "已开启" : "已关闭",
+        settlement.ExecuteTime.ToString("HH\\:mm"));
+
+    if (settlement.IsMasterNode)
+    {
+        logger.LogInformation(
+            "本实例是定时任务的主节点（{Env}={Node}），两个结算任务在本实例上执行",
+            ConfigConst.JOB_NODE_ENV,
+            string.IsNullOrWhiteSpace(settlement.NodeName) ? "未设置（按单实例部署处理）" : settlement.NodeName);
+    }
+    else
+    {
+        logger.LogWarning(
+            "本实例不是定时任务的主节点（{Env}={Node}），两个结算任务在本实例上**不会执行**；" +
+            "多实例部署时须保证恰好一个实例的该变量为 {Master}",
+            ConfigConst.JOB_NODE_ENV,
+            settlement.NodeName,
+            ConfigConst.MASTER_NODE_NAME);
+    }
+
+    // 「本地时区」是结算按交易日期分组的唯一口径，故在此如实打印解析结果：
+    // csproj 开着 InvariantGlobalization，某些平台上 TimeZoneInfo.Local 会退化成 UTC
+    // （Windows 上实测仍能正确解析到 Asia/Shanghai 对应的时区），不打印的话这种退化是隐形的。
+    var localZone = TimeZoneInfo.Local;
+    logger.LogInformation(
+        "服务器本地时区：{Zone}（相对 UTC {Offset}），结算的交易日期按此时区分组",
+        localZone.Id,
+        localZone.BaseUtcOffset);
 
     logger.LogInformation("Hamster.Api 启动中：环境 {Environment}，OpenAPI 文档（仅开发环境）路径 /openapi/v1.json", app.Environment.EnvironmentName);
 }

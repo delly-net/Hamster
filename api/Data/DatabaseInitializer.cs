@@ -15,6 +15,9 @@ public static class DatabaseInitializer
     /// <summary>账户表表名（与 <see cref="Account"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
     private const string ACCOUNT_TABLE = "hamster_account";
 
+    /// <summary>交易表表名（与 <see cref="Transaction"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
+    private const string TRANSACTION_TABLE = "hamster_transaction";
+
     /// <summary>
     /// 执行数据库初始化。
     /// 建表失败（如连接不可用）时仅记录告警，不阻断应用启动。
@@ -36,7 +39,7 @@ public static class DatabaseInitializer
         try
         {
             var db = app.Services.GetRequiredService<ISqlSugarClient>();
-            // 分三次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
+            // 分四次调用：SqlSugar 的 InitTables 范型重载最多只到 5 个类型参数
             // （第二组正好 4 个，加标签两张表会到 6 个而超限，故标签单独一组——
             //   勿把它们硬塞进第二组，那样编译期就会撞上「找不到匹配的重载」）
             db.CodeFirst.InitTables<SampleAccount, User, AccountSet, AccountSetMember, Account>();
@@ -44,8 +47,11 @@ public static class DatabaseInitializer
             // 标签：字典表 + 交易标签子表。两者要一起建——子表带指向 hamster_tag 的唯一索引，
             // 表不存在时索引自然也建不出来。
             db.CodeFirst.InitTables<Tag, TransactionTag>();
+            // 结算：任务表 + 快照交易表 + 快照明细表。三张表要一起建——两张快照表各带指向
+            // hamster_settlement_task 的索引，宿主表不存在时索引自然也建不出来。
+            db.CodeFirst.InitTables<SettlementTask, SettlementTransaction, SettlementEntry>();
             logger.LogInformation(
-                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency、hamster_category、hamster_tag、hamster_transaction_tag",
+                "CodeFirst 自动建表完成：数据库类型 {DbType}，已就绪表 sample_account、hamster_user、hamster_account_set、hamster_account_set_member、hamster_account、hamster_transaction、hamster_transaction_entry、hamster_currency、hamster_category、hamster_tag、hamster_transaction_tag、hamster_settlement_task、hamster_settlement_transaction、hamster_settlement_entry",
                 options.DbTypeLabel);
 
             // 播种**必须先于账户币种回填**：回填要用默认币种代码，而默认币种正是播种时标出来的
@@ -61,6 +67,7 @@ public static class DatabaseInitializer
             BackfillUserFlags(db, options.DbType, logger);
             BackfillAccountFlags(db, options.DbType, logger);
             BackfillAccountCurrency(db, options.DbType, logger);
+            BackfillTransactionUpdatedAt(db, options.DbType, logger);
 
             // 分类**刻意不播种、也不回填**：
             // - 不播种：分类是各家的业务语义（「餐饮」在两个账套里覆盖的范围可以完全不同），
@@ -153,6 +160,47 @@ public static class DatabaseInitializer
                 "已把 {Count} 个历史账户的币种回填为默认币种 {Code}",
                 affected,
                 CurrencySeeder.DefaultCode);
+        }
+    }
+
+    /// <summary>
+    /// 回填既有交易行的最后修改时间列。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="dbType">当前数据库类型，决定「不可绑定的空值」如何判定。</param>
+    /// <param name="logger">日志记录器。</param>
+    /// <remarks>
+    /// **既有交易一律回填为它自己的创建时刻**：<c>updated_at</c> 是随本任务才引入的列，
+    /// 升级前的交易没有修改时间信息，而「没有修改记录」的正确表达正是「从未被改过」，
+    /// 即修改时间等于创建时刻——这也是新建交易时本列取值的口径（见
+    /// <c>TransactionService.WriteBalancedTransactionAsync</c>）。
+    /// <para>
+    /// **必须回填、不可留空**：<c>updated_at</c> 在实体上是非空 <see cref="DateTime"/>，
+    /// 而 SqlSugar 的增量加列只把新列追加为可空、不会为既有行补值，
+    /// 于是升级后每一笔历史交易在这一列上都是 NULL，读回时无法绑定、
+    /// 会让**整个交易列表查询**抛异常（同 <c>is_admin</c> / <c>is_system</c> 那两处回填的理由）。
+    /// </para>
+    /// <para>
+    /// 取值直接抄 <c>created_at</c> 而不是取当前时刻：取当前时刻会把所有历史交易
+    /// 一并说成「刚刚被改过」，那是一条不实的信息，而本列的全部意义就在于如实记录修改。
+    /// </para>
+    /// <para>
+    /// 判定条件是 <see cref="UnbindableWhere"/>，即 NULL 与空串都算：Sqlite 的
+    /// <c>datetime</c> 列若由更早的中间版本以空串形态建出，同样无法绑定。
+    /// </para>
+    /// </remarks>
+    private static void BackfillTransactionUpdatedAt(ISqlSugarClient db, HamsterDbType dbType, ILogger logger)
+    {
+        const string updatedColumn = "updated_at";
+        var affected = db.Ado.ExecuteCommand(
+            $"UPDATE {TRANSACTION_TABLE} SET {updatedColumn} = created_at " +
+            $"WHERE {UnbindableWhere(dbType, updatedColumn)}");
+
+        if (affected > 0)
+        {
+            logger.LogInformation(
+                "已把 {Count} 笔历史交易的最后修改时间回填为各自的创建时刻（「从未被修改过」的如实表达）",
+                affected);
         }
     }
 

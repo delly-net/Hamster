@@ -103,4 +103,35 @@ public sealed class Transaction
     /// </summary>
     [SugarColumn(ColumnName = "created_at")]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// 最后修改时间（UTC），**永不为空**。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="CreatedAt"/> 的分工：前者是「这笔账什么时候落库的」，后者是「这笔账最后一次被改动是什么时候」。
+    /// 从未被改动过的交易，两者**逐字相等**——新建时直接把 <see cref="CreatedAt"/> 赋给它，
+    /// 而不是再取一次 <c>UtcNow</c>（两次取时刻会差几微秒，让一笔全新落库的账看起来像「刚被人改过」）。
+    /// <para>
+    /// **只有改账会更新本列**（<c>TransactionService.UpdateUserTransactionAsync</c>），
+    /// 且 <see cref="CreatedAt"/> 一律不动。来源、目标账户、金额、发生时间、摘要、备注、分类的改动都算「修改」。
+    /// </para>
+    /// <para>
+    /// **本列是随本次功能才引入的，既有行必须回填**：SqlSugar 的增量加列只把新列追加为可空、
+    /// 不会为既有行补值，NULL 无法绑定到非空 <c>DateTime</c>，会让整个交易查询 500
+    /// （同 <see cref="Account.IsSystem"/>、<see cref="Account.CurrencyCode"/> 的先例）。
+    /// 回填取 <c>updated_at = created_at</c>：无法考证的历史交易视作「从未被改过」，
+    /// 这与本列引入前的语义完全一致。
+    /// </para>
+    /// <para>
+    /// **刻意不进出参 DTO**：本次的要求是「交易记录数据库中加入字段」，
+    /// 界面是否呈现（明细页加列、修改时间列等）由后续任务决定，故不牵出前端的类型与列。
+    /// </para>
+    /// <para>
+    /// **明细表不加本列**（见 <see cref="TransactionEntry"/>）：改账时明细与交易头在同一
+    /// <c>UseTranAsync</c> 内就地改写、没有各自的写入路径，与本类不加余额列是同一理由——
+    /// 同一时刻在库里存两遍不含新信息。
+    /// </para>
+    /// </remarks>
+    [SugarColumn(ColumnName = "updated_at")]
+    public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

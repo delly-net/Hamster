@@ -29,6 +29,36 @@ public static class ConfigConst
     /// <summary>前端公开访问基址环境变量名，用于拼装密码重置链接。</summary>
     public const string PUBLIC_BASE_URL_ENV = "HAMSTER_PUBLIC_BASE_URL";
 
+    /// <summary>交易统计（结算收集）定时任务开关环境变量名。</summary>
+    public const string SETTLEMENT_COLLECT_ENABLED_ENV = "HAMSTER_SETTLEMENT_COLLECT_ENABLED";
+
+    /// <summary>结算执行定时任务开关环境变量名。</summary>
+    public const string SETTLEMENT_EXECUTE_ENABLED_ENV = "HAMSTER_SETTLEMENT_EXECUTE_ENABLED";
+
+    /// <summary>交易统计（结算收集）定时任务触发时刻环境变量名，取值 <c>HH:mm</c>。</summary>
+    public const string SETTLEMENT_COLLECT_TIME_ENV = "HAMSTER_SETTLEMENT_COLLECT_TIME";
+
+    /// <summary>结算执行定时任务触发时刻环境变量名，取值 <c>HH:mm</c>。</summary>
+    public const string SETTLEMENT_EXECUTE_TIME_ENV = "HAMSTER_SETTLEMENT_EXECUTE_TIME";
+
+    /// <summary>
+    /// 节点名环境变量名，用于分布式部署时指定由哪个实例执行定时任务。
+    /// </summary>
+    /// <remarks>
+    /// 取值语义见 <c>SettlementOptions.IsMasterNode</c>：**留空即视为单实例部署、照常执行**，
+    /// 值为 <see cref="MASTER_NODE_NAME"/> 时执行，其余任意值一律不执行。
+    /// </remarks>
+    public const string JOB_NODE_ENV = "HAMSTER_JOB_NODE";
+
+    /// <summary>主节点名：把本实例声明为定时任务的执行者。</summary>
+    public const string MASTER_NODE_NAME = "master";
+
+    /// <summary>交易统计（结算收集）定时任务的默认触发时刻（每天 0 点 5 分）。</summary>
+    public const string DEFAULT_SETTLEMENT_COLLECT_TIME = "00:05";
+
+    /// <summary>结算执行定时任务的默认触发时刻（每天 1 点）。</summary>
+    public const string DEFAULT_SETTLEMENT_EXECUTE_TIME = "01:00";
+
     /// <summary>默认管理员用户名。</summary>
     public const string DEFAULT_ADMIN_USERNAME = "admin";
 

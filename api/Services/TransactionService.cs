@@ -279,6 +279,9 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         transaction.Summary = summary;
         transaction.Remark = remark;
         transaction.CategoryId = category?.Id;
+        // 最后修改时间：改账是本列**唯一**的更新来源（见 Transaction.UpdatedAt）。
+        // CreatedAt / Type / AccountSetId / CreatedByUserId 一律不动——改账不换记账人、不换账套。
+        transaction.UpdatedAt = DateTime.UtcNow;
 
         await db.Ado.UseTranAsync(async () =>
         {
@@ -310,7 +313,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             other.Amount = amount;
 
             await db.Updateable(transaction)
-                .UpdateColumns(tx => new { tx.OccurredAt, tx.Summary, tx.Remark, tx.CategoryId })
+                .UpdateColumns(tx => new { tx.OccurredAt, tx.Summary, tx.Remark, tx.CategoryId, tx.UpdatedAt })
                 .ExecuteCommandAsync(cancellationToken);
 
             await db.Updateable(new List<TransactionEntry> { primary, other })
@@ -514,6 +517,11 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     {
         await db.Ado.UseTranAsync(async () =>
         {
+            // 新建的交易「从未被改过」，最后修改时间恒等于落库时间（见 Transaction.UpdatedAt）。
+            // 直接沿用 CreatedAt 而不另取一次 UtcNow：两次取时刻会有微秒级差异，
+            // 一笔全新落库的账会看起来像「刚被改过」，后续按本列做增量同步时会误判。
+            transaction.UpdatedAt = transaction.CreatedAt;
+
             transaction.Id = await db.Insertable(transaction).ExecuteReturnIdentityAsync(cancellationToken);
 
             await db.Insertable(new List<TransactionEntry>

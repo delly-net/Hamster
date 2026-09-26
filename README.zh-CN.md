@@ -34,7 +34,7 @@ Hamster/
 - **OpenAPI**: 开发环境通过 `AddOpenApi()` / `MapOpenApi()` 暴露文档（`/openapi/v1.json`）
 - **数据访问**: SqlSugar ORM，支持 **SQLite**（默认）与 **PostgreSQL**
 - **认证**: JWT 令牌（有效期 1 天），密码以 PBKDF2 哈希存储
-- **分层**: `Config/` · `Data/` · `Security/` · `Services/` · `Endpoints/`
+- **分层**: `Config/` · `Data/` · `Security/` · `Services/` · `Endpoints/` · `Events/` · `Jobs/`
 
 ### 前端 ([ui/](ui/))
 - **框架**: Vue 3.5 使用组合式 API（Composition API）
@@ -343,8 +343,17 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 | 表 | 内容 |
 |---|---|
-| `hamster_transaction` | 交易头：账套、类型、发生时间、摘要、备注、**分类**、记账人 |
+| `hamster_transaction` | 交易头：账套、类型、发生时间、摘要、备注、**分类**、记账人、**创建时间 / 最后修改时间** |
 | `hamster_transaction_entry` | 交易明细：所属交易、账户、借贷方向、金额 |
+
+每笔交易头上都带**两个时间**：`created_at`（落库时刻）与 `updated_at`（最后被改写的时刻）。
+刚记下的一笔 `updated_at == created_at`——「从未被改过」用「修改时刻等于创建时刻」表达，
+而不是留 NULL，故该列非空、读的人不必先判空即可比较两者。**只有 `PUT /api/transactions/{id}`
+会让 `updated_at` 前进**，且它与其余改写字段在同一条语句里赋值，
+故交易头不可能报出一个没有对应改写动作的修改时间。该列**不出现在任何出入参里**：
+它是行上的一件事实而不是一项输入，改账契约也不接受它（由调用方给的「修改时间」是服务端无从核实的值）。
+**明细表刻意没有这一列**，理由与它没有 `created_at` 相同：明细没有独立的写入路径，
+它只随父交易一起被改写，时刻必然就是父行的时刻，多存一份只会漂移。
 
 明细的方向用 **`direction` 枚举 + 正数金额**表示，而不是「金额带正负号」：
 
@@ -622,6 +631,96 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 **判据同源**（同一份 `counterpartyKind`），只是一个决定「要不要呈现入口」、一个决定「认不认这次请求」。
 前端那道是呈现层的取舍，后端的 400 / 404 是防绕过的那一道，两者拦的不是同一件事。
 
+##### 结算定时任务
+
+两个每日后台任务把当天的流水变成一份**冻结的结算记录**。它们是普通的 `BackgroundService`
+（`Jobs/`）——**不引入任何调度框架**：「每天某个时刻跑一次」只需要一个循环加一次延时，
+而框架会把它的存储、集群协调与控制台一并带进来。
+
+| 任务 | 默认时刻 | 做什么 |
+|---|---|---|
+| `SettlementCollectionJob` | `00:05` | 把「尚未结算、且早于**今天 0 点**」的交易按**账套 + 交易日期**分组，每组建一条 `hamster_settlement_task`，并把该组的交易与全部明细冗余存储为快照 |
+| `SettlementExecutionJob` | `01:00` | 对每个尚未执行的结算任务派发一个 `SettlementTriggeredEvent` |
+
+三张表承载结果：
+
+| 表 | 内容 |
+|---|---|
+| `hamster_settlement_task` | 结算任务本身：账套、**交易日期**、**创建时间**，以及 `executed_at`（为 NULL 即尚未派发） |
+| `hamster_settlement_transaction` | 某笔交易在结算时点的**冻结副本**（另有 `source_transaction_id` 供溯源、冗余的分类名） |
+| `hamster_settlement_entry` | 某条明细在结算时点的**冻结副本**（另有 `source_entry_id`、冗余的账户名） |
+
+**冗余存储是实实在在的列，不是一个 JSON 大字段。** 一天的快照仍是一组普通的关系行——
+账户、方向、金额各自是可查询的列——故「某账户某天的发生额合计」是一条 SQL 聚合，
+而不是要把整块数据读进内存再解析。真正被反范式化的是**名字**：`category_name` 与 `account_name`
+在结算时点抄下，因为分类与账户都可以改名，只存主键会让今天的改名改写昨天的结算。
+
+**窗口是 `[水位 + 1 天, 今天 0 点)`，而水位是推出来的、不单独存。** 库里没有任何「上次执行」
+字段：结算任务的存在本身就是「那一天已经收集过」的陈述，故水位就是该账套
+`transaction_date` 的最大值——「某天收没收集过」与「库里有没有那天的任务」因此不可能互相矛盾。
+一条结算任务都没有的账套没有水位，这恰好就是需求里「第一次执行不限初始时间」：
+**第一次会把有史以来的交易全部收进来**。漏跑一次**不需要任何补偿动作**——
+窗口是「水位到今天」这一整段而不是固定的一天，下一次触发会把中间漏掉的日子一并补齐。
+没有交易的日子不建结算任务。
+
+**已结算的日子冻结、永不重算。** 某天的账事后被改账，快照仍保留结算当时的取值（这正是快照的意义）；
+而**事后插入到已结算日**的一笔交易也不会被补收——网开一面会让规则变成「新记的会显示、旧的不显示」，
+用户无从理解。`(account_set_id, transaction_date)` 上的唯一索引与写入前的存在性判断
+让重复收集是幂等的：同一天被触发两次、进程重启，都不会多建任何东西。
+
+**交易日期是服务器本地日期——全项目唯一一处刻意不以 UTC 存储的时间列。** 它是**日期**而不是**时刻**：
+「25 号结算了吗」问的是用户看到的那一天，而用户看到的一天由本地时区决定；
+存成 UTC 会把东八区某天头八小时的账归到前一天。收集窗口把本地 0 点换算成 UTC 后与
+`occurred_at`（UTC）比对——本地 23:58 与本地 00:03 的两笔账会落进两个不同的结算任务。
+解析出的时区在启动日志里打印，且该列读回后**不得**再当作 UTC 转一次。
+
+**分布式部署用「指定主节点」而不是锁。** `HAMSTER_JOB_NODE` 留空即单实例、任务照跑；
+为 `master` 则跑；其余任意值一律不跑。唯一索引是**兜底而非替代**——
+它把「两个主节点同时在跑」退化成「一个成功、另一个在日志里报冲突」，而不是把一天结算两遍；
+但互斥本身靠的是这个配置，本处的任何东西都不应被描述成分布式锁。
+
+两个开关与两个时刻都可配置，环境变量优先：
+
+| 配置项 | 环境变量 | 默认值 |
+|---|---|---|
+| `Settlement:CollectEnabled` | `HAMSTER_SETTLEMENT_COLLECT_ENABLED` | `true` |
+| `Settlement:ExecuteEnabled` | `HAMSTER_SETTLEMENT_EXECUTE_ENABLED` | `true` |
+| `Settlement:CollectTime` | `HAMSTER_SETTLEMENT_COLLECT_TIME` | `00:05` |
+| `Settlement:ExecuteTime` | `HAMSTER_SETTLEMENT_EXECUTE_TIME` | `01:00` |
+| `Settlement:NodeName` | `HAMSTER_JOB_NODE` | `""`（单实例） |
+
+时刻只认 `HH:mm` 一种写法，无法识别的取值**回落默认并告警**而不是抛异常——
+部署脚本里的一个笔误不该让服务起不来，但也不该悄无声息。
+
+##### 事件订阅机制
+
+`SettlementExecutionJob` 不按名字调用任何订阅者，它只往 `IEventBus`（`Events/`）发布，
+由总线把事件交给每一个已注册的 `IEventHandler<TEvent>`。
+
+```csharp
+public sealed class MySubscriber : IEventHandler<SettlementTriggeredEvent>
+{
+    public Task HandleAsync(SettlementTriggeredEvent @event, CancellationToken cancellationToken = default) { ... }
+}
+```
+
+**新增一个订阅者 = 新增一个类文件。** `AddHamsterEventHandlers()` 在启动时反射扫描
+`Hamster.Api` 程序集并注册它找到的每一个实现——与 `IEndpoint` 约定同一种「写一个类就生效」的形状，
+理由也相同：手维护的注册清单迟早会漏掉一项，而症状是「代码写了却从不被调用」，编译期毫无提示。
+`Program.cs` 无需改动。`SettlementTriggeredEvent` 是第一个事件；新增一类事件只需新增一个 `record`，
+总线本身不用动。
+
+派发是**进程内、串行**的，且 `PublishAsync` **返回结果而不抛异常**：执行任务需要一个
+「这次派发到底成没成」的即时结论，异步队列给不了；而单个订阅者的失败不该拖垮其余订阅者、
+也不该让循环退出。
+
+**只有全部订阅者都成功了，结算任务才被标记为已执行。** 有失败就留着 `executed_at` 为空，
+下一个执行日重试——代价是事件会被再投递一次，故**订阅者必须幂等**。
+这个取舍是刻意的：把一个临时故障藏在「已执行」后面，会让那个订阅者**永远**收不到这一天。
+标记本身是条件更新（`WHERE id = @id AND executed_at IS NULL`），
+故两个实例同时结算同一个任务时，第二个能如实知道自己那次是重复的，而不是默默覆盖。
+事件载荷只带主键与条数、**不带明细**——明细可能成千上万条，需要细节的订阅者按任务主键去读冻结的快照。
+
 ##### 升级既有数据库
 
 SqlSugar 的增量加列只会把新列补成**可空**，不会为既有行填值。因此启动时会先把历史用户行的
@@ -629,10 +728,20 @@ SqlSugar 的增量加列只会把新列补成**可空**，不会为既有行填�
 需由管理员在用户管理页激活后才能登录。同理，历史账户行的 `is_system` 回填为 `false`
 （升级前的账户不可能是系统账户）；不补这一步，`is_system` 为 NULL 会让账户列表因无法绑定而 500。
 
+`updated_at` **按每行自己的 `created_at` 回填**，这正是「从未被修改过」的含义，
+也与新记一笔交易时该列的取值一致。它**不能留空**：该列绑定到非空的 `DateTime`，
+NULL 会让**整个交易列表查询** 500——与上面那些标志列的失败方式相同。
+而取当前时刻比崩溃更糟：它会告诉每一笔历史交易「你刚被改过」，一句彻头彻尾的不实之辞。
+
 标签**无需任何回填**：标签不是 `hamster_transaction` 上的列，故没有既有表要改——
 `hamster_tag` 与 `hamster_transaction_tag` 是两张全新的表，由同一趟 `InitTables` 建出，
 而「没有关联行」本就精确地表示「未挂标签」这一合法值。从未用过标签的账套只是空字典，
 那正是预期的起点。
+
+三张结算表同样全是新表（`hamster_settlement_task`、`hamster_settlement_transaction`、
+`hamster_settlement_entry`），故**没有迁移脚本、也没有回填**——既有表一处未动。
+它们从空表开始，由第一次收集从交易表里填出来。`hamster_transaction` 上除上面那个
+`updated_at` 之外没有任何新增列。
 
 ### 前端设置
 

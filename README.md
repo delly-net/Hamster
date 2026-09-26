@@ -34,7 +34,7 @@ Hamster/
 - **OpenAPI**: `AddOpenApi()` / `MapOpenApi()` in development (`/openapi/v1.json`)
 - **Data Access**: SqlSugar ORM over **SQLite** (default) or **PostgreSQL**
 - **Auth**: JWT bearer tokens (1-day lifetime), passwords hashed with PBKDF2
-- **Layered as**: `Config/` · `Data/` · `Security/` · `Services/` · `Endpoints/`
+- **Layered as**: `Config/` · `Data/` · `Security/` · `Services/` · `Endpoints/` · `Events/` · `Jobs/`
 
 ### Frontend ([ui/](ui/))
 - **Framework**: Vue 3.5 with Composition API
@@ -395,8 +395,20 @@ credit**, and total debits always equal total credits. The data lives in two tab
 
 | Table | Contents |
 |---|---|
-| `hamster_transaction` | Transaction header: account set, type, timestamp, summary, remark, **category**, who posted it |
+| `hamster_transaction` | Transaction header: account set, type, timestamp, summary, remark, **category**, who posted it, **created at / last updated at** |
 | `hamster_transaction_entry` | Transaction entry: parent transaction, account, direction, amount |
+
+Every transaction header carries **two timestamps**: `created_at` (when it was posted) and `updated_at`
+(when it was last rewritten). A freshly posted transaction has `updated_at == created_at` — "never
+modified" is expressed as "last modified at the moment of creation", not as NULL, so the column is
+non-null and every reader can compare the two without a null check. **Only `PUT /api/transactions/{id}`
+moves `updated_at`**, and it is assigned in the same statement as the rest of the rewrite, so a header
+can never report a modification time that no rewrite corresponds to. The column is **not exposed in any
+request or response body**: it is a fact about the row, not an input, and the transaction update
+contract does not accept it (a caller-supplied "modification time" would be a value the server cannot
+verify). The **entry** table deliberately has no such column, for the same reason it has no
+`created_at`: an entry has no independent write path — it is rewritten only as part of its parent, so
+its timing is its parent's timing and a second copy could only drift.
 
 An entry's direction is a **`direction` enum plus a positive amount**, not a signed amount:
 
@@ -753,6 +765,109 @@ same `counterpartyKind`): one decides whether to offer the entry point, the othe
 the request. The frontend check is a presentation-layer choice; the backend 400 / 404 is the one that
 cannot be bypassed. They are not the same thing being enforced twice.
 
+##### Settlement jobs
+
+Two daily background jobs turn the day's postings into a **frozen settlement record**. They are plain
+`BackgroundService`s (`Jobs/`) — no scheduler framework is involved, because "run once a day at a
+fixed time" needs nothing more than a loop and a delay, while a framework would drag in its own
+storage, cluster coordination and console.
+
+| Job | Default time | What it does |
+|---|---|---|
+| `SettlementCollectionJob` | `00:05` | Groups every not-yet-settled transaction earlier than **today 00:00** by **account set + transaction date**, creates a `hamster_settlement_task` per group, and stores the group's transactions and all their entries as snapshots |
+| `SettlementExecutionJob` | `01:00` | Publishes a `SettlementTriggeredEvent` for every settlement task that has not been executed yet |
+
+Three tables carry the result:
+
+| Table | Contents |
+|---|---|
+| `hamster_settlement_task` | The settlement itself: account set, **transaction date**, **created at**, and `executed_at` (NULL = not yet dispatched) |
+| `hamster_settlement_transaction` | A **frozen copy** of one transaction as of settlement time (plus `source_transaction_id` for traceability and a redundant `category_name`) |
+| `hamster_settlement_entry` | A **frozen copy** of one entry (plus `source_entry_id` and a redundant `account_name`) |
+
+**Redundant storage means real columns, not a JSON blob.** The snapshot of a day stays a set of
+ordinary relational rows — account, direction and amount are each a queryable column — so "total for
+account X on day D" is a SQL aggregate rather than a blob that has to be parsed in memory. What is
+denormalised is the **names**: `category_name` and `account_name` are copied at settlement time
+because categories and accounts can be renamed, and storing only the ids would let today's rename
+rewrite yesterday's settlement.
+
+**The window is `[watermark + 1 day, today 00:00)` and the watermark is derived, not stored.** There is
+no "last run" column anywhere: a settlement task existing *is* the statement that its day has been
+collected, so the watermark is the maximum `transaction_date` per account set. "Has day D been
+collected" and "is there a task for day D" can therefore never disagree. An account set with no
+settlement task at all has no watermark, which is exactly the requirement's "first run has no lower
+bound": **the whole history is collected the first time**. A missed run needs **no catch-up action** —
+the window is "watermark to today", not "exactly one day", so the next run sweeps up every day that
+was skipped. Days with no postings create no settlement task.
+
+**Settled days are frozen and never recomputed.** If a posting is edited after its day was settled,
+the snapshot keeps the values it had at settlement time (this is what "snapshot" is for), and a
+transaction *inserted into* an already-settled day is not swept in later — retro-fitting would make
+the rule "new postings show up, old ones don't", which a user cannot reason about. The unique index on
+`(account_set_id, transaction_date)` and the existence check make re-running the collection
+idempotent: same-day re-triggers and restarts create nothing.
+
+**The transaction date is a server-local date — the one deliberately non-UTC time column in the
+project.** It is a *date*, not an instant: "was the 25th settled" means the day the user sees, and the
+user's day comes from the local timezone. Storing UTC would file the first eight hours of a UTC+8 day
+under the previous date. The collection window converts local midnight to UTC and compares it against
+`occurred_at` (which is UTC) — a posting at local 23:58 and one at local 00:03 land in different
+settlement tasks. The resolved zone is printed at startup, and rows read back from this column must
+**not** be shifted again.
+
+**Distributed deployment uses a designated master node, not a lock.** `HAMSTER_JOB_NODE` empty means
+single-instance and the jobs run; `master` means run; anything else means do not. The unique index is a
+**fallback, not a substitute** for this — it degrades "two masters running at once" into "one wins, the
+other logs a conflict" rather than settling a day twice, but the mutual exclusion is the configuration
+and nothing here should be described as a distributed lock.
+
+Both switches and both times are configurable, environment variables first:
+
+| Setting | Environment variable | Default |
+|---|---|---|
+| `Settlement:CollectEnabled` | `HAMSTER_SETTLEMENT_COLLECT_ENABLED` | `true` |
+| `Settlement:ExecuteEnabled` | `HAMSTER_SETTLEMENT_EXECUTE_ENABLED` | `true` |
+| `Settlement:CollectTime` | `HAMSTER_SETTLEMENT_COLLECT_TIME` | `00:05` |
+| `Settlement:ExecuteTime` | `HAMSTER_SETTLEMENT_EXECUTE_TIME` | `01:00` |
+| `Settlement:NodeName` | `HAMSTER_JOB_NODE` | `""` (single instance) |
+
+The times take `HH:mm` only, and an unrecognised value falls back to the default **with a warning**
+rather than throwing — a typo in a deployment script should not keep the service from starting, and it
+should not be silent either.
+
+##### The event bus
+
+`SettlementExecutionJob` triggers no subscribers by name. It publishes to an `IEventBus`
+(`Events/`), which hands the event to every registered `IEventHandler<TEvent>`.
+
+```csharp
+public sealed class MySubscriber : IEventHandler<SettlementTriggeredEvent>
+{
+    public Task HandleAsync(SettlementTriggeredEvent @event, CancellationToken cancellationToken = default) { ... }
+}
+```
+
+**Adding a subscriber is adding one file.** `AddHamsterEventHandlers()` reflects over the `Hamster.Api`
+assembly at startup and registers every implementation it finds — the same "write a class and it takes
+effect" shape as the `IEndpoint` convention, and for the same reason: a hand-maintained registration
+list eventually misses an entry, and the symptom is code that is never called with no compile-time
+hint. `Program.cs` never has to change. `SettlementTriggeredEvent` is the first event; a new event type
+is a new `record` and needs no change to the bus.
+
+Dispatch is **in-process and serial**, and `PublishAsync` **returns a result instead of throwing**: the
+execution job needs an immediate "did this dispatch succeed" answer, which an asynchronous queue cannot
+give, and one subscriber's failure must not stop the others or kill the loop.
+
+**A settlement task is marked executed only when every subscriber succeeded.** A failure leaves
+`executed_at` NULL so the next execution day retries it — so the cost of a failed subscriber is that
+the event is delivered again, and **subscribers must be idempotent**. That trade is deliberate: hiding
+a transient failure behind "already executed" would leave that subscriber missing that day *forever*.
+The marking itself is a conditional update (`WHERE id = @id AND executed_at IS NULL`), so when two
+instances dispatch the same task the second one can tell it was a duplicate rather than silently
+overwriting. The event payload carries ids and counts, **not the entries** — there can be tens of
+thousands of them, and a subscriber that wants them can read the frozen snapshot by task id.
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.
@@ -763,10 +878,22 @@ not activated"** and need an administrator to activate them. For the same reason
 system account); without that, a NULL `is_system` makes the account list fail to bind and return
 500.
 
+`updated_at` is backfilled **from each row's own `created_at`**, which is what "never modified" means
+and matches what a newly posted transaction gets. It must not be left NULL: the column binds to a
+non-null `DateTime`, so a NULL would make the whole transaction list fail with a 500 — the same
+failure mode as the flags above. Using the current time instead would be worse than a crash in one
+respect: it would tell every historical posting, falsely, that it had just been edited.
+
 Tags need **no backfill**: a tag is not a column on `hamster_transaction`, so there is no existing
 table to alter — `hamster_tag` and `hamster_transaction_tag` are brand-new tables created by the same
 `InitTables` pass, and "no link row" already means exactly "untagged", which is the legitimate value.
 An account set that has never used tags simply has an empty dictionary, which is the intended start.
+
+The three settlement tables are likewise all-new (`hamster_settlement_task`,
+`hamster_settlement_transaction`, `hamster_settlement_entry`), so there are **no migrations and no
+backfill** for them — nothing existing is altered. They start empty, and the first collection run
+fills them from the transaction tables. Nothing is added to `hamster_transaction` except the
+`updated_at` column handled above.
 
 ### Frontend Setup
 
