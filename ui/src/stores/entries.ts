@@ -88,6 +88,14 @@ export const COUNTERPARTY_KIND_LABELS: Record<CounterpartyKind, string> = {
 /** 默认每页条数，与后端 `EntryEndpoints.DEFAULT_PAGE_SIZE` 保持一致。 */
 export const ENTRY_PAGE_SIZE = 50
 
+/**
+ * 首页「最近交易」面板取多少条。
+ *
+ * 与 {@link ENTRY_PAGE_SIZE} 是两个用途：那边是「明细页一页看多少」，这边是「首页概览给几条」，
+ * 不共用同一个常量——把首页的 10 条挂到明细页的页大小上，改一处的动机会来自两个方向。
+ */
+export const RECENT_ENTRY_LIMIT = 10
+
 /** 一条账目明细（一行 = 一个借贷方向）。 */
 export interface Entry {
   id: number
@@ -184,6 +192,14 @@ export interface EntryQueryParams {
   tagIds?: number[]
   page?: number
   pageSize?: number
+  /**
+   * 排序方向：`asc`（升序，**省略即此**）或 `desc`（倒序）。
+   *
+   * 省略时**不往查询串里写**这个参数，与后端「未指定即升序」的默认保持一致——
+   * 明细页因此完全不受本参数影响（它的行为与本参数引入前逐字相同）。
+   * 倒序是三级排序键**逐级反向**（后端实现），即升序结果的严格逆序，翻页同样稳定。
+   */
+  order?: 'asc' | 'desc'
 }
 
 /** 一页明细。 */
@@ -228,9 +244,31 @@ export function isEntryEditable(entry: Entry): boolean {
 }
 
 export const useEntriesStore = defineStore('entries', () => {
-  /** 最近一次查询结果；`null` 表示尚未查过。 */
+  /** 明细页那份最近一次查询结果；`null` 表示尚未查过。 */
   const page = ref<EntryQueryPage | null>(null)
   const loading = ref(false)
+
+  /**
+   * 首页「最近交易」面板的那一份结果；`null` 表示尚未查过。
+   *
+   * **与上面那份刻意分开，不共用 `page` / `loading`**：两者打的是同一个端点，但参数集没有一处相同
+   * ——明细页是「时间区间 + 账户多选 + 标签多选 + `pageSize=50` + 升序 + 分页」，
+   * 首页是「不筛选 + `pageSize=10` + 倒序 + 恒第 1 页」。共用一个结果槽会让首页那 10 条
+   * 把明细页的分页结果顶掉；共用一个 `loading` 会让首页的一次刷新把明细页的【查询】按钮变灰。
+   * 两者唯一值得共用的东西是**打哪个 URL**，那一层收在下面的 `fetchPage` 里。
+   */
+  const recentItems = ref<Entry[] | null>(null)
+
+  /** 首页那一份的总条数（当前账套内的明细总数）；只用于呈现，首页不翻页。 */
+  const recentTotal = ref(0)
+
+  /** 首页那一份是否在途；与 `loading` 分开，理由见 `recentItems`。 */
+  const recentLoading = ref(false)
+
+  /** 发一次明细查询并解出分页结果；**URL 拼装的唯一落点**，两个入口共用。 */
+  async function fetchPage(search: URLSearchParams): Promise<EntryQueryPage> {
+    return request<EntryQueryPage>(`${ENTRIES_PATH}?${search.toString()}`)
+  }
 
   /**
    * 查询账目明细。
@@ -255,14 +293,48 @@ export const useEntriesStore = defineStore('entries', () => {
     }
     search.set('page', String(params.page ?? 1))
     search.set('pageSize', String(params.pageSize ?? ENTRY_PAGE_SIZE))
+    // 未传即不写这个参数：后端「未指定 = 升序」的默认与明细页的既有行为逐字一致
+    if (params.order !== undefined) {
+      search.set('order', params.order)
+    }
 
     loading.value = true
     try {
-      const result = await request<EntryQueryPage>(`${ENTRIES_PATH}?${search.toString()}`)
+      const result = await fetchPage(search)
       page.value = result
       return result
     } finally {
       loading.value = false
+    }
+  }
+
+  /**
+   * 取首页「最近交易」要的那几条：**最新在前**的 {@link RECENT_ENTRY_LIMIT} 条明细。
+   *
+   * 不带任何筛选：首页给的是「这个账套最近发生了什么」，不是「我上次筛出来的那一段里最近发生了什么」。
+   * **行过滤由后端承担**（只返回资金/负债账户上的明细，与明细页同一口径），这里不再过滤一次
+   * ——前端过滤只会造出一道与后端不一致的假防线。
+   *
+   * 刻意**不复用 {@link query}**：那会把 `pageSize=10`、倒序、不筛选这几个参数塞给明细页的槽。
+   *
+   * @returns 最新的若干条明细（可能为空数组）。
+   * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+   */
+  async function loadRecent(): Promise<Entry[]> {
+    const search = new URLSearchParams()
+    // 倒序 + 第 1 页 = 最新的若干条；`total` 仍是**全部**明细的条数（后端按筛选条件计数，与方向无关）
+    search.set('order', 'desc')
+    search.set('page', '1')
+    search.set('pageSize', String(RECENT_ENTRY_LIMIT))
+
+    recentLoading.value = true
+    try {
+      const result = await fetchPage(search)
+      recentItems.value = result.items
+      recentTotal.value = result.total
+      return result.items
+    } finally {
+      recentLoading.value = false
     }
   }
 
@@ -271,10 +343,21 @@ export const useEntriesStore = defineStore('entries', () => {
     page.value = null
   }
 
+  /** 清空首页那一份（与 {@link clear} 分开：两个页面的生命周期互不相干）。 */
+  function clearRecent(): void {
+    recentItems.value = null
+    recentTotal.value = 0
+  }
+
   return {
     page,
     loading,
     query,
     clear,
+    recentItems,
+    recentTotal,
+    recentLoading,
+    loadRecent,
+    clearRecent,
   }
 })

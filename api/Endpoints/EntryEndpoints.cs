@@ -10,6 +10,11 @@ namespace Hamster.Api.Endpoints;
 /// 账目明细端点（任意已登录用户）：在当前账套内按时间区间与账户查询交易明细。
 /// </summary>
 /// <remarks>
+/// **查询能力只此一份**：首页的「最近交易」面板要的正是本端点的逐条明细，它只多传一个 `order=desc`，
+/// 不为那一块界面另开端点——否则可见性收敛、钱账户过滤、对手方分档、分类/标签的批量解析
+/// 会在两处各写一遍，迟早漂移出「同一笔账在两页显示得不一样」。
+/// </remarks>
+/// <remarks>
 /// **明细一律挂在账套下**：本端点先解析当前账套（请求头 <c>X-Account-Set-Id</c>），
 /// 未指定账套即拒绝请求——否则会退化成「查询全库明细」的越权缺口。
 /// <para>
@@ -26,9 +31,19 @@ public sealed class EntryEndpoints : IEndpoint
     /// <summary>每页条数上限。没有上限时一个请求就能把整本账读进内存。</summary>
     private const int MAX_PAGE_SIZE = 200;
 
+    /// <summary>排序方向：升序（**默认**）。</summary>
+    private const string ORDER_ASC = "asc";
+
+    /// <summary>排序方向：倒序。首页「最近交易」面板用它取最新的若干条。</summary>
+    private const string ORDER_DESC = "desc";
+
     /// <summary>时间参数格式错误时的字段错误。</summary>
     private static readonly string[] TIME_ERROR =
         ["时间格式不正确，应为 ISO 8601 时间（如 2026-09-01T00:00:00Z）"];
+
+    /// <summary>排序方向非法时的字段错误。</summary>
+    private static readonly string[] ORDER_ERROR =
+        [$"排序方向只能是 {ORDER_ASC}（升序）或 {ORDER_DESC}（倒序）"];
 
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
@@ -44,6 +59,7 @@ public sealed class EntryEndpoints : IEndpoint
                 int[]? tagIds,
                 int? page,
                 int? pageSize,
+                string? order,
                 HttpContext context,
                 ClaimsPrincipal principal,
                 IUserService users,
@@ -84,6 +100,8 @@ public sealed class EntryEndpoints : IEndpoint
                     errors["pageSize"] = [$"每页条数须在 1 到 {MAX_PAGE_SIZE} 之间"];
                 }
 
+                var descending = IsDescending(order, errors);
+
                 if (errors.Count > 0)
                 {
                     return Results.ValidationProblem(errors);
@@ -100,6 +118,7 @@ public sealed class EntryEndpoints : IEndpoint
                     tagIds,
                     currentPage,
                     currentPageSize,
+                    descending,
                     cancellationToken);
 
                 return Results.Ok(EntryQueryPageDto.From(result));
@@ -107,8 +126,14 @@ public sealed class EntryEndpoints : IEndpoint
             .WithName("QueryEntries")
             .WithSummary("账目明细查询")
             .WithDescription(
-                "在当前账套内按时间区间与账户查询交易明细，按**业务发生时间**升序分页返回" +
-                "（同一时刻按交易主键、再按明细主键升序，保证翻页结果稳定）。" +
+                "在当前账套内按时间区间与账户查询交易明细，按**业务发生时间**排序分页返回" +
+                "（同一时刻按交易主键、再按明细主键，保证翻页结果稳定）。" +
+                "排序方向由 `order` 给定：`asc`（默认，升序）或 `desc`（倒序，**三级排序键逐级反向**，" +
+                "即升序结果的严格逆序）；大小写不敏感，**未知取值返回 400 而不是静默按升序处理**" +
+                "（否则「传了 desc、结果却是升序」无从判断）。" +
+                "`desc` 只改方向：行过滤、total、对手方/分类/标签的解析与 `asc` 完全相同。" +
+                "**首页「最近交易」面板正是用 `order=desc&pageSize=10` 取最新的 10 条明细**" +
+                "——它要的就是本端点的逐条明细，故不另开一个近似端点。" +
                 "**行粒度是一条交易明细**：一笔交易由借贷两条明细构成，若两条明细挂在两个不同的所选账户上，" +
                 "则它们在结果里各占一行——这正是复式记账的呈现方式。" +
                 "amount 恒为正数、direction 为借贷方向，两者是账本的底层事实（库内不存带符号金额）；" +
@@ -204,6 +229,41 @@ public sealed class EntryEndpoints : IEndpoint
         }
 
         return (actor, accountSet, null);
+    }
+
+    /// <summary>解析排序方向参数。</summary>
+    /// <param name="raw">原始文本；为空表示按默认方向（升序）。</param>
+    /// <param name="errors">按字段聚合的错误字典。</param>
+    /// <returns>是否倒序；未指定或非法取值时均为 <c>false</c>（非法取值另有 400，见注释）。</returns>
+    /// <remarks>
+    /// 大小写不敏感（<c>DESC</c> 与 <c>desc</c> 同义）：查询串里的大小写是笔误级的差异，
+    /// 为此回 400 只会让人去翻文档，而不是发现自己多按了一次大写键。
+    /// <para>
+    /// 但**未知取值一律报错，不静默回落到升序**：静默回落会让「我明明传了 desc、结果却是升序」
+    /// 无从判断——而这正是本参数唯一可能出错的地方，也是它唯一需要给出的反馈。
+    /// </para>
+    /// </remarks>
+    private static bool IsDescending(string? raw, Dictionary<string, string[]> errors)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            // 未指定即默认方向，不算错误
+            return false;
+        }
+
+        var normalized = raw.Trim();
+        if (string.Equals(normalized, ORDER_DESC, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (string.Equals(normalized, ORDER_ASC, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        errors["order"] = ORDER_ERROR;
+        return false;
     }
 
     /// <summary>解析时间参数（UTC，含端点）。</summary>

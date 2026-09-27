@@ -68,11 +68,25 @@ public interface IEntryQueryService
     /// </param>
     /// <param name="page">页码，从 1 开始。</param>
     /// <param name="pageSize">每页条数。</param>
+    /// <param name="descending">
+    /// 是否**倒序**（默认 <c>false</c>，即升序）。
+    /// <para>
+    /// 为真时三级排序键**逐级反向**，得到的是升序结果的**严格逆序**。只把第一级反向
+    /// （同为某时刻的明细仍按主键升序）会让同一时刻的多条明细在正反两种方向下先后不一致，
+    /// 翻页时同一行可能在两页里各出现一次——而「最后一级排序键让同一时刻的多条明细也有确定次序」
+    /// 正是本查询分页稳定的依据。
+    /// </para>
+    /// <para>
+    /// 首页「最近交易」面板用它取最新的若干条（<c>descending: true</c> + 第 1 页 + 想要的条数）。
+    /// 它只改**方向**，行过滤、总数与对手方/分类/标签的解析与升序完全相同。
+    /// </para>
+    /// </param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>
     /// 一页明细及总数，**只含钱账户上的明细**（往来账户与账本账户上的行不在其中）。
     /// 明细按 <see cref="Transaction.OccurredAt"/> 升序、同一时刻按交易主键升序、
-    /// 再按明细主键升序排列（第三级排序键保证分页结果稳定，不会出现「同一笔数据在两页里各出现一次」）。
+    /// 再按明细主键升序排列（第三级排序键保证分页结果稳定，不会出现「同一笔数据在两页里各出现一次」）；
+    /// <paramref name="descending"/> 为真时上述三级键**逐级反向**（见该参数说明）。
     /// <para>
     /// 被排除的行只影响**呈现**，不影响库内数据：那笔交易的借贷两条明细照旧在库里配平，
     /// 账户余额（<see cref="ITransactionService.SumSignedAmountsAsync"/>）也照旧把它们计入。
@@ -88,6 +102,7 @@ public interface IEntryQueryService
         IReadOnlyCollection<int>? tagIds,
         int page,
         int pageSize,
+        bool descending = false,
         CancellationToken cancellationToken = default);
 }
 

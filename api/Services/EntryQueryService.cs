@@ -25,6 +25,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         IReadOnlyCollection<int>? tagIds,
         int page,
         int pageSize,
+        bool descending = false,
         CancellationToken cancellationToken = default)
     {
         // 可见账户集：一次取回，**两用**——但它对两用的口径并不相同，故下面拆成两个集合。
@@ -100,6 +101,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // ——这是该异常提示给出的官方出路。投影里的每个属性都直接来自某个表的列，故排序键仍是确切的表列。
         // 三级排序键的最后一级是明细主键，它让「同一时刻的多条明细」也有确定次序——
         // 否则翻页时同一行可能在两页里各出现一次。
+        // 倒序时**三级键逐级反向**（同一个方向变量套在三处），得到的是升序结果的严格逆序：
+        // 只反第一级的话，同一时刻的多条明细在两种方向下的先后会不一致，翻页同样可能重复或漏行。
+        var orderType = descending ? OrderByType.Desc : OrderByType.Asc;
         var rows = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter)
             .Select((entry, tx) => new EntryRow
             {
@@ -118,9 +122,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                 CategoryId = tx.CategoryId,
             })
             .MergeTable()
-            .OrderBy(row => row.OccurredAt, OrderByType.Asc)
-            .OrderBy(row => row.TransactionId, OrderByType.Asc)
-            .OrderBy(row => row.EntryId, OrderByType.Asc)
+            .OrderBy(row => row.OccurredAt, orderType)
+            .OrderBy(row => row.TransactionId, orderType)
+            .OrderBy(row => row.EntryId, orderType)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync(cancellationToken);

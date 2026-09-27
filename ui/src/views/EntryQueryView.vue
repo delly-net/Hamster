@@ -79,6 +79,17 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import EntryEditDialog from '@/components/EntryEditDialog.vue'
+import {
+  AMOUNT_UNAVAILABLE,
+  categoryText,
+  counterpartyText,
+  formatDateTime,
+  formatSigned,
+  formatUnsigned,
+  hasSignedAmount,
+  signedCellClass,
+  tagText,
+} from '@/components/entryFormat'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import {
   useAccountSetPreferencesStore,
@@ -86,7 +97,6 @@ import {
 } from '@/stores/accountSetPreferences'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import {
-  COUNTERPARTY_KIND_LABELS,
   ENTRY_PAGE_SIZE,
   isEntryEditable,
   transactionTypeLabel,
@@ -101,28 +111,8 @@ const tagsStore = useTagsStore()
 const entriesStore = useEntriesStore()
 const preferences = useAccountSetPreferencesStore()
 
-/** 金额呈现：固定两位小数，与后端的 decimal(...,2) 对齐。 */
-const amountFormatter = new Intl.NumberFormat('zh-CN', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-})
-
-/** 后端回传的是带 `Z` 的 UTC 时间，交给 `Intl` 按浏览器本地时区呈现。 */
-const dateTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
-  dateStyle: 'medium',
-  timeStyle: 'short',
-})
-
 /** `YYYY-MM-DD`，`<input type="date">` 的原生取值格式。 */
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/
-
-/**
- * 金额字段缺失时单元格显示的标记文案。
- *
- * 取值刻意**不像一个金额、也不像一个正常占位符**（页内其余占位一律是 `—`）：
- * 它要让人一眼看出「这不是数据，是异常」，而不是被当成空值的另一种写法。
- */
-const AMOUNT_UNAVAILABLE = '金额异常'
 
 const errorMessage = ref('')
 const notice = ref('')
@@ -302,117 +292,12 @@ function toUtcIso(date: string, endOfDay: boolean): string | null {
   return Number.isNaN(at.getTime()) ? null : at.toISOString()
 }
 
-/** 格式化金额；无法解析时原样回显。 */
-function formatAmount(value: number): string {
-  return Number.isFinite(value) ? amountFormatter.format(value) : String(value)
-}
-
 /**
- * 本行的 `signedAmount` 是否是一个可用的数。
- *
- * 后端未返回该字段时它是 `undefined`（例如后端进程未按最新代码重建）。
- * 这个判定**必须挡在分列之前**：`undefined > 0` 与 `undefined < 0` 同为 `false`，
- * 一漏过去收入、支出两列就会**双双留空**——那看起来像「这些行真的没有收支」，
- * 而不是「金额没取到」。
- *
- * @param entry 一条明细。
- * @returns 字段存在且为有限数时返回 `true`。
+ * 金额、对手方、分类、标签与时间的呈现助手来自 `components/entryFormat`——**本页不再自带一份**：
+ * 首页的「最近交易」面板要用同一批函数，两处各写一份会让「两位小数怎么格式化」「账本账户叫什么」
+ * 这类口径当场分叉（那是「三个选择框的收起口径」之后，又一次「只定义一处」的落点）。
+ * 各函数原本写在这里的取舍说明，随函数一并搬了过去。
  */
-function hasSignedAmount(entry: Entry): boolean {
-  return Number.isFinite(entry.signedAmount)
-}
-
-/**
- * 格式化**带符号**金额：正数补 `+`、负数用 `-`，两者共用同一套两位小数口径。
- *
- * 符号手工拼接而非交给 `Intl`（它对正数不出 `+`），且用的是 ASCII 连字符，
- * 让一列里的正负金额在等宽字体下纵向对齐。
- *
- * **只有净额列用它**（以及窄屏卡片那个等同于净额的金额）：净额是唯一「一格容纳正负两种结果」
- * 的位置，符号是它表达方向的通道。收入/支出两列改用 {@link formatUnsigned}——那两列的方向
- * 已由列头与本列语义色表达，再补符号是重复。
- *
- * @param value 带符号金额（后端 `signedAmount`）。
- * @returns 带正负号的金额文本；非有限数返回 {@link AMOUNT_UNAVAILABLE} 而非 `String(value)`
- * ——后者会把 `undefined` / `NaN` 原样渲染进表格，看起来像数据。
- */
-function formatSigned(value: number): string {
-  if (!Number.isFinite(value)) {
-    return AMOUNT_UNAVAILABLE
-  }
-
-  return `${value < 0 ? '-' : '+'}${formatAmount(Math.abs(value))}`
-}
-
-/**
- * 格式化**不带符号**金额：一律取绝对值，与 {@link formatSigned} 共用同一套两位小数口径。
- *
- * 供**收入列与支出列**使用：这两列的列头已经说明了方向，同一行又只有一列有值，
- * 再补一个 `+` / `-` 就是第三遍重复——方向由「落在哪一列」+「本列的语义色」表达即可
- * （见 {@link signedCellClass}）。**净额列不得改用它**：净额是唯一在一格里同时容纳
- * 正负两种结果的列，符号是它表达方向的主要通道。
- *
- * 负号只是被**显示**掉了，不是被抹掉：金额本身仍取自后端带符号的 `signedAmount`，
- * 分列判据也仍是它的正负（见 {@link incomeText} / {@link expenseText}）。
- *
- * @param value 带符号金额。
- * @returns 绝对值文本；非有限数返回 {@link AMOUNT_UNAVAILABLE}——**判定必须先于 `Math.abs()`**，
- * 否则 `Math.abs(undefined)` 得到 `NaN` 并被渲染成 `NaN` 文本（同 #44 的加固口径）。
- */
-function formatUnsigned(value: number): string {
-  if (!Number.isFinite(value)) {
-    return AMOUNT_UNAVAILABLE
-  }
-
-  return formatAmount(Math.abs(value))
-}
-
-/** 格式化 ISO 时间；无法解析时原样回显。 */
-function formatDateTime(value: string): string {
-  const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? value : dateTimeFormatter.format(parsed)
-}
-
-/**
- * 对手方呈现文案。
- *
- * `Account` 档直接给可见账户的名称（该档的标签是空串，见 `COUNTERPARTY_KIND_LABELS`）；
- * 其余档位一律给占位文案：`Ledger` 显示「期初」，`Hidden` 与 `None` 显示「—」。
- * 后端不会为不可见对手方回传主键与名称，故这里也不存在「回退到 Id」的分支。
- */
-function counterpartyText(entry: Entry): string {
-  if (entry.counterpartyKind === 'Account') {
-    return entry.counterpartyName ?? COUNTERPARTY_KIND_LABELS.Hidden
-  }
-
-  return COUNTERPARTY_KIND_LABELS[entry.counterpartyKind]
-}
-
-/**
- * 分类呈现文案：未分类时显示 `—`。
- *
- * 分类名由后端随行下发（流水挂的是分类主键，不是名称），故分类改名后此处自动显示新名字；
- * **已停用分类的名称照常显示**——停用是「不再供新记账选择」，不是「历史上从未用过」。
- * 未分类（`null`）是**正常状态**（记账时分类可选），不是数据缺失，故用与备注同样的 `—` 占位。
- */
-function categoryText(entry: Entry): string {
-  return entry.categoryName ?? '—'
-}
-
-/**
- * 标签呈现文案：**顿号连接**，没有标签时显示 `—`。
- *
- * 用纯文本而不是一排小徽标：本列与【分类】列同属「这笔账的标注」，两列并排时读法应当一致
- * （一列是徽标、一列是文字，会让人以为两者不是同一类东西）；且标签数量不设上限，
- * 徽标在窄列里会挤成一片。顿号正是中文里列举的写法，读起来就是「标了这几个」。
- *
- * 不改名、不过滤：**已停用标签的名称照常显示**（同分类列口径）；次序即用户当初提交的次序，
- * 后端已按此下发，本页不再排序。标签是交易级属性，一笔交易的两条明细显示同一份，这不是重复。
- */
-function tagText(entry: Entry): string {
-  return entry.tags.length === 0 ? '—' : entry.tags.map((tag) => tag.name).join('、')
-}
-
 /**
  * 收入列文本：只有正数行有值，其余行留空。
  *
@@ -472,33 +357,7 @@ function sideText(entry: Entry): string {
   return entry.signedAmount < 0 ? '支出' : ''
 }
 
-/**
- * 金额单元格的语义色类。
- *
- * @param value 带符号金额。
- * @param side 该单元格归属的列：收入列只在正数时着绿，支出列只在负数时着红，净额列两向都着色
- * （净额是「这一行的增减合计」，正负两种结果都是它的正常取值）。
- * @returns 语义色类名；**非有限数返回告警类**——不能让它落进 `expense` 分支
- * （`NaN < 0` 为 `false`，会被判成收入而着绿，等于把一个缺失值标成正常收入）。
- */
-function signedCellClass(value: number, side: 'income' | 'expense' | 'net'): string {
-  if (!Number.isFinite(value)) {
-    return 'amount-unknown'
-  }
-
-  if (side === 'income') {
-    return value > 0 ? 'income' : ''
-  }
-
-  if (side === 'expense') {
-    return value < 0 ? 'expense' : ''
-  }
-
-  return value < 0 ? 'expense' : 'income'
-}
-
-/**
- * 正在修改的那一行；`null` 表示没有打开改账弹窗。
+/** 正在修改的那一行；`null` 表示没有打开改账弹窗。
  *
  * 存整行而不是只存 `transactionId`：弹窗要用它还原两个端点（哪一侧是主账户由 `isPrimary` 决定）、
  * 回填金额与时间、判断对手方是否账本账户，而「再查一次拿同一行」只会多一次往返、

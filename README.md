@@ -648,7 +648,7 @@ Entries are read back through one endpoint, which answers "what moved, when, on 
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/entries?from=&to=&accountIds=&tagIds=&page=&pageSize=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `tagIds` may likewise be repeated and omitted entirely, and a transaction matches when it carries **any** of the given tags (`EXISTS`, not a join — so a transaction with three matching tags still yields one row per entry and `total` stays equal to the number of rows rendered). Account and tag filters are **ANDed**: each narrows independently. `page` defaults to 1 and `pageSize` to 50 (max **200**). Returns `{ items, total, page, pageSize }` |
+| `GET /api/entries?from=&to=&accountIds=&tagIds=&page=&pageSize=&order=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `tagIds` may likewise be repeated and omitted entirely, and a transaction matches when it carries **any** of the given tags (`EXISTS`, not a join — so a transaction with three matching tags still yields one row per entry and `total` stays equal to the number of rows rendered). Account and tag filters are **ANDed**: each narrows independently. `page` defaults to 1 and `pageSize` to 50 (max **200**). `order` is `asc` (the default when omitted) or `desc`, case-insensitive and trimmed; **an unrecognised value is a 400 with a field-level `errors.order`, not a silent fallback to ascending**. `desc` reverses **all three** ordering keys (`OccurredAt → TransactionId → EntryId`), making it the exact reverse of the ascending result — reversing only the first key would order entries sharing a timestamp inconsistently between the two directions, so paging could repeat or skip rows. Returns `{ items, total, page, pageSize }` |
 
 **One row is one entry, not one transaction.** A transaction consists of a debit and a credit; when
 both sides sit on accounts you selected, both appear as rows. `amount` is always **positive** and
@@ -1101,6 +1101,22 @@ are not zero-filled" is preserved. `netTotal = incomeTotal - expenseTotal`; the 
 and only the net is signed. Everything else (server-side current month, `yyyy-MM` only, echoed `month`
 and `currencyCode`, 200 with `currencyCode: null` when no currency exists, per-user rows, 400/401/403)
 follows the total-asset endpoint exactly.
+
+##### Recent transactions on the home page
+
+Below the two charts the home page lists the current account set's **latest 10 entries**, read
+straight from `GET /api/entries?order=desc&page=1&pageSize=10`. There is no endpoint of its own: the
+panel wants exactly what the entry query already returns, row for row, so adding a second read path
+would only create a second ordering rule free to drift. The only thing the query needed was the
+`order` parameter above.
+
+The panel is **read-only** — no edit entry, no dialog, no copy of the entries page's filters or
+paging; "see everything" and "fix a posting" both go through the 【查看全部明细】 link to `/entries`.
+Its row filter is the **same one the entries page has always used** (`IsMoneyAccount`: fund and
+liability accounts), applied on the server, so "asset and liability accounts only" needs no second
+front-end judgement that could disagree with it. It is also **independent of the settlement data**:
+the two charts read what the settlement subscriptions wrote, while this list reads raw entries, so a
+brand-new account set shows rows here before any settlement has run.
 
 ##### Upgrading an existing database
 
