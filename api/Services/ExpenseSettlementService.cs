@@ -1,0 +1,123 @@
+using Hamster.Api.Data.Entities;
+using SqlSugar;
+
+namespace Hamster.Api.Services;
+
+/// <summary>
+/// 支出结算实现：把共享骨架（<see cref="DailyFlowSettlementServiceBase"/>）实例化为「支出」这一套。
+/// </summary>
+/// <param name="db">SqlSugar 客户端（单例 Scope，可安全并发使用）。</param>
+/// <param name="transactions">交易业务服务：当日支出发生额的**唯一**来源。</param>
+/// <param name="accountSets">账套服务：取账套成员列表。</param>
+/// <param name="executions">订阅执行水位。</param>
+/// <param name="logger">日志记录器。</param>
+/// <remarks>
+/// 与 <see cref="IncomeSettlementService"/> 逐行同构，只有表、订阅码与交易类型不同——
+/// 这正是两者共用一个基类的意义所在。
+/// </remarks>
+public sealed class ExpenseSettlementService(
+    ISqlSugarClient db,
+    ITransactionService transactions,
+    IAccountSetService accountSets,
+    ISettlementSubscriptionExecutionService executions,
+    ILogger<ExpenseSettlementService> logger)
+    : DailyFlowSettlementServiceBase(db, transactions, accountSets, executions, logger), IExpenseSettlementService
+{
+    /// <inheritdoc />
+    protected override string SubscriptionCode => IExpenseSettlementService.SUBSCRIPTION_CODE;
+
+    /// <inheritdoc />
+    protected override string FlowLabel => "支出";
+
+    /// <inheritdoc />
+    protected override TransactionType FlowType => TransactionType.Expense;
+
+    /// <inheritdoc />
+    protected override async Task<IReadOnlyDictionary<int, DateTime>> LoadLastRecordedDayByUserAsync(
+        int accountSetId,
+        CancellationToken cancellationToken)
+    {
+        var stored = await Db.Queryable<ExpenseSettlementRecord>()
+            .Where(record => record.AccountSetId == accountSetId)
+            .Select(record => new { record.UserId, record.TransactionDate })
+            .ToListAsync(cancellationToken);
+
+        // 取每个成员的最后一天，比较在 C# 侧（取舍同 IncomeSettlementService）
+        var lastDayByUser = new Dictionary<int, DateTime>();
+        foreach (var row in stored)
+        {
+            if (!lastDayByUser.TryGetValue(row.UserId, out var current) || row.TransactionDate > current)
+            {
+                lastDayByUser[row.UserId] = row.TransactionDate;
+            }
+        }
+
+        return lastDayByUser;
+    }
+
+    /// <inheritdoc />
+    protected override async Task DeleteDayAsync(
+        int accountSetId,
+        DateTime dayStart,
+        DateTime dayEnd,
+        CancellationToken cancellationToken) =>
+        await Db.Deleteable<ExpenseSettlementRecord>()
+            .Where(record => record.AccountSetId == accountSetId &&
+                             record.TransactionDate >= dayStart &&
+                             record.TransactionDate < dayEnd)
+            .ExecuteCommandAsync(cancellationToken);
+
+    /// <inheritdoc />
+    protected override async Task InsertDayAsync(
+        int accountSetId,
+        DateTime localDay,
+        IReadOnlyList<DailyFlowRow> rows,
+        CancellationToken cancellationToken)
+    {
+        // 同一次落库共用同一个时刻（理由同 IncomeSettlementService）
+        var recordedAt = DateTime.UtcNow;
+
+        var records = rows.Select(row => new ExpenseSettlementRecord
+        {
+            AccountSetId = accountSetId,
+            UserId = row.UserId,
+            CurrencyCode = row.CurrencyCode,
+            TransactionDate = localDay,
+            PersonalExpenseTotal = row.PersonalTotal,
+            PublicExpenseTotal = row.PublicTotal,
+            CreatedAt = recordedAt,
+            UpdatedAt = recordedAt,
+        }).ToList();
+
+        await Db.Insertable(records).ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public override async Task<IReadOnlyList<DailyFlowPoint>> ListDailyAsync(
+        int accountSetId,
+        int userId,
+        string currencyCode,
+        DateTime monthStart,
+        CancellationToken cancellationToken = default)
+    {
+        var start = monthStart.Date;
+        var end = start.AddMonths(1);
+
+        // 区间直接比较、不做 ±1s 预筛（理由同 IncomeSettlementService）
+        var records = await Db.Queryable<ExpenseSettlementRecord>()
+            .Where(record => record.AccountSetId == accountSetId &&
+                             record.UserId == userId &&
+                             record.CurrencyCode == currencyCode)
+            .Where(record => record.TransactionDate >= start && record.TransactionDate < end)
+            .OrderBy(record => record.TransactionDate)
+            .ToListAsync(cancellationToken);
+
+        return
+        [
+            .. records.Select(record => new DailyFlowPoint(
+                record.TransactionDate,
+                record.PersonalExpenseTotal,
+                record.PublicExpenseTotal)),
+        ];
+    }
+}

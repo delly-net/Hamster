@@ -314,6 +314,52 @@ public interface ITransactionService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// 汇总某类交易在**某个时间区间内**、落在一组账户上的**主账户明细**金额（用于按天的收入 / 支出发生额）。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只汇总该账套内的交易。</param>
+    /// <param name="accountIds">目标账户主键集合（即「主账户」须落在其中的那些账户）。</param>
+    /// <param name="type">
+    /// 交易类型（<see cref="TransactionType.Income"/> 或 <see cref="TransactionType.Expense"/>）。
+    /// 须满足 <see cref="TransactionTypeExtensions.PrimaryDirection"/> 有值，否则抛
+    /// <see cref="ArgumentException"/>（转账与期初没有「单侧发生额」这回事）。
+    /// </param>
+    /// <param name="fromUtc">区间下界（**含**）。</param>
+    /// <param name="toUtc">区间上界（**不含**）。半开区间，故「某一天」传当日 0 点与次日 0 点。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>
+    /// 账户主键到金额的映射，**恒为非负**（汇总的是金额大小，不是有符号净额）。
+    /// **没有明细的账户不会出现在结果中**（调用方按 0 处理）。
+    /// </returns>
+    /// <remarks>
+    /// **为什么不能拿 <see cref="SumSignedAmountsAsync"/> 的结果按账户相加**：收入与支出各是一条
+    /// **等额反向**的明细，而**对手方也可以是一个钱账户**——记账端点解析对手方时会接受任意可见账户
+    /// （见 <c>TransactionEndpoints.ResolveCounterpartyAsync</c>），故「收入 100 从 A 收到 B」会在这两个
+    /// 账户上各留下一条 100 的明细，按账户汇总后是 200。本方法故必须**同时**限定交易类型与明细方向，
+    /// 只取「主账户」那一侧（与 <c>EntryQueryRow.IsPrimary</c> 是同一条判据）。
+    /// <para>
+    /// **两个界点都做 ±1 秒预筛、精确判定在 C# 侧**：与 <see cref="SumSignedAmountsAsync"/> 同因
+    /// （SQLite 把日期存成文本且同一份实体存在两种小数形态，见 <c>LocalDay.PrefilterMargin</c>），
+    /// 差别只在于那里只有上界、这里有上下两个界点，故预筛也要放宽两侧。
+    /// </para>
+    /// <para>
+    /// **界内取出的是逐行明细而不是分组聚合**：预筛多取回来的行必须逐行剔除，而聚合结果无法再筛；
+    /// 一天的收支笔数远小于「整本账的明细数」，逐行取回不构成负担。
+    /// </para>
+    /// <para>
+    /// **符号：支出与收入都是正数**。方向已由 <paramref name="type"/> 表达，本方法不再叠一层符号，
+    /// 故「净额」由调用方按 <c>收入 − 支出</c> 自行计算——在库里把支出存成负数，
+    /// 会让「这一天花了多少」这个直接问题要再做一次取反才能回答。
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyDictionary<int, decimal>> SumPrimaryAmountsAsync(
+        int accountSetId,
+        IReadOnlyCollection<int> accountIds,
+        TransactionType type,
+        DateTime fromUtc,
+        DateTime toUtc,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// 为缺少期初分录的既有账户补写期初余额分录（升级既有数据库时用）。
     /// </summary>
     /// <param name="cancellationToken">取消令牌。</param>

@@ -1047,6 +1047,61 @@ result is **per user**, and the usual 400 / 403 / 401 conventions apply. This gr
 or "recompute now" entry point**: the data is written by the subscription, and the frontend has no means
 to trigger it.
 
+##### The income and expense settlement subscriptions
+
+`IncomeSettlementSubscription` and `ExpenseSettlementSubscription` are the **same machinery, twice**:
+each recomputes every unprocessed settlement date and writes one row per day, per member and per
+currency. They are **two subscriptions with two watermarks** (`IncomeSettlement` / `ExpenseSettlement`),
+not one subscription with a direction column — either can be rerun on its own, neither blocks the other,
+and the read side never has to remember a direction filter (a filter written in the wrong place would
+draw expenses as income). The shared algorithm lives in `DailyFlowSettlementServiceBase`; the two sealed
+subclasses supply only the parts that differ (table, watermark code, transaction type, whose last
+recorded day to read) and **no table-touching query goes through a generic entity type** — SqlSugar's
+column-name translation of interface-member expressions is not reliable, and three extra method bodies
+are cheaper than a query that silently reads the wrong column.
+
+**These store a daily flow, not a running balance** — the opposite of the total-asset rows. "How much
+came in on this day" is what a monthly chart answers; "everything earned since the account set was
+created" would be a monotonically rising line that shows no daily variation. A month's sum is one
+addition on the read side, so no monthly total column exists here either.
+
+**Both amounts are non-negative**, unlike liabilities: income and expense are recorded as positive
+amounts (see `TransactionEntry.Amount`), and this service adds up the **primary side** of each
+transaction only. The direction is expressed by the row's table (and by the column name), not by a sign
+— storing expenses as negative numbers would make "how much did I spend this month" require a negation
+first, and a negation that gets forgotten shows spending as an upward line.
+
+**Summing only the primary side is not an optimisation, it is a correctness requirement.** The
+counterparty of an income or expense can itself be a money account (the record endpoints accept any
+visible account as counterparty, `TransactionEndpoints.ResolveCounterpartyAsync`), so "received 100 from
+account B into account A" leaves a 100 entry on *each* of the two money accounts. Summing by account
+alone would return 200. Hence `ITransactionService.SumPrimaryAmountsAsync` filters on **both** the
+transaction type and `entry.Direction == type.PrimaryDirection()` — the same predicate that
+`EntryQueryRow.IsPrimary` exposes — and rejects `Transfer` / `OpeningBalance`, which have no single-sided
+occurrence at all (rejecting is better than picking a direction and returning a plausible-looking wrong
+number). Both bounds of the day window get the ±1 second SQL prefilter with exact comparison in C#
+(`LocalDay.PrefilterMargin`); the rows are fetched individually rather than aggregated because the
+over-fetched rows have to be removed one by one, and a day's postings are far fewer than the ledger's.
+
+**Tables `hamster_income_settlement_record` / `hamster_expense_settlement_record`** mirror
+`hamster_total_asset_settlement_record` exactly, with `personal_income_total` / `public_income_total`
+(resp. `..._expense_total`) in place of the four asset/liability columns: the four-part key
+`(account_set_id, user_id, currency_code, transaction_date)`, one row per member per day (zeros
+included), signed-not-stored amounts (these are non-negative by construction), currency in the key, and
+overwrite-by-half-open-interval recomputation inside one transaction whose failure is rethrown by hand
+(`UseTranAsync` swallows it).
+
+**Endpoint `GET /api/income-expenses/daily?month=YYYY-MM`** (read-only; used by the home page) returns
+both series in **one response**, and merges them on the **union** of the two tables' dates: the two
+subscriptions advance independently, so "income computed through the 5th, expenses through the 3rd" is a
+normal state, and the missing side reads as 0 for those days. An intersection would make the 4th and 5th
+vanish from the chart entirely — the user would read that as "no income or expenses on those days" when
+the truth is "not computed yet". Days absent from **both** tables still do not appear, so "missing days
+are not zero-filled" is preserved. `netTotal = incomeTotal - expenseTotal`; the other two are positive,
+and only the net is signed. Everything else (server-side current month, `yyyy-MM` only, echoed `month`
+and `currencyCode`, 200 with `currencyCode: null` when no currency exists, per-user rows, 400/401/403)
+follows the total-asset endpoint exactly.
+
 ##### Upgrading an existing database
 
 SqlSugar appends new columns as **nullable** and does not fill them in for pre-existing rows.
@@ -1083,6 +1138,15 @@ subscription-side counterpart of "the first run has no lower bound", which also 
 month appears shortly after upgrading. The cost is that this one run is noticeably slower (one query
 and one overwrite per day, proportional to the history); it is **one-off**, and once the watermark is
 stored each day only handles the new one.
+
+The two income/expense record tables (`hamster_income_settlement_record`,
+`hamster_expense_settlement_record`) are all-new tables of exactly the same shape, so they need **no
+migration and no backfill** either — and they reuse the existing watermark table, whose rows are keyed by
+`(subscription_code, account_set_id)`, so the two new subscriptions simply add their own rows to it. On
+an upgraded database both start with no watermark and are treated as having no lower bound, meaning
+**each subscription walks the account set's whole settlement history once** on its first run after the
+upgrade; the three subscriptions run one after another and the total cost is proportional to
+(days × subscribers). It is still one-off, and each subscription then advances only over new days.
 
 The personal account-set preference table `hamster_account_set_preference` is a brand-new table too
 — another "add a table, alter no column" change — so it also needs **no migration and no backfill**:

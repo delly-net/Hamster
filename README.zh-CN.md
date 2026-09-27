@@ -844,7 +844,7 @@ public sealed class MySubscriber : IEventHandler<SettlementTriggeredEvent>
 结算任务因此**不**被标记已执行（见上一节），下一个执行日会被再投一次；
 届时水位只走到失败日的前一天，那一天会被重算一遍。覆盖写让这次重算是幂等的。
 
-**接口 `GET /api/total-assets/daily?month=YYYY-MM`**（只读，页头「总资产」用它）。
+**接口 `GET /api/total-assets/daily?month=YYYY-MM`**（只读，首页「概览」的总资产面板用它）。
 `month` 省略时取**服务器本地的当月**——记录的日期是本地日期，跟着服务器走才不会与落库的日期错位；
 格式只认 `yyyy-MM`（`TryParseExact`，不收 `2026-9-1` 之类的变体），不合法返回 400。
 响应回带 `month` 与 `currencyCode`，因为两者都可能由服务端决定（当月、系统默认币种），
@@ -854,6 +854,49 @@ public sealed class MySubscriber : IEventHandler<SettlementTriggeredEvent>
 （200 而不是 404——「没有币种可看」与「这个月还没有数据」在界面上是同一种呈现）。
 结果**因人而异**（取当前用户那一行），未带账套 400、账套无权 403、用户查不到 401。
 本分组**不提供任何写入或「立即重算」入口**：数据由订阅落库，前端没有可触发的手段。
+
+##### 收入 / 支出结算订阅
+
+`IncomeSettlementSubscription` 与 `ExpenseSettlementSubscription` 是**同一套机制的两份实例**：
+都按结算任务里的日期逐日重算未处理过的日子，每天、每个成员、每个币种各落一行。
+它们是**两个订阅、两份水位**（`IncomeSettlement` / `ExpenseSettlement`），而不是「一个订阅 + 一个方向列」——
+各自可单独重跑、互不阻塞，读侧也不必再记一个方向过滤条件（过滤条件写漏了，就会把支出当收入画上图）。
+共用算法落在 `DailyFlowSettlementServiceBase`，两个密封子类只提供不同的那几处
+（表、水位码、交易类型、读谁的覆盖度）；**所有碰表的查询都留在子类里，不走泛型实体**——
+SqlSugar 对「泛型实体 + 接口成员表达式」的列名翻译并不可靠，多写三个方法体比读错一列划算。
+
+**这两张表存的是「当日发生额」，与总资产那两张的「累计余额」正好相反**：
+「这一天挣了多少」才是月度图要回答的问题，而「从建账到这一天一共挣了多少」是一条单调上升、
+看不出任何单日波动的线。一个月的合计就是读侧的一次加法，故这里同样**不存月度合计列**。
+
+**两个金额都是正数**，与负债不同：收入与支出记的就是正数（见 `TransactionEntry.Amount`），
+而本服务只累加交易的**主账户**那一侧。方向由「这是哪张表」（以及字段名）表达，不靠符号——
+把支出存成负数，会让「这个月花了多少」这个直接问题先要做一次取反才能回答，而漏掉那次取反的表现是
+「花得越多、支出线越高」。
+
+**只取主账户那一侧不是优化，而是正确性要求**：收入与支出的对手方**也可以是一个钱账户**
+（记账端点接受任意可见账户作对手方，见 `TransactionEndpoints.ResolveCounterpartyAsync`），
+于是「从账户 B 收到 100 记到账户 A」会在**两个钱账户上各留一条 100 的明细**，只按账户汇总会得到 200。
+故 `ITransactionService.SumPrimaryAmountsAsync` **同时**限定交易类型与 `entry.Direction == type.PrimaryDirection()`
+（与 `EntryQueryRow.IsPrimary` 是同一条判据），并直接拒绝转账与期初——它们没有「单侧发生额」这回事，
+拒绝比含糊取一个方向、返回一个看起来合理的错数要好。日窗口的两个界点都做 ±1 秒 SQL 预筛、
+精确判定在 C# 侧（`LocalDay.PrefilterMargin`）；取回的是**逐行明细而不是分组聚合**，
+因为预筛多取的行必须逐行剔除，而一天的收支笔数远小于整本账的明细数。
+
+**两张记录表 `hamster_income_settlement_record` / `hamster_expense_settlement_record`**
+与 `hamster_total_asset_settlement_record` 逐条同形，只是把四个资产/负债列换成
+`personal_income_total` / `public_income_total`（支出表同理）：四列唯一键
+`(account_set_id, user_id, currency_code, transaction_date)`、每个成员每天一行（全零也落）、
+币种进键、金额恒为非负（由构造保证），重算同样是「同事务内按半开区间先删后插」，
+事务失败自己抛出（`UseTranAsync` 会吞掉异常）。
+
+**接口 `GET /api/income-expenses/daily?month=YYYY-MM`**（只读，首页的收支面板用它）**一次返回两条线**，
+并按两张记录表日期的**并集**合并：两个订阅各推各的水位，「收入算到 5 号、支出算到 3 号」是正常状态，
+此时缺的那一侧按 0 呈现。**取交集**会让 4 号、5 号从图上整个消失——用户读到的是「这两天没有收支」，
+而事实是「这两天还没有算」。两侧都没有记录的日子仍然不出现，故「缺日不补零」照旧。
+`netTotal = incomeTotal - expenseTotal`，另两个是正数、只有净额带符号。
+其余口径（服务器本地当月、只认 `yyyy-MM`、回带 `month` 与 `currencyCode`、没有币种时 200 + `currencyCode: null`、
+按用户分行、400/401/403）与总资产接口逐字相同。
 
 ##### 升级既有数据库
 
@@ -884,6 +927,12 @@ NULL 会让**整个交易列表查询** 500——与上面那些标志列的失�
 这正是「第一次执行不限初始时间」在订阅侧的对应行为，也意味着升级后不久就会看到完整的当月曲线。
 代价是那一天的执行会明显变慢（逐日查询 + 逐日覆盖写，与历史长度成正比）——
 这是**一次性**的，水位落库之后每天只处理新增的那一天。
+
+收入 / 支出的两张记录表（`hamster_income_settlement_record`、`hamster_expense_settlement_record`）
+同属「加表不加列」，故**同样没有迁移脚本、也没有回填**；它们复用既有的水位表
+（水位的唯一键是 `(subscription_code, account_set_id)`，两个新订阅只是往里各加自己的行）。
+升级库上两份水位都不存在，按「无下界」处理，意味着**每个订阅各自把该账套的全部结算历史走一遍**——
+三个订阅依次执行，总代价与「天数 × 订阅数」成正比。它仍是一次性的，此后每个订阅只处理新增的那一天。
 
 个人账套配置表 `hamster_account_set_preference` 也是一张全新的表，同属「加表不加列」，
 故**同样没有迁移脚本、也没有回填**：既有的升级库上它从 0 行开始，由用户第一次点【查询】或

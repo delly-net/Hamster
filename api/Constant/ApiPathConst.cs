@@ -91,6 +91,24 @@ public static class ApiPathConst
     /// </remarks>
     public const string TOTAL_ASSET_GROUP = "/api/total-assets";
 
+    /// <summary>
+    /// 收支端点路由分组前缀（首页的当月收入 / 支出图）。
+    /// </summary>
+    /// <remarks>
+    /// 收入与支出**共用一个分组**而不是各建一个：
+    /// <para>
+    /// 首页那一张图上两条线是**同一段时间轴上的同一批日期**，分成两个分组就要发两次请求，
+    /// 而两次请求之间账套可能已经被切换或当天刚好结算完成，于是两张线各画在一段并不相同的日期上
+    /// （图上表现为「收入线有 5 号、支出线没有」这种无法解释的空缺）。一次请求返回两条线，
+    /// 「同一批日期」由服务端一次查询保证。
+    /// </para>
+    /// <para>
+    /// **只读**：两张记录表由各自的订阅在结算事件后重算，没有任何端点可以写入或触发重算
+    /// （同 <see cref="TOTAL_ASSET_GROUP"/>）。
+    /// </para>
+    /// </remarks>
+    public const string INCOME_EXPENSE_GROUP = "/api/income-expenses";
+
     /// <summary>示例账户端点路由分组前缀。</summary>
     public const string SAMPLE_ACCOUNT_GROUP = "/api/sample/accounts";
 }

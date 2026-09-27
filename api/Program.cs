@@ -26,6 +26,8 @@ builder.Services.AddSingleton<IAccountSetPreferenceService, AccountSetPreference
 builder.Services.AddSingleton<ISettlementService, SettlementService>();
 builder.Services.AddSingleton<ISettlementSubscriptionExecutionService, SettlementSubscriptionExecutionService>();
 builder.Services.AddSingleton<ITotalAssetSettlementService, TotalAssetSettlementService>();
+builder.Services.AddSingleton<IIncomeSettlementService, IncomeSettlementService>();
+builder.Services.AddSingleton<IExpenseSettlementService, ExpenseSettlementService>();
 
 // 结算定时任务：配置（开关 / 触发时刻 / 节点名）、事件总线与订阅者、两个每日任务
 // 配置用工厂方式注册（同 DatabaseOptions）：解析时从容器取日志记录器，

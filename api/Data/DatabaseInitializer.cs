@@ -60,6 +60,8 @@ public static class DatabaseInitializer
         typeof(SettlementEntry),
         typeof(SettlementSubscriptionExecution),
         typeof(TotalAssetSettlementRecord),
+        typeof(IncomeSettlementRecord),
+        typeof(ExpenseSettlementRecord),
     ];
 
     /// <summary>

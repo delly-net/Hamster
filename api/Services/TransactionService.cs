@@ -626,6 +626,62 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     }
 
     /// <inheritdoc />
+    public async Task<IReadOnlyDictionary<int, decimal>> SumPrimaryAmountsAsync(
+        int accountSetId,
+        IReadOnlyCollection<int> accountIds,
+        TransactionType type,
+        DateTime fromUtc,
+        DateTime toUtc,
+        CancellationToken cancellationToken = default)
+    {
+        // 「主账户」是哪个方向由交易类型决定（收入看借方、支出看贷方）。
+        // 转账与期初没有单侧发生额（期初没有对手方、转账两侧都是钱账户），此处直接拒绝，
+        // 而不是含糊地取一个方向——含糊取值会静默给出一个看似合理的错数。
+        var direction = type.PrimaryDirection()
+            ?? throw new ArgumentException(
+                $"交易类型 {type} 没有主账户方向，无法汇总单侧发生额",
+                nameof(type));
+
+        if (accountIds.Count == 0)
+        {
+            return new Dictionary<int, decimal>();
+        }
+
+        var ids = accountIds as int[] ?? [.. accountIds];
+
+        // 两个界点各放宽一秒做预筛，精确判定留到下面的 C#（理由见 LocalDay.PrefilterMargin）。
+        // 这里换取的代价是「多取回落在界外一秒内的那几笔」，而收益是 SQL 侧的比较不依赖
+        // 「日期文本的小数部分有几位」——那正是 SQLite 上同一份实体会有两种形态的地方。
+        var prefilterFloor = fromUtc.Subtract(LocalDay.PrefilterMargin);
+        var prefilterCeiling = toUtc.Add(LocalDay.PrefilterMargin);
+
+        var rows = await db.Queryable<TransactionEntry>()
+            .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
+            .Where((entry, tx) => tx.AccountSetId == accountSetId && ids.Contains(entry.AccountId))
+            .Where((entry, tx) => tx.Type == type && entry.Direction == direction)
+            .Where((entry, tx) => tx.OccurredAt >= prefilterFloor && tx.OccurredAt < prefilterCeiling)
+            .Select((entry, tx) => new { entry.AccountId, entry.Amount, tx.OccurredAt })
+            .ToListAsync(cancellationToken);
+
+        // 取回的是**逐行明细**而非分组聚合，因为预筛多取的那些行必须逐行剔除（含两条界点：
+        // 上界那一侧与 SumSignedAmountsAsync 同因，下界这一侧是本方法新增的）。
+        var totals = new Dictionary<int, decimal>();
+        foreach (var row in rows)
+        {
+            if (row.OccurredAt < fromUtc || row.OccurredAt >= toUtc)
+            {
+                continue;
+            }
+
+            // 金额本身就是正数（见 TransactionEntry.Amount），直接累加、不再折算符号：
+            // 方向已由 type 选定，支出与收入各自都以正数呈现（取舍见接口注释）。
+            totals[row.AccountId] = totals.GetValueOrDefault(row.AccountId) + row.Amount;
+        }
+
+        return totals;
+    }
+
+    /// <inheritdoc />
     public async Task<int> BackfillOpeningBalancesAsync(CancellationToken cancellationToken = default)
     {
         // 先取回「已经期初入账」的账户集合。作为对手方出现在期初分录里的账本账户也会被取到，
