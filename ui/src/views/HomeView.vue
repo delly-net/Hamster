@@ -9,12 +9,16 @@
  * `IExpenseSettlementService`），前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」
  * 这种谁也说不清的问题。图表部分只做一件事：把两条序列画出来。
  *
- * **两个面板共用一套几何与一套模板**：折线的坐标计算在 `components/lineChart.ts` 里，
- * 面板本身由 {@link panels} 描述后交给同一个 `v-for` 渲染。
- * 两份「长得一样但各写一遍」的 SVG 迟早会在留白、刻度或退化处理上分叉，
+ * **两个面板共用一张图与一套模板**：折线交给 `components/TrendChart.vue`（Apache ECharts 6 的封装，
+ * 几何、刻度、退化处理都由它负责），面板本身由 {@link panels} 描述后交给同一个 `v-for` 渲染。
+ * 两份「长得一样但各写一遍」的图迟早会在留白、刻度或退化处理上分叉，
  * 而它们恰恰是必须逐字相同的部分（两个面板上下叠着，差一个像素都看得出来）。
  * 各面板**自己的**东西——标题、系列、概览数字、无障碍描述、空状态文案——仍各写各的
  * （在 {@link assetsPanel} / {@link flowsPanel} 里），那几处本来就该不同。
+ *
+ * 本页只把**序列喂进去**：系列的颜色只写**令牌名**（`--color-accent` 这类），
+ * 图例色块与本页样式用 `var(--token)` 上色、`TrendChart` 用同一个名字解析出 canvas 色值，
+ * 于是「哪条线是什么颜色」全站只有一个定义处。
  *
  * **只画「确实落过库」的日子**：缺日不补零。补零会把「这天还没结算」画成「这天为 0」
  * ——图上是一根掉到底的线，那是错误信息，而不是「这一天没有数据」这一事实的如实呈现。
@@ -53,14 +57,12 @@ import {
   signedCellClass,
   tagText,
 } from '@/components/entryFormat'
-import { buildLineChart, pickAxisLabels, VIEW_SIZE } from '@/components/lineChart'
-import type { LineChartSeries, LineChartTick } from '@/components/lineChart'
+import TrendChart from '@/components/TrendChart.vue'
+import type { TrendSeriesSpec } from '@/components/trendChart'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { RECENT_ENTRY_LIMIT, transactionTypeLabel, useEntriesStore } from '@/stores/entries'
 import { useIncomeExpensesStore } from '@/stores/incomeExpenses'
-import type { IncomeExpenseDailyPoint } from '@/stores/incomeExpenses'
 import { useTotalAssetsStore } from '@/stores/totalAssets'
-import type { TotalAssetDailyPoint } from '@/stores/totalAssets'
 
 const accountSets = useAccountSetsStore()
 const totalAssets = useTotalAssetsStore()
@@ -99,15 +101,17 @@ interface StatView {
 
 /** 一个面板里图表部分的呈现数据；无数据时整个 `chart` 为 `null`。 */
 interface ChartView {
-  series: LineChartSeries[]
-  /** 纵轴刻度：`y` 为逻辑坐标，`value` 为该处的金额。 */
-  ticks: LineChartTick[]
+  series: TrendSeriesSpec[]
+  /**
+   * 横轴各数据点的日期文案（按时间升序，**缺日不补**），与各系列的 `values` 一一对应。
+   *
+   * 标哪几天由 `TrendChart` 决定（左端、中间、右端），本页只负责把日期写成 `M月D日`。
+   */
+  xLabels: string[]
   /** 概览数字（取自最新一个数据点）。 */
   stats: StatView[]
   /** 图例右侧的元信息（最新日期 · 天数 · 币种）。 */
   meta: string
-  /** 横轴的三处标注（左端、中间、右端）；重复处为 `null` 以保持三列对齐。 */
-  xLabels: (string | null)[]
   /** 图表的无障碍描述：把图上最关键的几个数字读出来，供读屏用户获得等价信息。 */
   ariaLabel: string
 }
@@ -142,15 +146,15 @@ function buildMeta(latestLabel: string, dayCount: number, currencyLabel: string)
   return `${latestLabel} · 共 ${dayCount} 天${currencyLabel === '' ? '' : ` · ${currencyLabel}`}`
 }
 
-/** 总资产面板：两条线共用一根纵轴（各自一根会让「净资产低于总资产」这个事实在图上消失）。 */
+/**
+ * 总资产面板。
+ *
+ * **两条线共用一根纵轴**：`TrendChart` 只声明一根 `yAxis`，故「净资产低于总资产」这个事实在图上
+ * 始终成立——一条线一根轴会让它消失（这也是全站不引入双轴图的原因）。
+ */
 function assetsPanel(): Panel {
   const days = totalAssets.daily?.days ?? []
   const currencyLabel = totalAssets.daily?.currencyCode ?? ''
-  const chart = buildLineChart<TotalAssetDailyPoint>(days, [
-    // 总资产 = 资金账户合计（不含负债）；净资产 = 总资产 + 负债（负债带符号，故此处是加）
-    { key: 'asset', label: '总资产', pick: (day) => day.assetTotal },
-    { key: 'net', label: '净资产', pick: (day) => day.netTotal },
-  ])
   const latest = days[days.length - 1]
 
   return {
@@ -163,18 +167,31 @@ function assetsPanel(): Panel {
       '总资产由结算订阅在每个结算日之后按天落库，账套尚未走完一次结算时这里是空的。',
     ),
     chart:
-      chart === null || latest === undefined
+      latest === undefined
         ? null
         : {
-            series: chart.series,
-            ticks: chart.ticks,
+            series: [
+              // 总资产 = 资金账户合计（不含负债）；净资产 = 总资产 + 负债（负债带符号，故此处是加）
+              {
+                key: 'asset',
+                label: '总资产',
+                colorToken: '--color-accent',
+                values: days.map((day) => day.assetTotal),
+              },
+              {
+                key: 'net',
+                label: '净资产',
+                colorToken: '--color-transfer',
+                values: days.map((day) => day.netTotal),
+              },
+            ],
             stats: [
               { label: '总资产', value: formatAmount(latest.assetTotal) },
               { label: '净资产', value: formatAmount(latest.netTotal) },
               { label: '负债合计', value: formatAmount(latest.liabilityTotal) },
             ],
             meta: buildMeta(formatDay(latest.date), days.length, currencyLabel),
-            xLabels: pickAxisLabels(days.map((day) => day.date)).map(formatDayOrNull),
+            xLabels: days.map((day) => formatDay(day.date)),
             ariaLabel:
               `${period.value}总资产与净资产走势图，共 ${days.length} 个数据点。` +
               `最新一天（${formatDay(latest.date)}）总资产 ${formatAmount(latest.assetTotal)}、` +
@@ -194,10 +211,6 @@ function assetsPanel(): Panel {
 function flowsPanel(): Panel {
   const days = incomeExpenses.daily?.days ?? []
   const currencyLabel = incomeExpenses.daily?.currencyCode ?? ''
-  const chart = buildLineChart<IncomeExpenseDailyPoint>(days, [
-    { key: 'income', label: '收入', pick: (day) => day.incomeTotal },
-    { key: 'expense', label: '支出', pick: (day) => day.expenseTotal },
-  ])
   const latest = days[days.length - 1]
 
   return {
@@ -210,18 +223,30 @@ function flowsPanel(): Panel {
       '收入与支出由各自的结算订阅在每个结算日之后按天落库，账套尚未走完一次结算时这里是空的。',
     ),
     chart:
-      chart === null || latest === undefined
+      latest === undefined
         ? null
         : {
-            series: chart.series,
-            ticks: chart.ticks,
+            series: [
+              {
+                key: 'income',
+                label: '收入',
+                colorToken: '--color-income',
+                values: days.map((day) => day.incomeTotal),
+              },
+              {
+                key: 'expense',
+                label: '支出',
+                colorToken: '--color-expense',
+                values: days.map((day) => day.expenseTotal),
+              },
+            ],
             stats: [
               { label: '收入', value: formatAmount(latest.incomeTotal) },
               { label: '支出', value: formatAmount(latest.expenseTotal) },
               { label: '净额', value: formatAmount(latest.netTotal) },
             ],
             meta: buildMeta(formatDay(latest.date), days.length, currencyLabel),
-            xLabels: pickAxisLabels(days.map((day) => day.date)).map(formatDayOrNull),
+            xLabels: days.map((day) => formatDay(day.date)),
             ariaLabel:
               `${period.value}收入与支出走势图，共 ${days.length} 个数据点。` +
               `最新一天（${formatDay(latest.date)}）收入 ${formatAmount(latest.incomeTotal)}、` +
@@ -266,11 +291,6 @@ function formatDay(date: string): string {
   }
 
   return `${Number(matched[1])}月${Number(matched[2])}日`
-}
-
-/** 横轴标注用：`null` 仍为 `null`（那是「这个位置不标」而不是一个日期）。 */
-function formatDayOrNull(date: string | null): string | null {
-  return date === null ? null : formatDay(date)
 }
 
 /**
@@ -373,50 +393,21 @@ onMounted(() => {
 
           <div class="legend">
             <span v-for="item in panel.chart.series" :key="item.key" class="legend-item">
-              <i class="swatch" :class="`swatch-${item.key}`" />
+              <!-- 色块与折线共用一个令牌名：这里由浏览器解析 `var()`，TrendChart 把同一个名字
+                   解析成 canvas 认得的具体色值。两处颜色因此只有一个定义处 -->
+              <i class="swatch" :style="{ backgroundColor: `var(${item.colorToken})` }" />
               {{ item.label }}
             </span>
             <span class="legend-meta">{{ panel.chart.meta }}</span>
           </div>
 
+          <!-- 折线的绘制（坐标系、刻度、悬停读数）全部交给组件；本页只把序列喂进去 -->
           <div class="chart">
-            <div class="y-axis">
-              <span v-for="tick in panel.chart.ticks" :key="tick.y">
-                {{ formatAmount(tick.value) }}
-              </span>
-            </div>
-
-            <svg
-              class="plot"
-              :viewBox="`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`"
-              preserveAspectRatio="none"
-              role="img"
-              :aria-label="panel.chart.ariaLabel"
-            >
-              <line
-                v-for="tick in panel.chart.ticks"
-                :key="tick.y"
-                class="grid"
-                x1="0"
-                :y1="tick.y"
-                :x2="VIEW_SIZE"
-                :y2="tick.y"
-              />
-              <path
-                v-for="item in panel.chart.series"
-                :key="item.key"
-                class="line"
-                :class="`line-${item.key}`"
-                :d="item.path"
-                vector-effect="non-scaling-stroke"
-              />
-            </svg>
-
-            <div class="x-axis">
-              <span v-for="(label, index) in panel.chart.xLabels" :key="index">
-                {{ label ?? '' }}
-              </span>
-            </div>
+            <TrendChart
+              :series="panel.chart.series"
+              :x-labels="panel.chart.xLabels"
+              :description="panel.chart.ariaLabel"
+            />
           </div>
         </template>
       </section>
@@ -778,37 +769,18 @@ onMounted(() => {
   width: 10px;
   height: 10px;
   border-radius: 2px;
+  /* 颜色不写在这里：它由模板内联 `var(令牌名)` 给出，与折线共用同一个名字（见模板注释）。
+     系列配色仍然是那四色两两可辨的组合——总资产取品牌强调色、净资产取转账蓝、
+     收入取绿、支出取红（后两者的语义令牌本来就叫「收入 / 支出」，收款页与记账页已在用）。 */
 }
 
 /*
- * 系列配色只用语义令牌，四色两两可辨：
- * 总资产取品牌强调色、净资产取转账蓝、收入取绿、支出取红——
- * 后两者的语义令牌本来就叫「收入 / 支出」（收款页、记账页已在用），此处沿用同一个词、不另配色。
- */
-.swatch-asset {
-  background-color: var(--color-accent);
-}
-
-.swatch-net {
-  background-color: var(--color-transfer);
-}
-
-.swatch-income {
-  background-color: var(--color-income);
-}
-
-.swatch-expense {
-  background-color: var(--color-expense);
-}
-
-/*
- * 绘图区：纵轴标签单独一列（HTML 文本，不随 SVG 拉伸变形），
- * 绘图区与横轴标签同处右列的两行，故横轴标签与曲线左右对齐。
+ * 绘图区：坐标轴刻度与日期都由 ECharts 画在 canvas 内，页面不再为它们留列，
+ * 故这里只剩一个定高的盒子。高度与改动前一致（宽屏 240px、窄屏 180px），
+ * 免得换库顺手改了整页的纵向节奏。
  */
 .chart {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.3rem 0.6rem;
+  height: 240px;
 }
 
 .head-actions {
@@ -818,66 +790,9 @@ onMounted(() => {
   gap: 0.5rem;
 }
 
-.y-axis {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-end;
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-  opacity: 0.65;
-  font-variant-numeric: tabular-nums;
-}
-
-.plot {
-  grid-column: 2;
-  display: block;
-  width: 100%;
-  height: 240px;
-  overflow: visible;
-}
-
-.grid {
-  stroke: var(--color-border);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-}
-
-.line {
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.line-asset {
-  stroke: var(--color-accent);
-}
-
-.line-net {
-  stroke: var(--color-transfer);
-}
-
-.line-income {
-  stroke: var(--color-income);
-}
-
-.line-expense {
-  stroke: var(--color-expense);
-}
-
-.x-axis {
-  grid-column: 2;
-  display: flex;
-  justify-content: space-between;
-  font-size: 11px;
-  opacity: 0.65;
-}
-
 /* 窄屏：图表降高，避免一屏只看得见曲线看不见别的 */
 @media (max-width: 1023px) {
-  .plot {
+  .chart {
     height: 180px;
   }
 }

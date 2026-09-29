@@ -42,6 +42,7 @@ Hamster/
 - **构建工具**: Vite 8
 - **状态管理**: Pinia 4
 - **路由**: Vue Router 5
+- **图表**: Apache ECharts 6（经 `vue-echarts` 8 包装，按需注册模块）
 - **代码检查 / 格式化**: ESLint + oxlint + Prettier
 - **包管理器**: pnpm
 

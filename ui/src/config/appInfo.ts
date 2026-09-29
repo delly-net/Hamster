@@ -23,6 +23,6 @@ export const COPYRIGHT_HOLDER = 'delly.net'
 
 /** 主要技术栈，按前后端两行展示。 */
 export const TECH_STACK: ReadonlyArray<{ label: string; value: string }> = [
-  { label: '前端', value: 'Vue 3.5 · TypeScript · Vite · Pinia' },
+  { label: '前端', value: 'Vue 3.5 · TypeScript · Vite · Pinia · ECharts' },
   { label: '后端', value: 'ASP.NET Core 10 · SqlSugar · SQLite / PostgreSQL' },
 ]

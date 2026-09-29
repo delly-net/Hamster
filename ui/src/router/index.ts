@@ -1,5 +1,4 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import HomeView from '../views/HomeView.vue'
 import { useAuthStore } from '@/stores/auth'
 
 declare module 'vue-router' {
@@ -22,7 +21,13 @@ const router = createRouter({
     {
       path: '/',
       name: 'home',
-      component: HomeView,
+      // 懒加载。首页**曾经是本表唯一的静态引入**（脚手架默认写法），改成异步是为了让首页图表的
+      // Apache ECharts 单独落成一个 chunk：静态引入会把整个图表库并进主包，登录页、接口调试页
+      // 这些根本不画图的页面也要先下载它。实测（`pnpm build` 产物）：静态引入时主包 index 为
+      // 530.17 kB / gzip 181.69 kB；改成懒加载后入口降到 13.06 kB / gzip 4.92 kB，
+      // 图表库随首页落在 HomeView 那一片（517.58 kB / gzip 176.83 kB），由首页按需取。
+      // 至此本表全部路由一律懒加载。
+      component: () => import('../views/HomeView.vue'),
       // 记账数据与登录用户绑定，未登录时由守卫重定向到登录页
       meta: { requiresAuth: true },
     },

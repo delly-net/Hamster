@@ -42,6 +42,7 @@ Hamster/
 - **Build Tool**: Vite 8
 - **State Management**: Pinia 4
 - **Routing**: Vue Router 5
+- **Charts**: Apache ECharts 6 (via `vue-echarts` 8, registered on demand)
 - **Linting / Formatting**: ESLint + oxlint + Prettier
 - **Package Manager**: pnpm
 
