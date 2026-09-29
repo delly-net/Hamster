@@ -45,6 +45,10 @@ public sealed class EntryEndpoints : IEndpoint
     private static readonly string[] ORDER_ERROR =
         [$"排序方向只能是 {ORDER_ASC}（升序）或 {ORDER_DESC}（倒序）"];
 
+    /// <summary>交易类型非法时的字段错误；取值由枚举名现拼，避免两处各写一遍枚举取值。</summary>
+    private static readonly string[] TYPE_ERROR =
+        [$"交易类型只能是 {string.Join("、", Enum.GetNames<TransactionType>())}"];
+
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
     {
@@ -57,6 +61,7 @@ public sealed class EntryEndpoints : IEndpoint
                 string? to,
                 int[]? accountIds,
                 int[]? tagIds,
+                string[]? types,
                 int? page,
                 int? pageSize,
                 string? order,
@@ -101,6 +106,7 @@ public sealed class EntryEndpoints : IEndpoint
                 }
 
                 var descending = IsDescending(order, errors);
+                var typeFilter = ParseTypes(types, errors);
 
                 if (errors.Count > 0)
                 {
@@ -116,6 +122,7 @@ public sealed class EntryEndpoints : IEndpoint
                     hasTo ? toValue : null,
                     accountIds,
                     tagIds,
+                    typeFilter,
                     currentPage,
                     currentPageSize,
                     descending,
@@ -170,6 +177,15 @@ public sealed class EntryEndpoints : IEndpoint
                 "与 accountIds 一样，**不属于本账套的标签主键会被静默忽略**（不报错、只是匹配不到），" +
                 "否则这个参数就成了探测「某标签是否属于他人账套」的探针；" +
                 "tagIds 与 accountIds **同时给出时是「且」的关系**，两个维度各自收窄。" +
+                "**types 按交易类型过滤**：取值即交易类型的**枚举名**" +
+                "（`Income` 收入 / `Expense` 支出 / `Transfer` 转账 / `OpeningBalance` 期初余额），" +
+                "可重复传参（`types=Income&types=Expense` 为「或」）、整体省略即不限类型；" +
+                "大小写不敏感、两端空白会被裁掉，**未知取值返回 400 并在 `errors.types` 给出字段级错误**" +
+                "（与 `order` 同一取舍：静默忽略会让「传了 types 却没过滤」无从判断）；" +
+                "**按数值传值不被接受**——枚举对外一律以字符串收发，前后端不共同维护数值对照表。" +
+                "条件写的是**交易头**的类型（与 `from` / `to` 同一张表），不是明细上的字段。" +
+                "**记账页「最近 N 次同类型交易」正是用 `types=<本页类型>&order=desc&page=1&pageSize=2N` 取回**：" +
+                "过滤必须落在服务端——客户端本地按类型筛同一页数据会被「昨天记的一百笔支出」挤空。" +
                 "**账户筛选项请直接用 `GET /api/accounts?includeInactive=true`**：" +
                 "明细页的筛选需要含已停用账户（软删除的账户上仍有历史明细），该参数已经提供该能力，" +
                 "不另设一套平行接口。" +
@@ -264,6 +280,59 @@ public sealed class EntryEndpoints : IEndpoint
 
         errors["order"] = ORDER_ERROR;
         return false;
+    }
+
+    /// <summary>解析交易类型筛选参数。</summary>
+    /// <param name="raw">原始取值（可重复传参）；<c>null</c> 或空数组表示不限类型。</param>
+    /// <param name="errors">按字段聚合的错误字典。</param>
+    /// <returns>去重后的交易类型集合；出现非法取值时返回空数组（调用方随后即返回 400）。</returns>
+    /// <remarks>
+    /// **按枚举名逐个比对白名单**，而不是直接 <c>Enum.TryParse</c>：后者会把 <c>"2"</c> 这类
+    /// 数字串也解析成合法取值，等于悄悄允许调用方按数值传值——而本项目的枚举对外一律以**字符串**
+    /// 收发，前后端不共同维护数值对照表（数值是直接落库的数据契约，不是接口契约）。
+    /// <para>
+    /// 大小写不敏感、两端裁空白（与 <see cref="IsDescending"/> 同一宽容度），
+    /// 重复传同一个类型静默去重；**空串视为「这一项没给」而跳过**，不算错误。
+    /// </para>
+    /// <para>
+    /// 但**未知取值一律 400 并写 <c>errors.types</c>，不静默忽略**：忽略会让「传了 types、结果却
+    /// 没过滤」无从判断——而记账页正是靠这个参数把面板收窄到本页那一种类型，静默忽略会直接表现为
+    /// 「收入页里混着支出」。这与 <c>order</c> 的取舍同源。
+    /// </para>
+    /// </remarks>
+    private static TransactionType[] ParseTypes(string[]? raw, Dictionary<string, string[]> errors)
+    {
+        if (raw is null || raw.Length == 0)
+        {
+            return [];
+        }
+
+        var parsed = new List<TransactionType>();
+        foreach (var item in raw)
+        {
+            var normalized = item?.Trim() ?? string.Empty;
+            if (normalized.Length == 0)
+            {
+                continue;
+            }
+
+            var matched = Enum.GetNames<TransactionType>()
+                .FirstOrDefault(name => string.Equals(name, normalized, StringComparison.OrdinalIgnoreCase));
+
+            if (matched is null)
+            {
+                errors["types"] = TYPE_ERROR;
+                return [];
+            }
+
+            var value = Enum.Parse<TransactionType>(matched);
+            if (!parsed.Contains(value))
+            {
+                parsed.Add(value);
+            }
+        }
+
+        return [.. parsed];
     }
 
     /// <summary>解析时间参数（UTC，含端点）。</summary>

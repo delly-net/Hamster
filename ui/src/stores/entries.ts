@@ -96,6 +96,26 @@ export const ENTRY_PAGE_SIZE = 50
  */
 export const RECENT_ENTRY_LIMIT = 10
 
+/**
+ * 记账页「最近 N 次同类型交易」面板呈现几笔。
+ *
+ * 「次」是**笔**不是**明细行**：一笔交易恒有借贷两条明细，转账的两端都挂在钱账户上（占两行），
+ * 收入/支出的对手方若也是钱账户同样占两行。故这一份结果要先按 `transactionId` 归并再截断，
+ * 见 {@link mergeToTransactions}。
+ */
+export const RECENT_SAME_TYPE_LIMIT = 5
+
+/**
+ * 取回多少**明细行**才够归并出 {@link RECENT_SAME_TYPE_LIMIT} 笔交易。
+ *
+ * **2× 是推导出来的、不是拍脑袋**：同类型的一笔交易在结果里占 1 或 2 行，但**恒 ≥ 1 行**——
+ * 收入/支出的主账户、转账的两端都必然是钱账户（主账户候选恒为 `MONEY_ACCOUNT_TYPES`，
+ * 转账两端由 `IsTransferAccount()` 限死），故主账户那一行必定出现在结果里。
+ * 于是 10 行里至少有 5 笔交易，取前 5 笔一定取满。
+ * **改成 5 会让转账页只显示出 2~3 笔**（那两端的行把额度吃掉了）。
+ */
+export const RECENT_SAME_TYPE_SCAN_SIZE = RECENT_SAME_TYPE_LIMIT * 2
+
 /** 一条账目明细（一行 = 一个借贷方向）。 */
 export interface Entry {
   id: number
@@ -190,6 +210,16 @@ export interface EntryQueryParams {
    * 与 `accountIds` **同时给出时是「且」的关系**，两个维度各自收窄。
    */
   tagIds?: number[]
+  /**
+   * 目标交易类型；省略即不限类型。
+   *
+   * 与 `accountIds` / `tagIds` 一样以**重复键**上报（后端绑定为字符串数组、按枚举名解析）。
+   * 后端对未知取值返回 400（写 `errors.types`）而不是静默忽略——`TransactionType` 是后端枚举的
+   * 完整镜像，正常不会传错。
+   *
+   * **按类型筛选必须走后端**：本地筛同一页数据会被该账套里大量其它类型的明细挤空。
+   */
+  types?: TransactionType[]
   page?: number
   pageSize?: number
   /**
@@ -243,6 +273,44 @@ export function isEntryEditable(entry: Entry): boolean {
   )
 }
 
+/**
+ * 把「明细行」收敛成「一笔一行」：按 `transactionId` 保序去重，每笔取**主账户那一行**。
+ *
+ * 记账页的「最近 N 次同类型交易」要的是**笔**，而接口的行粒度是**明细**——一笔交易恒有借贷两条，
+ * 两条都挂在钱账户上时会各占一行（转账必然如此）。故必须先归并，否则「5 次」会变成「2.5 笔」。
+ *
+ * **保序**：入参已由后端按 `order=desc` 排好，`Map` 的插入序即「每笔首次出现」的顺序，
+ * 故 `[...map.values()]` 就是「最新的在前」，不需要也不应该再排一次。
+ *
+ * **取哪一行**：`isPrimary === true` 的那行（主账户行）——它就是用户记账时选定的那个账户，
+ * 「主账户 → 对手方」的读法才成立。判据来自后端下发的字段，**本函数不按方向、也不按金额正负去猜**
+ * （#58 已定：该判据只定义在后端一处，前端镜像它等于把「算错就写错账户」的逻辑搬进来）。
+ *
+ * 该笔没有 `isPrimary` 行时退回它的首行——当前数据模型下不该发生（期初没有主账户这一概念，
+ * 而期初不会出现在记账页的面板里），这一支是**防御**而不是分支：宁可显示一行不够精确的明细，
+ * 也不要让这一笔在面板上凭空消失。
+ *
+ * @param items 明细行（按后端给的方向排好）。
+ * @returns 一笔一行、最新的在前。
+ */
+export function mergeToTransactions(items: Entry[]): Entry[] {
+  const byTransaction = new Map<number, Entry>()
+  for (const item of items) {
+    const existing = byTransaction.get(item.transactionId)
+    if (existing === undefined) {
+      byTransaction.set(item.transactionId, item)
+      continue
+    }
+
+    // 同一笔的第二行（对手方行）到达：只有它才是主账户行时才替换掉先到的那一行
+    if (!existing.isPrimary && item.isPrimary) {
+      byTransaction.set(item.transactionId, item)
+    }
+  }
+
+  return [...byTransaction.values()]
+}
+
 export const useEntriesStore = defineStore('entries', () => {
   /** 明细页那份最近一次查询结果；`null` 表示尚未查过。 */
   const page = ref<EntryQueryPage | null>(null)
@@ -264,6 +332,18 @@ export const useEntriesStore = defineStore('entries', () => {
 
   /** 首页那一份是否在途；与 `loading` 分开，理由见 `recentItems`。 */
   const recentLoading = ref(false)
+
+  /**
+   * 记账页「最近 N 次同类型交易」的那一份结果；`null` 表示尚未查过。
+   *
+   * **又是独立的一份，理由与前两份相同**：它与 {@link recentItems} 打的是同一个端点，但参数多一个
+   * `types`，且结果要先归并成「一笔一行」。共用结果槽会让记账页那一份把首页那 10 条顶掉
+   * （两页可能同时挂载往返切换），共用 `loading` 会让记账页的一次刷新把首页的加载态点亮。
+   */
+  const recentSameTypeItems = ref<Entry[] | null>(null)
+
+  /** 记账页那一份是否在途；与另外两个分开，理由见 `recentSameTypeItems`。 */
+  const recentSameTypeLoading = ref(false)
 
   /** 发一次明细查询并解出分页结果；**URL 拼装的唯一落点**，两个入口共用。 */
   async function fetchPage(search: URLSearchParams): Promise<EntryQueryPage> {
@@ -290,6 +370,10 @@ export const useEntriesStore = defineStore('entries', () => {
     // tagIds 同 accountIds：**重复键**逐个 append，不能拼成逗号串
     for (const tagId of params.tagIds ?? []) {
       search.append('tagIds', String(tagId))
+    }
+    // types 同上：**重复键**逐个 append，值是枚举名（后端按名称白名单解析）
+    for (const type of params.types ?? []) {
+      search.append('types', type)
     }
     search.set('page', String(params.page ?? 1))
     search.set('pageSize', String(params.pageSize ?? ENTRY_PAGE_SIZE))
@@ -338,6 +422,38 @@ export const useEntriesStore = defineStore('entries', () => {
     }
   }
 
+  /**
+   * 取记账页要的「最近 {@link RECENT_SAME_TYPE_LIMIT} 次**同类型**交易」。
+   *
+   * 类型筛选由后端承担（{@link RECENT_SAME_TYPE_SCAN_SIZE} 里写了为什么必须如此），归并由
+   * {@link mergeToTransactions} 在本地完成——**扫描量刻意大于呈现量**，两者不共用一个常量。
+   *
+   * 刻意**不复用 {@link query} / {@link loadRecent}**：三者的参数集没有一处相同，
+   * 共用会把结果塞进别人那一份的槽里。
+   *
+   * @param type 记账类型（`Income` / `Expense` / `Transfer`）。
+   * @returns 最新的若干**笔**交易，每笔一行（可能为空数组）。
+   * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+   */
+  async function loadRecentSameType(type: TransactionType): Promise<Entry[]> {
+    const search = new URLSearchParams()
+    // 倒序 + 第 1 页：取最新的一批明细行，再在本地归并成笔
+    search.set('order', 'desc')
+    search.set('page', '1')
+    search.set('pageSize', String(RECENT_SAME_TYPE_SCAN_SIZE))
+    search.append('types', type)
+
+    recentSameTypeLoading.value = true
+    try {
+      const result = await fetchPage(search)
+      const merged = mergeToTransactions(result.items).slice(0, RECENT_SAME_TYPE_LIMIT)
+      recentSameTypeItems.value = merged
+      return merged
+    } finally {
+      recentSameTypeLoading.value = false
+    }
+  }
+
   /** 清空结果（退出登录、账套切换时调用，避免残留上一账套的明细）。 */
   function clear(): void {
     page.value = null
@@ -347,6 +463,11 @@ export const useEntriesStore = defineStore('entries', () => {
   function clearRecent(): void {
     recentItems.value = null
     recentTotal.value = 0
+  }
+
+  /** 清空记账页那一份；理由与 {@link clearRecent} 相同。 */
+  function clearRecentSameType(): void {
+    recentSameTypeItems.value = null
   }
 
   return {
@@ -359,5 +480,9 @@ export const useEntriesStore = defineStore('entries', () => {
     recentLoading,
     loadRecent,
     clearRecent,
+    recentSameTypeItems,
+    recentSameTypeLoading,
+    loadRecentSameType,
+    clearRecentSameType,
   }
 })

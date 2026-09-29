@@ -34,11 +34,13 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
+import RecentEntryList from '@/components/RecentEntryList.vue'
 import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
+import { RECENT_SAME_TYPE_LIMIT, useEntriesStore } from '@/stores/entries'
 import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
 import {
   TRANSACTION_MODE_META,
@@ -63,6 +65,7 @@ const currenciesStore = useCurrenciesStore()
 const categoriesStore = useCategoriesStore()
 const tagsStore = useTagsStore()
 const transactionsStore = useTransactionsStore()
+const entriesStore = useEntriesStore()
 
 /** `YYYY-MM-DDTHH:mm`，`<input type="datetime-local">` 的原生取值格式。 */
 const DATE_TIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/
@@ -480,6 +483,43 @@ function onCurrencyChange(event: Event): void {
 }
 
 /**
+ * 「最近 N 次{@link modeLabel}」面板：取数失败的说明；为空表示没有失败。
+ *
+ * **刻意与 `errorMessage` 分开**：那块面板是表单之外的只读参考，它取不到数不影响「这笔账能不能记」。
+ * 混进 `errorMessage` 会让一条失败提示挂在提交按钮下方，读起来像「记账失败了」——账其实没提交过。
+ */
+const recentError = ref('')
+
+/** 面板的空态文案。空态本身由 `RecentEntryList` 呈现，文案由本页给（首页那句说的是「账目明细」）。 */
+const recentEmptyText = computed(() => `当前账套还没有${modeLabel.value}记录。`)
+
+/**
+ * 拉取「最近 {@link RECENT_SAME_TYPE_LIMIT} 次同类型交易」。
+ *
+ * 类型过滤与「一笔一行」的归并都在 store 里完成（见 `stores/entries.ts` 的 `loadRecentSameType`），
+ * 本函数只负责把失败转成一句人话，并且**自行吞掉异常**——它挂在下面三处取数时机上，
+ * 其中一处在 `submit()` 的成功分支里，抛出去会被那里捕获成「记账失败」，而账其实已经记下了。
+ *
+ * **取数前先清掉上一份结果**：三种记账类型共用 store 里的同一个槽，页面切换（乃至换账套）时，
+ * 上一种类型——甚至上一个用户——的那几行会在新请求回来之前被当成自己的内容渲染出来。
+ * 三种类型的金额符号与语义色完全不同，那一帧是实打实的错数据，不是「稍旧的数据」；
+ * 宁可先呈现「加载中…」。
+ *
+ * **三处时机**：进入本页（`onMounted`）、切换账套（`watch`）、**记账成功之后**。
+ * 最后那处是这块面板存在的主要理由——记完一笔立刻看到它排在最上面，才知道刚才那笔落对了没有。
+ */
+async function loadRecentSameType(): Promise<void> {
+  entriesStore.clearRecentSameType()
+  recentError.value = ''
+  try {
+    await entriesStore.loadRecentSameType(props.mode)
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '网络异常'
+    recentError.value = `加载最近 ${RECENT_SAME_TYPE_LIMIT} 次${modeLabel.value}失败：${reason}`
+  }
+}
+
+/**
  * 提交记账。
  *
  * 前端先拦下明显不完整的输入、**不发请求**（后端错误已由 `http.ts` 拼成中文，
@@ -607,6 +647,10 @@ async function submit(): Promise<void> {
       ? `已记录一笔转账：${created.summary} 转出 ${created.accountName} → 转入 ${created.counterpartyName ?? '—'}${metaSuffix}`
       : `已记录一笔${modeLabel.value}：${created.summary} ${created.accountName}` +
         `（${counterpartyLabel.value}：${created.counterpartyName ?? '账本账户'}）${metaSuffix}`
+
+    // 刚记下的这一笔会排在面板最上面（按发生时间倒序）：成功之后再取一次，用户据此核对
+    // 它落到了哪个账户、方向对不对。**失败只进 `recentError`**，不推翻上面那条成功提示
+    await loadRecentSameType()
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '记账失败'
   }
@@ -625,12 +669,18 @@ watch(
       currenciesStore.clear()
       categoriesStore.clear()
       tagsStore.clear()
+      // 面板同理：上一账套的最近几笔不是本账套的事实，留着即为残留数据（与首页面板同一处理）
+      entriesStore.clearRecentSameType()
       return
     }
 
     if (await loadOptions()) {
       resetFields()
     }
+
+    // **不受 `loadOptions` 成败影响**：面板只按「账套 + 类型」取数，与币种/账户/分类/标签字典无关。
+    // 把它挂进上面那个 if，字典一失败面板就会留着上一账套的那几行——恰恰是最该清掉的情形
+    await loadRecentSameType()
   },
 )
 
@@ -642,6 +692,9 @@ onMounted(async () => {
   if (await loadOptions()) {
     resetFields()
   }
+
+  // 同上：与表单候选的加载互不依赖，成功与否都要取自己的那一份
+  await loadRecentSameType()
 })
 </script>
 
@@ -813,6 +866,32 @@ onMounted(async () => {
         自动创建为标签；若这个名字已经有了（哪怕是已停用的），会归到它上面，不会另建一个同名的。
         标签在「账目明细」页随交易整体呈现，也可按它筛选。
       </p>
+
+      <!-- 最近同类型交易：**只读参考**，排在表单下方。放在这里而不是做成弹窗或抽屉，
+           是因为用户正是在「再记一笔」的当口拿它比对的（上次这笔记了多少、记到哪个账户、
+           用的哪个分类）——要点开才能看的东西，在这个当口不会被打开。
+           面板与表单互不牵连：它取不到数不挡着记账，记账失败也不影响它 -->
+      <section class="recent-block">
+        <div>
+          <h2 class="recent-title">最近 {{ RECENT_SAME_TYPE_LIMIT }} 次{{ modeLabel }}</h2>
+          <p class="recent-note">
+            按发生时间倒序，一笔一行（一笔转账的两个账户各有一条明细，此处只呈现{{ primaryLabel }}
+            那一条）；只含资金账户与负债账户上的交易，与「账目明细」页同一口径。
+          </p>
+        </div>
+
+        <!-- 三态与首页那几块面板同一套写法：失败、加载中、无数据 -->
+        <p v-if="recentError !== ''" class="error">{{ recentError }}</p>
+        <p v-else-if="entriesStore.recentSameTypeItems === null" class="hint">加载中…</p>
+
+        <!-- 空态与列表都由组件承担。**不传 `show-type`**：整块只有本页这一种类型，
+             交易类型标签是冗余的（面板标题已经写明），而首页那块混排三种、必需 -->
+        <RecentEntryList
+          v-else
+          :entries="entriesStore.recentSameTypeItems"
+          :empty-text="recentEmptyText"
+        />
+      </section>
     </template>
   </section>
 </template>
@@ -922,6 +1001,49 @@ onMounted(async () => {
   font-size: 13px;
   line-height: 1.7;
   opacity: 0.8;
+}
+
+/* 「最近 N 次」面板：与上面那张表单同一套描边 + 卡片阴影，两块的边界一眼可辨
+   ——上面是「要填的」，下面是「只读的」。**刻意不用 --entry-color**：那个颜色说的是
+   「这一页在记什么」，面板里的每一行本就都是这一种类型，再染一遍等于什么都没说 */
+.recent-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
+}
+
+/* 面板标题：用 h2 而不是「加大加粗的 p」，读屏用户据此在页内跳转（与首页各面板同一档） */
+.recent-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-heading);
+  opacity: 0.85;
+}
+
+/* 面板内的一行说明：全站的「次要小字」只有这一种写法（12.5px / 1.7 / 0.7） */
+.recent-note {
+  margin-top: 0.25rem;
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.7;
+}
+
+/*
+ * 面板内的状态文案（加载中 / 失败）：卡片自己已经有描边与底色，这两行再各套一层框
+ * 会变成「框里套框」，故在此把边框与底色让掉、只保留文字本身（与首页面板同一处理）。
+ * 空态那一条由 `RecentEntryList` 呈现，它自带的就是无框文字，不需要在这里再让一次。
+ */
+.recent-block > .hint,
+.recent-block > .error {
+  padding: 0.15rem 0;
+  border: none;
+  border-radius: 0;
+  background: none;
 }
 
 .ghost,

@@ -48,19 +48,12 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ApiError } from '@/api/http'
-import {
-  categoryText,
-  counterpartyText,
-  formatAmount,
-  formatDateTime,
-  formatSigned,
-  signedCellClass,
-  tagText,
-} from '@/components/entryFormat'
+import { formatAmount } from '@/components/entryFormat'
+import RecentEntryList from '@/components/RecentEntryList.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import type { TrendSeriesSpec } from '@/components/trendChart'
 import { useAccountSetsStore } from '@/stores/accountSets'
-import { RECENT_ENTRY_LIMIT, transactionTypeLabel, useEntriesStore } from '@/stores/entries'
+import { RECENT_ENTRY_LIMIT, useEntriesStore } from '@/stores/entries'
 import { useIncomeExpensesStore } from '@/stores/incomeExpenses'
 import { useTotalAssetsStore } from '@/stores/totalAssets'
 
@@ -416,6 +409,8 @@ onMounted(() => {
         最近交易：**排在两张走势图之后**——本页的身份是「走势概览」，明细是补充而不是主体。
         整块**只读**：不给改账入口、不引入弹窗，也不重复明细页的筛选与分页，
         要看全部或要改账都走标题行右侧那个链接。
+        行的呈现交给 `RecentEntryList`（记账页的「最近 N 次同类型交易」用的是同一个组件，
+        两处对同一份明细的读法不会分叉）；本页只负责取数与三态里的前两条。
       -->
       <section class="panel">
         <div class="panel-head">
@@ -436,41 +431,16 @@ onMounted(() => {
              ——明细没有币种维度，套用会得到一句与事实无关的提示。 -->
         <p v-if="errors.recent !== ''" class="error">{{ errors.recent }}</p>
         <p v-else-if="entries.recentItems === null" class="hint">加载中…</p>
-        <p v-else-if="entries.recentItems.length === 0" class="hint">
-          当前账套还没有账目明细。
-        </p>
 
-        <ul v-else class="recent">
-          <li v-for="entry in entries.recentItems" :key="entry.id" class="recent-row">
-            <div class="recent-main">
-              <p class="recent-line">
-                <span class="recent-summary">{{ entry.summary }}</span>
-                <!-- 交易类型是必需的那一个标签：它与金额不同，「转账」正是用户区分
-                     「账户之间的搬运」与「真正的收支」的唯一线索。收入/支出则不再用文字重复
-                     ——金额已经带符号又着了色 -->
-                <span class="recent-type">{{ transactionTypeLabel(entry.transactionType) }}</span>
-              </p>
-              <!-- 账户 → 对手方：「钱从哪来、到哪去」的对照（与明细页窄屏卡片的排法同构） -->
-              <p class="recent-line recent-path">
-                <span class="recent-account">{{ entry.accountName }}</span>
-                <span class="recent-arrow" aria-hidden="true">→</span>
-                <span class="recent-counterparty">{{ counterpartyText(entry) }}</span>
-              </p>
-              <!-- 时间 / 分类 / 标签：每行都要读得到、又不抢金额视线。**不含备注**：
-                   备注是最长的一段自由文本，10 行会让面板失控，要看它去明细页 -->
-              <p class="recent-line recent-meta">
-                <span class="recent-time">{{ formatDateTime(entry.occurredAt) }}</span>
-                <span>分类：{{ categoryText(entry) }}</span>
-                <span>标签：{{ tagText(entry) }}</span>
-              </p>
-            </div>
-            <!-- 金额是这一行的视觉主位：带符号（`+` / `-`）并按正负着色，
-                 两位小数与明细页共用同一份格式化实现；字段缺失时显示【金额异常】而不是 NaN -->
-            <span class="recent-amount" :class="signedCellClass(entry.signedAmount, 'net')">
-              {{ formatSigned(entry.signedAmount) }}
-            </span>
-          </li>
-        </ul>
+        <!-- 空态与列表都由组件承担（`emptyText` 由本页给：明细没有币种维度，那句空态不能复用
+             `emptyHint` 里任何一条与币种有关的说法）。本页仍传 `show-type`：这块面板混排三种类型，
+             交易类型标签是用户区分「账户之间的搬运」与「真正的收支」的唯一线索 -->
+        <RecentEntryList
+          v-else
+          :entries="entries.recentItems"
+          empty-text="当前账套还没有账目明细。"
+          show-type
+        />
       </section>
     </template>
   </main>
@@ -594,122 +564,10 @@ onMounted(() => {
 }
 
 /*
- * 最近交易列表：**只读**，整块没有任何可点元素，故行与行之间用一条分隔线而不是各自成卡
- * ——十张卡片会把首页撑得很长，而它们承载的信息量只够一行。
- */
-.recent {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.recent-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.55rem 0;
-  border-top: 1px solid var(--color-border);
-}
-
-/* 首行不画分隔线：它紧跟在说明文字之后，再画一条会把说明与列表切开 */
-.recent-row:first-child {
-  border-top: none;
-  padding-top: 0;
-}
-
-/* 左栏：三行文字。`min-width: 0` 让它在窄屏下可以让位给右侧金额，而不是把金额挤出容器 */
-.recent-main {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
-}
-
-/* 一行内的若干片段：允许折行，故长账户名/长摘要在窄屏下换行而不是横向溢出 */
-.recent-line {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.2rem 0.5rem;
-  min-width: 0;
-}
-
-/* 摘要允许换行、不截断：它是这一行唯一的自由文本，截断等于丢信息（同明细页卡片） */
-.recent-summary {
-  font-size: 13.5px;
-  overflow-wrap: anywhere;
-}
-
-/* 交易类型弱化到与明细页同一档（12px / 0.6）：它是背景信息，不抢摘要的视觉重心 */
-.recent-type {
-  font-size: 12px;
-  opacity: 0.6;
-  white-space: nowrap;
-}
-
-/* 「账户 → 对手方」：账户名占弹性空间，空间不足时截断，不去挤右侧的对手方 */
-.recent-path {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.recent-account {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.recent-arrow,
-.recent-counterparty {
-  flex: none;
-}
-
-/* 时间 / 分类 / 标签：同为「每行都要读得到、又都不抢金额视线」的次要信息，排一行（同明细页卡片） */
-.recent-meta {
-  font-size: 12.5px;
-  line-height: 1.6;
-  opacity: 0.75;
-}
-
-.recent-time {
-  font-variant-numeric: tabular-nums;
-}
-
-/* 金额：这一行的视觉主位（字号略大于正文，但不与图表面板那三个概览数字抢） */
-.recent-amount {
-  flex: none;
-  font-size: 15px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* 收支语义色：正数绿（收入侧）、负数红（支出侧），与明细页共用同一批语义令牌——全站只有一个红。
-   类名由 `entryFormat.signedCellClass` 给出，故两份样式定义必须同名同义。 */
-.income {
-  color: var(--color-income);
-}
-
-.expense {
-  color: var(--color-expense);
-}
-
-/* 金额字段缺失：复用危险色，但语义与 .expense 完全不同——红色在这里说的是
-   「这个值不可信」，不是「这是一笔支出」 */
-.amount-unknown {
-  color: var(--color-danger);
-}
-
-/*
- * 面板内的状态文案（加载中 / 暂无数据 / 失败）：
- * 卡片自己已经有描边与底色，这两行再各套一层框会变成「框里套框」，
- * 故在此把外边距与底色让掉，只保留文字本身。
+ * 面板内的状态文案（加载中 / 失败）：卡片自己已经有描边与底色，这两行再各套一层框
+ * 会变成「框里套框」，故在此把外边距与底色让掉，只保留文字本身。
+ * 另一条状态文案——「最近交易」的空态——由 `RecentEntryList` 呈现，它渲染的节点拿不到本组件的
+ * scoped 标记（片段根），这条选择器够不着，故那边的无框样式写在组件自己身上。
  */
 .panel > .hint,
 .panel > .error {

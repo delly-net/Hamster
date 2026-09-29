@@ -66,6 +66,22 @@ public interface IEntryQueryService
     /// 两个筛选维度各自收窄，是筛选区的常规语义。
     /// </para>
     /// </param>
+    /// <param name="types">
+    /// 交易类型集合；<c>null</c> 或空集合表示**不限类型**（期初余额在其中，与其它类型一视同仁）。
+    /// <para>
+    /// 条件写在**交易头**的 <see cref="Transaction.Type"/> 上（与 <paramref name="from"/> / <paramref name="to"/>
+    /// 同一张表），不是明细上的字段——明细没有自己的类型列。
+    /// </para>
+    /// <para>
+    /// 与 <paramref name="accountIds"/> / <paramref name="tagIds"/> 同口径：省略即不限，
+    /// 给出时与其它维度**同时成立**（「且」）。
+    /// </para>
+    /// <para>
+    /// 记账页「最近 N 次同类型交易」正是用 <c>types=&lt;本页类型&gt;</c> + 倒序取回：
+    /// 客户端本地按类型筛同一页数据是错的——用户昨天记的 100 笔支出会把「最新 20 条」占满，
+    /// 今天记的 2 笔收入一条也筛不出来。过滤必须落在 SQL 里。
+    /// </para>
+    /// </param>
     /// <param name="page">页码，从 1 开始。</param>
     /// <param name="pageSize">每页条数。</param>
     /// <param name="descending">
@@ -100,6 +116,7 @@ public interface IEntryQueryService
         DateTime? to,
         IReadOnlyCollection<int>? accountIds,
         IReadOnlyCollection<int>? tagIds,
+        IReadOnlyCollection<TransactionType>? types,
         int page,
         int pageSize,
         bool descending = false,

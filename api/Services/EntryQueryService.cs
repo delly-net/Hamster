@@ -23,6 +23,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         DateTime? to,
         IReadOnlyCollection<int>? accountIds,
         IReadOnlyCollection<int>? tagIds,
+        IReadOnlyCollection<TransactionType>? types,
         int page,
         int pageSize,
         bool descending = false,
@@ -76,6 +77,12 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             ? []
             : tagIds.Distinct().ToArray();
 
+        // 类型筛选集：与 tagIds 同样是「去重后即条件用的一份」，不做任何求交——类型是交易头上的枚举，
+        // 没有可见性维度（不存在「别人的交易类型」），未知取值在端点层就被拦成 400，不会走到这里。
+        var typeFilter = types is null || types.Count == 0
+            ? []
+            : types.Distinct().ToArray();
+
         // 条件先落到非空局部变量再进表达式树：SqlSugar 对「DateTime 与 DateTime? 比较」的翻译不可靠，
         // 拆开后表达式里只剩两个 DateTime 的比较。
         var hasFrom = from is not null;
@@ -85,7 +92,8 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         // 计数与取数各自新建查询对象：ISugarQueryable 是会被链式方法改写的，
         // 复用同一个实例会让计数结果带上分页条件。
-        var total = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter)
+        var total = await BuildBaseQuery(
+                accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter, typeFilter)
             .CountAsync(cancellationToken);
 
         if (total == 0)
@@ -104,7 +112,8 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // 倒序时**三级键逐级反向**（同一个方向变量套在三处），得到的是升序结果的严格逆序：
         // 只反第一级的话，同一时刻的多条明细在两种方向下的先后会不一致，翻页同样可能重复或漏行。
         var orderType = descending ? OrderByType.Desc : OrderByType.Asc;
-        var rows = await BuildBaseQuery(accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter)
+        var rows = await BuildBaseQuery(
+                accountSetId, targetIds, hasFrom, fromValue, hasTo, toValue, tagFilter, typeFilter)
             .Select((entry, tx) => new EntryRow
             {
                 EntryId = entry.Id,
@@ -193,6 +202,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <param name="toValue">上界（含）。</param>
     /// <param name="tagIds">标签筛选集；**空数组表示不限标签**（与 <paramref name="targetIds"/> 不同，
     /// 后者空数组是不可达状态——调用方在它为空时就返回空页了）。</param>
+    /// <param name="types">交易类型筛选集；**空数组表示不限类型**（同 <paramref name="tagIds"/>）。</param>
     /// <returns>每次调用**新建**的查询对象。</returns>
     /// <remarks>
     /// 每次新建而非复用：计数与分页取数用的是两份互不干扰的查询。
@@ -210,6 +220,15 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <para>
     /// 匹配语义是「**任一命中**」而不是「全部命中」：多选标签的常规意图是「这几类我都想看看」。
     /// </para>
+    /// <para>
+    /// **类型条件写交易的 <c>type</c> 列，与时间条件同一张表**：明细没有自己的类型列，
+    /// 「这笔是不是收入」是整笔的属性。数组 <c>Contains</c> 走的是与账户筛选同一条
+    /// <c>IN</c> 通道（那边是 <c>int[]</c> 对 <c>int</c> 列，此处是枚举数组对枚举列）——
+    /// 该形式已在 Sqlite 上端到端验证（<c>types=Income</c> 单传、重复传参、与 <c>accountIds</c> 并用的
+    /// 「且」关系均如期），**但 PostgreSql 未实测**；若某天在别的库上翻译失败（表现为运行期抛异常
+    /// 或条件被吞掉），**退回「先把集合折成 <c>int[]</c>、再与 <c>(int)tx.Type</c> 比较」这一形式**，
+    /// 不得改成先查出匹配主键再 <c>Contains</c>：那会把整个账套的交易主键捞进内存。
+    /// </para>
     /// </remarks>
     private ISugarQueryable<TransactionEntry, Transaction> BuildBaseQuery(
         int accountSetId,
@@ -218,12 +237,14 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         DateTime fromValue,
         bool hasTo,
         DateTime toValue,
-        int[] tagIds) =>
+        int[] tagIds,
+        TransactionType[] types) =>
         db.Queryable<TransactionEntry>()
             .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
             .Where((entry, tx) => tx.AccountSetId == accountSetId && targetIds.Contains(entry.AccountId))
             .WhereIF(hasFrom, (entry, tx) => tx.OccurredAt >= fromValue)
             .WhereIF(hasTo, (entry, tx) => tx.OccurredAt <= toValue)
+            .WhereIF(types.Length > 0, (entry, tx) => types.Contains(tx.Type))
             .WhereIF(
                 tagIds.Length > 0,
                 (entry, tx) => SqlFunc.Subqueryable<TransactionTag>()

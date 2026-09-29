@@ -649,7 +649,7 @@ Entries are read back through one endpoint, which answers "what moved, when, on 
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/entries?from=&to=&accountIds=&tagIds=&page=&pageSize=&order=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `tagIds` may likewise be repeated and omitted entirely, and a transaction matches when it carries **any** of the given tags (`EXISTS`, not a join — so a transaction with three matching tags still yields one row per entry and `total` stays equal to the number of rows rendered). Account and tag filters are **ANDed**: each narrows independently. `page` defaults to 1 and `pageSize` to 50 (max **200**). `order` is `asc` (the default when omitted) or `desc`, case-insensitive and trimmed; **an unrecognised value is a 400 with a field-level `errors.order`, not a silent fallback to ascending**. `desc` reverses **all three** ordering keys (`OccurredAt → TransactionId → EntryId`), making it the exact reverse of the ascending result — reversing only the first key would order entries sharing a timestamp inconsistently between the two directions, so paging could repeat or skip rows. Returns `{ items, total, page, pageSize }` |
+| `GET /api/entries?from=&to=&accountIds=&tagIds=&types=&page=&pageSize=&order=` | Bearer | Transaction entries in the current account set, oldest first, paged. `from` / `to` are ISO 8601 timestamps compared against the transaction's **business time** (`occurred_at`), both **inclusive**; omitting either leaves that side unbounded. `accountIds` may be repeated and omitted entirely; `tagIds` may likewise be repeated and omitted entirely, and a transaction matches when it carries **any** of the given tags (`EXISTS`, not a join — so a transaction with three matching tags still yields one row per entry and `total` stays equal to the number of rows rendered). `types` filters on the **transaction type**, given as its **enum name** (`Income` / `Expense` / `Transfer` / `OpeningBalance`), may likewise be repeated (a transaction matching **any** of them) and omitted entirely; it is case-insensitive and trimmed, and **an unrecognised value is a 400 with a field-level `errors.types`** — the same trade-off as `order`, since silently ignoring it would leave "I passed `types` but nothing was filtered" indistinguishable. **Numeric values are not accepted**: enums travel as strings in both directions and the two sides keep no shared numeric table. The condition is on the **transaction header's** type (the same table `from` / `to` are compared against), not on a per-entry field. Account, tag and type filters are **ANDed**: each narrows independently. `page` defaults to 1 and `pageSize` to 50 (max **200**). `order` is `asc` (the default when omitted) or `desc`, case-insensitive and trimmed; **an unrecognised value is a 400 with a field-level `errors.order`, not a silent fallback to ascending**. `desc` reverses **all three** ordering keys (`OccurredAt → TransactionId → EntryId`), making it the exact reverse of the ascending result — reversing only the first key would order entries sharing a timestamp inconsistently between the two directions, so paging could repeat or skip rows. Returns `{ items, total, page, pageSize }` |
 
 **One row is one entry, not one transaction.** A transaction consists of a debit and a credit; when
 both sides sit on accounts you selected, both appear as rows. `amount` is always **positive** and
@@ -757,7 +757,10 @@ main projection, so a transaction with several tags still contributes exactly on
 Failure contract: 400 without the account-set header ("请先选择账套"); the account set unknown or not
 yours → 403; caller not found → 401; a malformed `from` / `to`, `from` later than `to`, `page < 1`, or
 `pageSize` outside `1..200` → 400 as a field-level error. An unknown tag id in `tagIds` simply
-matches nothing (there is no tag visibility dimension to probe), so it is not an error.
+matches nothing (there is no tag visibility dimension to probe), so it is not an error. An
+unrecognised value in `types` **is** one, though — a field-level 400 on `types`, not an empty
+result: a type that matches nothing is indistinguishable from a typo, and the caller that mistyped
+it would read the empty page as "there is nothing to show".
 
 ###### Updating an entry
 
@@ -1118,6 +1121,26 @@ liability accounts), applied on the server, so "asset and liability accounts onl
 front-end judgement that could disagree with it. It is also **independent of the settlement data**:
 the two charts read what the settlement subscriptions wrote, while this list reads raw entries, so a
 brand-new account set shows rows here before any settlement has run.
+
+##### Recent same-type transactions on the record pages
+
+Below the form, each of the three record pages (income / expense / transfer) lists the **last five
+transactions of that page's own type**, newest first, one row per transaction — read from
+`GET /api/entries?types=<type>&order=desc&page=1&pageSize=10`. It reuses the entry query for the same
+reason the home page does, and the only thing that query needed was the `types` parameter above.
+Filtering is **server-side on purpose**: narrowing a page of entries on the client would give the
+caller whatever the last few days happen to contain ("a hundred expenses recorded yesterday" would
+push every income out of the window), which is exactly when a user wants to see how the previous
+one was recorded.
+
+**One row per transaction, not per entry**: the query returns entries (a transfer contributes two),
+so the panel folds them by `transactionId`, keeping the row flagged `isPrimary` — the server's own
+"this entry stands for the whole transaction" (see above), never a direction re-derived on the
+client. It therefore scans `pageSize = 2 × 5`: a same-type transaction occupies one or two rows but
+**never zero** (the primary account is always a money account), so ten rows always contain at least
+five transactions, while asking for five rows would leave the transfer page showing two or three.
+The panel is read-only and below the form — the moment a user wants it is while recording the next
+entry, and something that must be opened first would not be opened at all.
 
 ##### Upgrading an existing database
 
