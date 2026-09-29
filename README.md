@@ -762,6 +762,33 @@ unrecognised value in `types` **is** one, though — a field-level 400 on `types
 result: a type that matches nothing is indistinguishable from a typo, and the caller that mistyped
 it would read the empty page as "there is nothing to show".
 
+###### Historical summary candidates
+
+The record form and the edit dialog offer the summaries already used in this account set, so a user
+picks up last time's wording instead of retyping it:
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/entries/summaries?types=&limit=` | Bearer | The **distinct summaries already used** in the current account set, newest first. `types` filters on the **transaction type** exactly as it does on `GET /api/entries` (enum names, repeatable, case-insensitive and trimmed, **an unrecognised value is a 400 with a field-level `errors.types`**); omitting it keeps every type, opening-balance rows included, while the record pages pass **their own type** — "工资" is an income summary and "早餐" an expense one, so mixing types only makes the list longer, not more accurate. `lastUsedAt` is the **maximum business time**, not when the row was inserted: back-dating an expense puts those far apart, and "when did I last use this wording" is a question about when the transaction happened. `usageCount` counts **transactions, not entries** (a transaction is two entries, so counting rows would turn every posting into 2). `limit` defaults to 50 and caps at **200**, out of range being a 400 with a field-level `errors.limit`. Returns a bare array of `{ summary, lastUsedAt, usageCount }` ordered by `lastUsedAt` descending, then `usageCount` descending, then `summary` ascending, so two requests over the same data come back in the same order |
+
+**A separate endpoint, not a parameter on `GET /api/entries`.** That query's row granularity is the
+**entry** and it must page (`pageSize` capped at 200); deduplicating from it would both drag whole
+entry rows into memory and cover only the most recent page, so "the summary I used last month" would
+silently be missing from the candidates. Aggregation is a difference in query **shape** (`GROUP BY`),
+not a second set of parameters for the same thing.
+
+**Visibility matches `GET /api/entries`**: only transactions carrying an entry on a **money account**
+(asset / liability) are aggregated, resolved through the same account service — otherwise the
+candidates would offer summaries for books the user cannot even find on the entries page. Contact
+and ledger accounts are left out for the same reason they are left out there: their entries are never
+presented as rows.
+
+`summary` is handed back **exactly as the user typed it** — no case folding, and no merging of two
+spellings that differ only in whitespace. A summary is free text rather than a dictionary item, so
+merging two spellings would be editing the user's books on their behalf.
+
+Failure contract: 400 without the account-set header, 401 when not signed in.
+
 ###### Updating an entry
 
 | Endpoint | Auth | Description |
@@ -1141,6 +1168,25 @@ client. It therefore scans `pageSize = 2 × 5`: a same-type transaction occupies
 five transactions, while asking for five rows would leave the transfer page showing two or three.
 The panel is read-only and below the form — the moment a user wants it is while recording the next
 entry, and something that must be opened first would not be opened at all.
+
+##### Historical summary candidates on the record pages
+
+The **summary** field of the three record pages, and the one in the edit dialog on the entries page,
+take their candidates from `GET /api/entries/summaries?types=<type>&limit=50`: focusing opens the
+list, typing narrows it locally, and **picking one only drops that text into the input, which keeps
+focus so it can be edited further**. The fetch is narrowed to **the page's own type** for the same
+reason as the section above (the income page wants "工资", not a long list mixing every type), and
+**deduplicating and sorting happen server-side** — deduplicating a page of entries on the client
+covers only that page, so "the summary I used last month" would silently be missing from the list.
+
+**It completes text; it does not select a record.** The database has no summary table and a candidate
+row is not an entity, so there is none of the category picker's "will be created on save" notice and
+no "which row is selected" state — the component takes a single `v-model` and does not even need an
+`id`. **Staying editable after a pick is the main path**: reusing a past summary usually means using
+it as a starting point ("早餐" → "早餐 加蛋", "9月份工资" → "10月份工资"), the deliberate opposite of the
+tag picker's "collapse and blur on pick" — tags are a set and the next one follows immediately, while
+a summary is a single value where editing in place is the point. A failed fetch writes one quiet line
+under the field and **never blocks submission**: a summary can always be typed by hand.
 
 ##### Upgrading an existing database
 

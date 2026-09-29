@@ -29,33 +29,14 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         bool descending = false,
         CancellationToken cancellationToken = default)
     {
-        // 可见账户集：一次取回，**两用**——但它对两用的口径并不相同，故下面拆成两个集合。
-        // includeInactive 恒为 true：账户是软删除，停用账户上的历史明细仍然查得到（见接口注释）。
-        var visible = await accounts.ListByAccountSetAsync(
+        // 可见账户集一次取回、**两用**（账户名来源 + 明细行过滤依据），两者的口径不同故拆成两个集合。
+        // 取数与拆分都收在 ResolveVisibleAccountsAsync 里：本方法与 ListSummariesAsync 用的是同一份
+        // 「哪些账户算数」的判据，各写一份迟早漂移成「明细里看不见、摘要候选里却选得到」。
+        var (nameById, moneyIds) = await ResolveVisibleAccountsAsync(
             accountSetId,
             userId,
             isAdmin,
-            includeInactive: true,
             cancellationToken);
-
-        // 用途一：**账户名的来源**，取全部可见账户（含往来账户）。
-        // 往来账户必须留在这里：它要在「现金 → 老王」这类行的**对手方列**上显示名字。
-        // 若把它一并删掉，ResolveCounterpartiesAsync 会走「不在 nameById 里 → 查类型」的分支，
-        // 命中 Contact ≠ Ledger 而落到 CounterpartyKind.Hidden，界面把「—」渲染到对手方列——
-        // 等于把用户自己的往来账户伪装成不可见账户（Hidden 是权限结论，不是「我不呈现它」）。
-        var nameById = visible.ToDictionary(item => item.Account.Id, item => item.Account.Name);
-
-        // 用途二：**明细行的过滤依据**，只取钱账户（资金/负债）。
-        // 本页回答的是「钱动在哪个账户」，而往来账户记的是「谁欠谁」而不是「钱放在哪」——
-        // 它上面的明细是另一本账，不在本页呈现（同一条依据也是转账两端的限制，
-        // 定义见 AccountTypeExtensions.IsMoneyAccount）。它的余额与来往由账户管理页承担。
-        //
-        // 过滤发生在**内存里的 visible 列表**上：SqlSugar 不翻译扩展方法，
-        // 该谓词不能写进 BuildBaseQuery 的表达式树（同 AccountService 里那处枚举字面量）。
-        var moneyIds = visible
-            .Where(item => item.Account.Type.IsMoneyAccount())
-            .Select(item => item.Account.Id)
-            .ToHashSet();
 
         // 目标账户集：未指定账户时即全部**钱账户**；指定了则与钱账户集**求交**而非报错
         // （不可见的账户、以及往来账户都被静默剔除，交集为空就返回空页——
@@ -189,6 +170,131 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             .ToArray();
 
         return new EntryQueryPage(items, total, page, pageSize);
+    }
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<EntrySummaryOption>> ListSummariesAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<TransactionType>? types,
+        int limit,
+        CancellationToken cancellationToken = default)
+    {
+        // 可见账户集里的**钱账户**才是「一条摘要在账目明细里看不看得见」的判据，
+        // 与 QueryAsync 共用同一处取数（见 ResolveVisibleAccountsAsync）。
+        var (_, moneyIds) = await ResolveVisibleAccountsAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            cancellationToken);
+
+        // 没有钱账户就没有任何明细行，也就没有任何可复用的摘要；limit <= 0 时调用方要的是空列表
+        // （端点层已把非法 limit 拦成 400，这一支是防御）。两种情形都不必查库。
+        if (moneyIds.Length == 0 || limit <= 0)
+        {
+            return [];
+        }
+
+        var typeFilter = types is null || types.Count == 0
+            ? []
+            : types.Distinct().ToArray();
+
+        // **查交易头、不联明细**：分组要的是「一笔算一次」，而联表明细会让一笔交易出现两行
+        // （借贷各一行），把计数与分组都乘开。明细只用来判「这笔交易在本账套的钱账户上有没有行」，
+        // 那是 EXISTS 的语义，用相关子查询表达（与 BuildBaseQuery 里的标签条件是同一条通道）。
+        // 单表查询也顺带避开联表投影的别名一致性检查——那条坑见 QueryAsync 里 MergeTable() 的注释。
+        var rows = await db.Queryable<Transaction>()
+            .Where(tx => tx.AccountSetId == accountSetId)
+            .WhereIF(typeFilter.Length > 0, tx => typeFilter.Contains(tx.Type))
+            .Where(tx => SqlFunc.Subqueryable<TransactionEntry>()
+                .Where(entry => entry.TransactionId == tx.Id && moneyIds.Contains(entry.AccountId))
+                .Any())
+            .GroupBy(tx => tx.Summary)
+            .Select(tx => new SummaryAggregateRow
+            {
+                Summary = tx.Summary,
+                LastUsedAt = SqlFunc.AggregateMax(tx.OccurredAt),
+                UsageCount = SqlFunc.AggregateCount(tx.Id),
+            })
+            // 三级排序键：最近使用的在前；同一时刻用得更勤的在前；再按摘要升序兜底
+            // ——最后一档不是装饰：它让「同一时刻、同样次数」的两条摘要有确定次序，
+            // 否则同一份数据两次请求的行序可以不同，界面上候选的先后会莫名跳动。
+            .OrderBy(row => row.LastUsedAt, OrderByType.Desc)
+            .OrderBy(row => row.UsageCount, OrderByType.Desc)
+            .OrderBy(row => row.Summary, OrderByType.Asc)
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+
+        return
+        [
+            .. rows.Select(row => new EntrySummaryOption(
+                row.Summary,
+                // 时间**原样透传**（从 Sqlite 读回时 DateTimeKind 为 Unspecified）：把 Kind 补成 UTC
+                // 是**出参呈现**层的事，与 EntryDto.From 同一处取舍——服务层只如实给出库里的值，
+                // 两处各补一次会让「谁负责补 Kind」这个问题有两个答案
+                row.LastUsedAt,
+                row.UsageCount)),
+        ];
+    }
+
+    /// <summary>
+    /// 取本次请求的可见账户，并拆出**钱账户**主键集。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员；管理员可见该账套内的全部账户。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>账户名映射（含往来账户）与钱账户主键集。</returns>
+    /// <remarks>
+    /// **抽出来是为了让两个调用方共用同一份可见性判据**：<see cref="QueryAsync"/> 与
+    /// <see cref="ListSummariesAsync"/> 都要回答「哪些账户上的账算数」，各写一份迟早漂移成
+    /// 「明细里看不见、摘要候选里却选得到」——这正是本服务在别处反复避免的那种第二个真源。
+    /// <para>
+    /// 两个返回值对同一份可见账户集的用法**口径并不相同**，故拆成两个集合而不是给调用方一个列表：
+    /// </para>
+    /// <para>
+    /// 一、**账户名的来源**取全部可见账户（**含往来账户**）。往来账户必须留在这里：它要在
+    /// 「现金 → 老王」这类行的**对手方列**上显示名字。若把它一并删掉，<c>ResolveCounterpartiesAsync</c>
+    /// 会走「不在 <c>nameById</c> 里 → 查类型」的分支，命中 <c>Contact</c> ≠ <c>Ledger</c>
+    /// 而落到 <see cref="CounterpartyKind.Hidden"/>，界面把「—」渲染到对手方列——
+    /// 等于把用户自己的往来账户伪装成不可见账户（Hidden 是权限结论，不是「我不呈现它」）。
+    /// </para>
+    /// <para>
+    /// 二、**明细行的过滤依据**只取钱账户（资金/负债）。本页回答的是「钱动在哪个账户」，
+    /// 而往来账户记的是「谁欠谁」而不是「钱放在哪」——它上面的明细是另一本账，不在本页呈现
+    /// （同一条依据也是转账两端的限制，定义见 <see cref="AccountTypeExtensions.IsMoneyAccount"/>）。
+    /// 它的余额与来往由账户管理页承担。
+    /// </para>
+    /// <para>
+    /// 过滤发生在**内存里的列表**上：SqlSugar 不翻译扩展方法 <see cref="AccountTypeExtensions.IsMoneyAccount"/>，
+    /// 该谓词不能写进查询表达式树（同 <c>AccountService</c> 里那处枚举字面量）。
+    /// </para>
+    /// <para>
+    /// <c>includeInactive</c> 恒为 true：账户是软删除，停用账户上的历史明细仍然查得到（见接口注释）。
+    /// </para>
+    /// </remarks>
+    private async Task<(IReadOnlyDictionary<int, string> NameById, int[] MoneyIds)> ResolveVisibleAccountsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        CancellationToken cancellationToken)
+    {
+        var visible = await accounts.ListByAccountSetAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            includeInactive: true,
+            cancellationToken);
+
+        var nameById = visible.ToDictionary(item => item.Account.Id, item => item.Account.Name);
+
+        var moneyIds = visible
+            .Where(item => item.Account.Type.IsMoneyAccount())
+            .Select(item => item.Account.Id)
+            .ToArray();
+
+        return (nameById, moneyIds);
     }
 
     /// <summary>构造基础查询：联表 + 账套与账户过滤 + 时间区间。</summary>
@@ -507,6 +613,25 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>交易分类主键；未分类时为 <c>null</c>。</summary>
         public int? CategoryId { get; set; }
+    }
+
+    /// <summary>
+    /// 历史摘要聚合的投影结果。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="EntryRow"/> 同为**可写属性的类**而非位置记录：SqlSugar 的 <c>Select</c>
+    /// 靠属性赋值而非构造参数映射（分组投影里的聚合函数尤其如此）。
+    /// </remarks>
+    private sealed class SummaryAggregateRow
+    {
+        /// <summary>摘要原文。</summary>
+        public string Summary { get; set; } = string.Empty;
+
+        /// <summary>该摘要最近一次的业务发生时间（UTC）。</summary>
+        public DateTime LastUsedAt { get; set; }
+
+        /// <summary>该摘要被用过的**笔数**（不是明细行数）。</summary>
+        public int UsageCount { get; set; }
     }
 
     /// <summary>同笔交易的兄弟明细（用于定位对手方）。</summary>

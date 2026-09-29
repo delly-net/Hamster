@@ -31,6 +31,14 @@ public sealed class EntryEndpoints : IEndpoint
     /// <summary>每页条数上限。没有上限时一个请求就能把整本账读进内存。</summary>
     private const int MAX_PAGE_SIZE = 200;
 
+    /// <summary>
+    /// 历史摘要候选的默认条数，与前端 <c>SUMMARY_OPTION_LIMIT</c> 保持一致。
+    /// </summary>
+    private const int DEFAULT_SUMMARY_LIMIT = 50;
+
+    /// <summary>历史摘要候选的条数上限；同 <see cref="MAX_PAGE_SIZE"/>，防一个请求把整本账读进内存。</summary>
+    private const int MAX_SUMMARY_LIMIT = 200;
+
     /// <summary>排序方向：升序（**默认**）。</summary>
     private const string ORDER_ASC = "asc";
 
@@ -48,6 +56,10 @@ public sealed class EntryEndpoints : IEndpoint
     /// <summary>交易类型非法时的字段错误；取值由枚举名现拼，避免两处各写一遍枚举取值。</summary>
     private static readonly string[] TYPE_ERROR =
         [$"交易类型只能是 {string.Join("、", Enum.GetNames<TransactionType>())}"];
+
+    /// <summary>历史摘要候选条数非法时的字段错误。</summary>
+    private static readonly string[] SUMMARY_LIMIT_ERROR =
+        [$"条数须在 1 到 {MAX_SUMMARY_LIMIT} 之间"];
 
     /// <inheritdoc />
     public void Map(IEndpointRouteBuilder app)
@@ -194,6 +206,78 @@ public sealed class EntryEndpoints : IEndpoint
                 "明细行本就不含往来账户，候选若含就成了「选了也查不到」的空档。" +
                 "这是**呈现层分组**（同「本接口不呈现往来账户明细」这条数据面规则的配套），" +
                 "与「可见性由后端判定」不是一回事。");
+
+        group.MapGet("/summaries", async (
+                string[]? types,
+                int? limit,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IEntryQueryService entries,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                var errors = new Dictionary<string, string[]>();
+
+                var currentLimit = limit ?? DEFAULT_SUMMARY_LIMIT;
+                if (currentLimit < 1 || currentLimit > MAX_SUMMARY_LIMIT)
+                {
+                    errors["limit"] = SUMMARY_LIMIT_ERROR;
+                }
+
+                // 与 /api/entries 的 types **共用同一份解析**（含「未知取值 400 而不是静默忽略」的取舍）：
+                // 两处各写一遍会漂移成「明细查询报错、摘要候选却悄悄不过滤」
+                var typeFilter = ParseTypes(types, errors);
+
+                if (errors.Count > 0)
+                {
+                    return Results.ValidationProblem(errors);
+                }
+
+                var result = await entries.ListSummariesAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    typeFilter,
+                    currentLimit,
+                    cancellationToken);
+
+                return Results.Ok(result.Select(EntrySummaryOptionDto.From).ToArray());
+            })
+            .WithName("ListEntrySummaries")
+            .WithSummary("历史摘要候选")
+            .WithDescription(
+                "在当前账套内聚合出**用过的交易摘要**（去重），供记账表单与改账弹窗做候选：" +
+                "用户记下一笔时可以从上次的写法里选，而不必每次重新敲一遍。" +
+                "**这是独立端点而不是 `GET /api/entries` 的一个参数**：后者的行粒度是**明细**且必须分页" +
+                "（`pageSize` 上限 200），拿它去重既把整行明细的载荷搬进内存，又只能覆盖最近那一页" +
+                "——「上个月记过的摘要」会凭空不在候选里。聚合是查询形状上的差别（`GROUP BY`），" +
+                "不是同一件事的两个参数集。" +
+                "**口径与 `GET /api/entries` 一致**：只聚合**钱账户**（资金账户 / 负债账户）上有明细的交易，" +
+                "可见性同样复用账户服务；否则候选里会出现用户在「账目明细」页根本查不到的账（往来账户上的明细）。" +
+                "**两类行都不参与**：往来账户与账本账户作为记账主体的明细本就不在明细页呈现，" +
+                "它们的摘要自然也不该成为候选。" +
+                "`types` 按**交易类型**过滤，取值与语义与 `GET /api/entries` 的 `types` **完全相同**" +
+                "（枚举名、可重复传参、大小写不敏感、未知取值 400 并在 `errors.types` 给出字段级错误）：" +
+                "记账页与改账弹窗传的是**本页那一种类型**（收入页只列收入的历史摘要）——" +
+                "摘要的可复用性本就随类型走（「工资」是收入摘要、「早餐」是支出摘要），跨类型混排只会让候选变长而不变准。" +
+                "省略 `types` 即不限类型（期初余额的摘要也在其中）。" +
+                "排序为**最近使用时间倒序**（同一时刻按使用次数降序、再按摘要升序兜底，保证同一份数据两次请求的行序一致）；" +
+                "`lastUsedAt` 取的是**业务发生时间**的最大值而不是落库时间——补记往日支出时两者会差很远，" +
+                "而用户心里「上次用这条摘要」说的正是那笔账发生的时间。" +
+                "`usageCount` 是**笔数**不是明细行数：一笔交易由借贷两条明细构成，数行数会让每一次记账都被计成 2 次。" +
+                "`limit` 默认 50、上限 200，越界返回 400 并在 `errors.limit` 给出字段级错误。" +
+                "返回项的 `summary` **原样给出用户当初敲下的写法**：不做大小写折叠、也不把去空白后相同的两条合并——" +
+                "摘要是自由文本而不是字典项，合并两条写法等于替用户改了账。" +
+                "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401。");
     }
 
     /// <summary>
@@ -490,6 +574,31 @@ public sealed record EntryDto(
         // 服务层的 EntryTag 与端点的 TagRefDto 形状相同但类型不同：依赖方向是端点 → 服务，
         // 让服务层引用端点的 DTO 会把这个方向反过来。转换点只有这一处，成本是一个 Select
         [.. row.Tags.Select(tag => new TagRefDto(tag.Id, tag.Name))]);
+}
+
+/// <summary>历史摘要的一条候选（对外暴露）。</summary>
+/// <param name="Summary">摘要原文（用户当初敲下的写法，原样给出，不做任何归一）。</param>
+/// <param name="LastUsedAt">最近一次使用时间（UTC，ISO 8601）；即该摘要下**业务发生时间**的最大值。</param>
+/// <param name="UsageCount">用了多少次（**笔数**，不是明细行数）。</param>
+/// <remarks>
+/// 与 <see cref="EntryDto"/> 同为「枚举/时间以对外约定呈现」的那一层：库里的时间读回来
+/// <c>DateTimeKind</c> 是 <c>Unspecified</c>，这里显式标记为 UTC，序列化才会带 <c>Z</c> 后缀
+/// ——与 <see cref="EntryDto.From"/> 同一处理，前端不必猜这是哪个时区。
+/// <para>
+/// <see cref="Summary"/> 与 <see cref="UsageCount"/> 都是**如实给出**：前者不做形状归一，
+/// 后者数的是笔数。候选的取舍（为什么不去重写法、为什么不用明细行数）见
+/// <c>IEntryQueryService.ListSummariesAsync</c> 的说明。
+/// </para>
+/// </remarks>
+public sealed record EntrySummaryOptionDto(string Summary, DateTime LastUsedAt, int UsageCount)
+{
+    /// <summary>由服务层的摘要候选构造 DTO。</summary>
+    /// <param name="option">服务层给出的候选。</param>
+    /// <returns>精简后的候选 DTO。</returns>
+    public static EntrySummaryOptionDto From(EntrySummaryOption option) => new(
+        option.Summary,
+        DateTime.SpecifyKind(option.LastUsedAt, DateTimeKind.Utc),
+        option.UsageCount);
 }
 
 /// <summary>一页账目明细。</summary>

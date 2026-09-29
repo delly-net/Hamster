@@ -112,10 +112,25 @@ export function formatUnsigned(value: number): string {
   return formatAmount(Math.abs(value))
 }
 
+/** 只到日的格式化：用在「哪一天」本身就是重点、时分只是噪音的位置（如摘要候选行的「最近使用」）。 */
+const dateFormatter = new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium' })
+
 /** 格式化 ISO 时间；无法解析时原样回显。 */
 export function formatDateTime(value: string): string {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : dateTimeFormatter.format(parsed)
+}
+
+/**
+ * 格式化 ISO 时间的**日期部分**（本地时区）；无法解析时原样回显。
+ *
+ * 与 {@link formatDateTime} 共用同一批 `Intl` 口径（同一时区、同一中文格式），只是不带时分。
+ * 摘要候选行要回答的是「这条摘要上次是哪天用的」，精确到分既回答不了这个问题，
+ * 又会把一行候选挤满——而两个函数各建一个 `Intl` 实例则是第二份时间口径的开端。
+ */
+export function formatDate(value: string): string {
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? value : dateFormatter.format(parsed)
 }
 
 /**

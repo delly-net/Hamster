@@ -116,6 +116,30 @@ export const RECENT_SAME_TYPE_LIMIT = 5
  */
 export const RECENT_SAME_TYPE_SCAN_SIZE = RECENT_SAME_TYPE_LIMIT * 2
 
+/**
+ * 「历史摘要」候选取多少条，与后端 `EntryEndpoints.DEFAULT_SUMMARY_LIMIT` 保持一致。
+ *
+ * 这是**呈现上限**而不是「够用就好」的估数：摘要去重后的条数远小于记账笔数（同一句写法天天用），
+ * 50 条已经覆盖了普通账套的全部写法；要得更多只会让一次请求把整本账的摘要搬回来。
+ */
+export const SUMMARY_OPTION_LIMIT = 50
+
+/**
+ * 历史摘要的一条候选（一个去重后的摘要写法）。
+ *
+ * 与 {@link Entry} 刻意分开：候选里**没有主键**——摘要不是字典项，库里没有一张「摘要表」，
+ * 用户选中它只是把那段文本填进输入框，之后还能接着改。给它一个 id 会凭空造出
+ * 「这段文本对应哪一条记录」这个并不存在的问题（同 `EntryRecordForm` 对摘要字段的定位）。
+ */
+export interface SummaryOption {
+  /** 摘要原文。 */
+  summary: string
+  /** 最近一次使用时间（UTC，ISO 8601）；即该摘要下**业务发生时间**的最大值。 */
+  lastUsedAt: string
+  /** 用了多少次（**笔数**，不是明细行数）。 */
+  usageCount: number
+}
+
 /** 一条账目明细（一行 = 一个借贷方向）。 */
 export interface Entry {
   id: number
@@ -345,6 +369,21 @@ export const useEntriesStore = defineStore('entries', () => {
   /** 记账页那一份是否在途；与另外两个分开，理由见 `recentSameTypeItems`。 */
   const recentSameTypeLoading = ref(false)
 
+  /**
+   * 「历史摘要」候选的那一份结果；`null` 表示尚未取回。
+   *
+   * **又是独立的一份**：它打的是 `/api/entries/summaries`，与上面三份**不是同一个端点**
+   * （那三个是明细查询，这个是按摘要分组的聚合），共用结果槽会让两者互相顶掉。
+   * 两处调用方（记账表单 `EntryRecordForm` 与改账弹窗 `EntryEditDialog`）不会同时挂载
+   * ——弹窗只出现在明细页、表单只出现在三个记账页，故一份槽够用；
+   * 切换记账类型（收入→支出）时由 `loadSummaries` 的调用方先 `clearSummaryOptions`，
+   * 不留下上一种类型的候选（收入的历史摘要出现在支出页是实打实的错数据，不是旧数据）。
+   */
+  const summaryOptions = ref<SummaryOption[] | null>(null)
+
+  /** 摘要候选是否在途；与另外三个分开，理由见 `summaryOptions`。 */
+  const summaryOptionsLoading = ref(false)
+
   /** 发一次明细查询并解出分页结果；**URL 拼装的唯一落点**，两个入口共用。 */
   async function fetchPage(search: URLSearchParams): Promise<EntryQueryPage> {
     return request<EntryQueryPage>(`${ENTRIES_PATH}?${search.toString()}`)
@@ -454,6 +493,40 @@ export const useEntriesStore = defineStore('entries', () => {
     }
   }
 
+  /**
+   * 取「历史摘要」候选：本账套内该类型**用过的摘要**，去重后按最近使用时间倒序。
+   *
+   * 去重与排序**都在后端**（那是 `GROUP BY`，见 `GET /api/entries/summaries` 的说明）：
+   * 本地拿明细去重只能覆盖取回的那一页，「上个月记过的摘要」会凭空不在候选里。
+   *
+   * 类型过滤同样落在服务端，且**必须**如此：它与记账页的「最近 N 次同类型交易」同一口径
+   * ——收入页列出的应当是收入的历史摘要（「工资」），而不是本账套所有类型混在一起的长列表。
+   *
+   * 刻意**不复用 {@link query} / {@link loadRecent} / {@link loadRecentSameType}**：
+   * 前两者打的是明细查询端点（结果与分页），后者虽然也是「同类型」，但结果是**明细行**、
+   * 还要在本地归并成笔；本方法要的是另一个端点上的另一种形状。
+   *
+   * @param type 记账类型（`Income` / `Expense` / `Transfer`）。
+   * @returns 去重后的候选（可能为空数组）。
+   * @throws 未选择账套时后端返回 400；令牌失效或网络异常时抛出 `ApiError`。
+   */
+  async function loadSummaries(type: TransactionType): Promise<SummaryOption[]> {
+    const search = new URLSearchParams()
+    search.append('types', type)
+    search.set('limit', String(SUMMARY_OPTION_LIMIT))
+
+    summaryOptionsLoading.value = true
+    try {
+      const result = await request<SummaryOption[]>(
+        `${ENTRIES_PATH}/summaries?${search.toString()}`,
+      )
+      summaryOptions.value = result
+      return result
+    } finally {
+      summaryOptionsLoading.value = false
+    }
+  }
+
   /** 清空结果（退出登录、账套切换时调用，避免残留上一账套的明细）。 */
   function clear(): void {
     page.value = null
@@ -470,6 +543,11 @@ export const useEntriesStore = defineStore('entries', () => {
     recentSameTypeItems.value = null
   }
 
+  /** 清空摘要候选；理由与 {@link clearRecent} 相同（换账套、退出登录，以及切换记账类型时）。 */
+  function clearSummaryOptions(): void {
+    summaryOptions.value = null
+  }
+
   return {
     page,
     loading,
@@ -484,5 +562,9 @@ export const useEntriesStore = defineStore('entries', () => {
     recentSameTypeLoading,
     loadRecentSameType,
     clearRecentSameType,
+    summaryOptions,
+    summaryOptionsLoading,
+    loadSummaries,
+    clearSummaryOptions,
   }
 })

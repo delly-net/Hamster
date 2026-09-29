@@ -19,15 +19,21 @@
  *
  * 挂载即打开（父级只在可编辑的行上、用 `v-if` 控制本组件），故字段初值直接在 setup 里
  * 从被点的行还原，不另写一套「打开时复位」的 watch。
+ *
+ * 摘要与记账表单（`EntryRecordForm`）共用 `SummarySearchSelect`：可以**从本账套的历史摘要里选一条
+ * 再改**。候选按**被改这一笔的类型**取（`entry.transactionType`），而不是按明细页上当前的筛选条件
+ * ——明细页可以混排三种类型，改的是哪一笔，候选就该是哪一种。两处摘要字段的交互因此完全一致
+ * （同 #73 对标签字段的要求）。
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
+import SummarySearchSelect from '@/components/SummarySearchSelect.vue'
 import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
-import { isEntryEditable, type Entry } from '@/stores/entries'
+import { isEntryEditable, useEntriesStore, type Entry } from '@/stores/entries'
 import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
 import {
   transactionModeMeta,
@@ -49,6 +55,7 @@ const emit = defineEmits<{
 
 const accountsStore = useAccountsStore()
 const categoriesStore = useCategoriesStore()
+const entriesStore = useEntriesStore()
 const tagsStore = useTagsStore()
 const transactionsStore = useTransactionsStore()
 
@@ -305,6 +312,22 @@ const tagPlaceholder = computed(() =>
 )
 
 /**
+ * 摘要候选：本账套内**这一笔所属类型**用过的摘要（去重、按最近使用倒序）。
+ *
+ * 按**被改这一笔的类型**取，不是按当前页面：明细页混排三种类型，弹窗里的这一笔才是唯一的口径。
+ * 尚未取回或取数失败时是空数组——输入框照常可用（摘要恒可手工输入），只是没有可点的候选。
+ */
+const summaryOptions = computed(() => entriesStore.summaryOptions ?? [])
+
+/**
+ * 摘要候选取数失败的说明；为空表示没有失败。
+ *
+ * 与 `EntryRecordForm` 同一口径：候选只是「上次那句话怎么写的」这条捷径，取不到它照常能改账，
+ * 故**不占 `errorMessage`**（那是「保存失败」的位置），只用字段下方那行弱化小字说明。
+ */
+const summaryError = ref('')
+
+/**
  * 是否要说明「当前对手方是系统账本账户」。
  *
  * 账本账户不在任何候选里，故它在界面上就是**一个空输入框**——而空输入框本身也能读成
@@ -404,6 +427,28 @@ function parseAmount(raw: unknown): number | null {
  * 分类与标签在这两处不再共用：明细页的分类/标签筛选候选取的也是**全量**，
  * 与这里的取数口径一致但用途不同（那边是筛选条件、这里是本笔的取值），故仍在此各拉一次。
  */
+/**
+ * 拉取摘要候选（本账套 + **被改这一笔的类型**），并**自行吞掉异常**。
+ *
+ * 与三份字典分开、且失败不推翻任何东西：候选取不到只是摘要少了一条捷径，
+ * 改账本身照常可以完成（摘要恒可手工输入）。故异常只进 {@link summaryError}，
+ * 不抛出去影响 `loadDictionaries` 的返回值。
+ *
+ * **取数前先清掉上一份**：本弹窗每次打开都是新挂载的，但 store 里的槽是跨页面共用的
+ * （记账页三页也用它），上一个账套乃至上一种类型的候选不能在这一帧里被渲染出来
+ * ——候选行带着「最近使用时间」，与正常数据无从分辨。
+ */
+async function loadSummaryOptions(): Promise<void> {
+  entriesStore.clearSummaryOptions()
+  try {
+    await entriesStore.loadSummaries(props.entry.transactionType)
+    summaryError.value = ''
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '网络异常'
+    summaryError.value = `历史摘要加载失败：${reason}，可直接输入`
+  }
+}
+
 async function loadDictionaries(): Promise<boolean> {
   try {
     await Promise.all([categoriesStore.list(true), tagsStore.list(true)])
@@ -566,6 +611,9 @@ onMounted(async () => {
   panelRef.value?.focus()
 
   await loadDictionaries()
+
+  // 摘要候选与三份字典互不依赖，失败也不挡改账，故各自取各自的（同上：与聚焦、字典都无关）
+  await loadSummaryOptions()
 })
 </script>
 
@@ -663,14 +711,17 @@ onMounted(async () => {
 
           <div class="field">
             <label class="label" for="edit-summary">摘要</label>
-            <input
-              id="edit-summary"
-              v-model="draftSummary"
-              type="text"
-              maxlength="128"
-              autocomplete="off"
+            <!-- 与记账表单同一控件：可手工输入，也可从**历史摘要**里选一条填进来，选完仍可继续编辑。
+                 候选按**被改这一笔的类型**取（明细页混排三种类型，本弹窗这一笔才是唯一口径） -->
+            <SummarySearchSelect
+              v-model:text="draftSummary"
+              input-id="edit-summary"
+              :options="summaryOptions"
               :placeholder="meta.summaryPlaceholder"
             />
+            <!-- 候选取不到只是一条便利没了，摘要照常可改可存，故不用 errorMessage 那条红色提示
+                 （与上面两句 field-hint 同一做法：把当前状况如实说明，而不是报一个错） -->
+            <p v-if="summaryError !== ''" class="field-hint">{{ summaryError }}</p>
           </div>
 
           <!-- 标签排在摘要之后，与记账表单（EntryRecordForm）同一顺序：两者都是这笔账的描述性文字，

@@ -24,10 +24,15 @@
  * - **标签**：可选、**可多个**、**不设上限**。与分类一样接受候选之外的新名字（后端自动创建），
  *   与分类的差别只有两处：基数（多值）与提交形状（`tagIds` + `tagNames` **两份合并**，
  *   而分类是「有主键就不传名字」的二选一）。同样与币种无关、不区分收入/支出/转账。
+ * - **摘要**：自由文本，但**可以从历史摘要里选一条再改**——候选是本账套内**本页这一种类型**
+ *   用过的摘要（去重、按最近使用倒序），由 `SummarySearchSelect` 呈现，选中后仍可继续编辑。
+ *   它与上面几个候选的差别在于**候选的缺失不削弱可用性**：摘要任何文本都合法、也不创建任何记录，
+ *   取不到候选只是少了一条捷径，故失败提示不占 `errorMessage`（见 `loadSummaryOptions`）。
  *
- * 候选数据（账户、分类与标签）的生命周期与本表单的字段是两件事：字段在每次复位时留空，而**候选缓存
+ * 候选数据（账户、分类、标签与摘要）的生命周期与本表单的字段是两件事：字段在每次复位时留空，而**候选缓存
  * 在提交成功后作废**——一笔交易会改变账户余额、还可能按名新建往来账户、分类与标签，留着旧候选就是拿
- * 记账前的数回答「这笔钱从哪出」。作废后不立即重拉，由下一次需要候选时补上（见 `onFormFocusIn`）；
+ * 记账前的数回答「这笔钱从哪出」；摘要候选同理：刚记下的那句话大概率还没进候选，留着旧的那一份
+ * 就是拿记账前的写法回答「上次是怎么写的」。作废后不立即重拉，由下一次需要候选时补上（见 `onFormFocusIn`）；
  * 币种缓存不参与，理由见 `loadMutableDictionaries`。
  */
 import { computed, onMounted, ref, watch } from 'vue'
@@ -35,6 +40,7 @@ import { ApiError } from '@/api/http'
 import AccountSearchSelect from '@/components/AccountSearchSelect.vue'
 import CategorySearchSelect from '@/components/CategorySearchSelect.vue'
 import RecentEntryList from '@/components/RecentEntryList.vue'
+import SummarySearchSelect from '@/components/SummarySearchSelect.vue'
 import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
@@ -239,6 +245,16 @@ const categoryPlaceholder = computed(() =>
  */
 const tagOptions = computed(() => tagsStore.tags)
 
+/**
+ * 摘要候选：本账套内**本页这一种类型**用过的摘要（去重、按最近使用倒序）。
+ *
+ * 直接取 store 里的那一份：类型过滤与去重都在后端做（见 `loadSummaries`），
+ * 本组件不筛——本地筛会筛出「另一种类型的摘要」，那正是候选按类型取的理由。
+ * 尚未取回或已被提交作废时是**空数组**（不是「没有历史摘要」），此时输入框照常可用，
+ * 只是没有可点的候选（同 `AccountSearchSelect` 对空候选的处理）。
+ */
+const summaryOptions = computed(() => entriesStore.summaryOptions ?? [])
+
 /** 标签字段的提示文案；空窗分支的理由同 {@link categoryPlaceholder}。 */
 const tagPlaceholder = computed(() =>
   optionsCleared.value
@@ -416,11 +432,16 @@ function resetFields(): void {
 }
 
 /**
- * 作废账户、分类与标签的候选缓存。
+ * 作废账户、分类、标签与**摘要**的候选缓存。
  *
  * 记账成功后调用（**失败路径一律不调**：账没记下，缓存就不陈旧）。三个 store 的 `clear()`
  * 原本只有「退出登录 / 账套失效」一个调用方，此处是第二个，两处说的是同一件事——手上这份列表
  * 已不再是事实。
+ *
+ * **摘要候选同在此列**，理由与那三份字典同源：刚记下的那句话多半还没进候选，
+ * 留着旧的那一份就是拿记账前的写法回答「上次是怎么写的」。它与那三份的差别只在存放位置
+ * （明细 store 的槽而不是字典 store），故在此一并作废、由 `onFormFocusIn` 一并补拉
+ * ——两处各写一份清单，迟早漂移成「补拉了账户、忘了摘要」。
  *
  * 清空之后不在这里重拉：取回推迟到下一次需要候选时（{@link onFormFocusIn}）。选中项本身由
  * {@link resetFields} 清掉，故留在这里的只有「候选数据的来源」这一层。
@@ -429,6 +450,7 @@ function clearOptionCaches(): void {
   accountsStore.clear()
   categoriesStore.clear()
   tagsStore.clear()
+  entriesStore.clearSummaryOptions()
   optionsCleared.value = true
   cacheNote.value = ''
 }
@@ -453,7 +475,9 @@ async function onFormFocusIn(): Promise<void> {
 
   optionsReloading.value = true
   try {
-    await loadMutableDictionaries()
+    // 摘要候选在同一时刻作废（见 `clearOptionCaches` 的调用点），故与那三份字典一并在补拉范围里。
+    // 它**自行吞掉异常**（失败只进 `summaryError`），故不影响下面这一句对三份字典成败的判断
+    await Promise.all([loadMutableDictionaries(), loadSummaryOptions()])
     optionsCleared.value = false
     cacheNote.value = ''
   } catch (error) {
@@ -480,6 +504,37 @@ function onCurrencyChange(event: Event): void {
   primaryAccountText.value = ''
   counterpartyAccountId.value = null
   counterpartyAccountText.value = ''
+}
+
+/**
+ * 摘要候选取数失败的说明；为空表示没有失败。
+ *
+ * **不进 `errorMessage`**：账号已经填好了，摘要候选只是「上次那句话怎么写的」这条捷径，
+ * 取不到它照常可以手工输入并提交。挂在摘要字段下方、用弱化的 `.tip` 而不是红色的 `.error`，
+ * 说的正是这件事——它是一条「少了个便利」的说明，不是一次失败的记账。
+ */
+const summaryError = ref('')
+
+/**
+ * 拉取摘要候选（本账套 + 本页类型），并**自行吞掉异常**。
+ *
+ * 与 `loadRecentSameType` 同一处理：它挂在多处取数时机上（进入本页、切换账套、提交后补拉），
+ * 其中提交后那一处在 `submit()` 的成功分支里，抛出去会被那里捕获成「记账失败」，
+ * 而账其实已经记下了。
+ *
+ * **类型由 `props.mode` 决定**：收入页只列收入的历史摘要。故**取数前先清掉上一份**
+ * （同 `loadRecentSameType` 对该面板的处理），避免页面切换的一帧里渲染出另一种类型的候选
+ * ——候选带着「最近使用时间」与次数，看起来与正常数据无从分辨，宁可先空着。
+ */
+async function loadSummaryOptions(): Promise<void> {
+  entriesStore.clearSummaryOptions()
+  try {
+    await entriesStore.loadSummaries(props.mode)
+    summaryError.value = ''
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '网络异常'
+    summaryError.value = `历史摘要加载失败：${reason}，可直接输入`
+  }
 }
 
 /**
@@ -671,6 +726,8 @@ watch(
       tagsStore.clear()
       // 面板同理：上一账套的最近几笔不是本账套的事实，留着即为残留数据（与首页面板同一处理）
       entriesStore.clearRecentSameType()
+      // 摘要候选同理：上一账套的摘要不是本账套用过的写法
+      entriesStore.clearSummaryOptions()
       return
     }
 
@@ -681,6 +738,8 @@ watch(
     // **不受 `loadOptions` 成败影响**：面板只按「账套 + 类型」取数，与币种/账户/分类/标签字典无关。
     // 把它挂进上面那个 if，字典一失败面板就会留着上一账套的那几行——恰恰是最该清掉的情形
     await loadRecentSameType()
+    // 摘要候选同理：本账套名下的摘要与币种/账户/分类/标签字典无关，失败也不该留着上一账套的候选
+    await loadSummaryOptions()
   },
 )
 
@@ -695,6 +754,7 @@ onMounted(async () => {
 
   // 同上：与表单候选的加载互不依赖，成功与否都要取自己的那一份
   await loadRecentSameType()
+  await loadSummaryOptions()
 })
 </script>
 
@@ -779,14 +839,17 @@ onMounted(async () => {
 
         <div class="field field-wide">
           <label class="label" for="record-summary">摘要</label>
-          <input
-            id="record-summary"
-            v-model="draftSummary"
-            type="text"
-            maxlength="128"
-            autocomplete="off"
+          <!-- 可以从**历史摘要**里选一条填进来，选完仍可继续编辑（见 SummarySearchSelect 的文件头）。
+               候选是本账套内**本页这一种类型**用过的摘要，条数与内容都由后端按类型聚合决定 -->
+          <SummarySearchSelect
+            v-model:text="draftSummary"
+            input-id="record-summary"
+            :options="summaryOptions"
             :placeholder="meta.summaryPlaceholder"
           />
+          <!-- 候选取不到只是一条便利没了，摘要是自由文本、照常可以输入并提交，
+               故这条说明不占下面的 errorMessage，也不用醒目的错误色（同 loadSummaryOptions 的说明） -->
+          <p v-if="summaryError !== ''" class="tip">{{ summaryError }}</p>
         </div>
 
         <!-- 标签排在摘要之后：两者都是这笔账的描述性文字（「这笔账是什么」），而币种、两个账户、
@@ -865,6 +928,10 @@ onMounted(async () => {
         从候选里选了几个、又手打了一个新名字，它们会一起挂上去。手打的新名字会在当前账套内
         自动创建为标签；若这个名字已经有了（哪怕是已停用的），会归到它上面，不会另建一个同名的。
         标签在「账目明细」页随交易整体呈现，也可按它筛选。
+        <strong>摘要可以从历史摘要里选</strong>：点开摘要框会列出本账套内这一种类型用过的写法
+        （最近的在前，附上次使用时间与用过的次数），点一条即填进输入框、且<strong>仍可继续修改</strong>
+        ——常用写法不必每次重敲，也能少写出「早餐」「早饭」这类同一件事的两种写法。
+        输入关键词即收窄候选，敲一个从没用过的写法照常提交。
       </p>
 
       <!-- 最近同类型交易：**只读参考**，排在表单下方。放在这里而不是做成弹窗或抽屉，
@@ -938,6 +1005,15 @@ onMounted(async () => {
 .label {
   font-size: 12.5px;
   opacity: 0.75;
+}
+
+/* 字段内的一行说明（目前只有摘要候选的取数失败）：全站的「次要小字」只有这一种写法
+   （12.5px / 1.7 / 0.7），与 CategorySearchSelect 的「将自动创建」提示同一档。
+   **刻意不用 .error 的红框红字**：它说的是「少了一条捷径」，不是一次失败的记账 */
+.tip {
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.7;
 }
 
 .field input,

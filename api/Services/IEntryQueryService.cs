@@ -121,7 +121,67 @@ public interface IEntryQueryService
         int pageSize,
         bool descending = false,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 按交易类型聚合当前账套内的**历史摘要**：去重后按最近使用时间倒序给出。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只聚合该账套内的交易。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员；管理员可见该账套内的全部账户。</param>
+    /// <param name="types">
+    /// 交易类型集合；<c>null</c> 或空集合表示**不限类型**。
+    /// 记账页与改账弹窗传的是**本页那一种类型**（收入页只列收入的历史摘要），
+    /// 与「最近 N 次同类型交易」同一口径：摘要的可复用性本就随类型走
+    /// （「工资」是收入摘要、「早餐」是支出摘要），跨类型混排只会让候选变长而不变准。
+    /// </param>
+    /// <param name="limit">最多返回多少条候选；由调用方保证落在合法区间内（端点层已校验）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>去重后的历史摘要，最近的在前；无匹配时为空列表。</returns>
+    /// <remarks>
+    /// **为什么要一个独立方法而不是拿 <see cref="QueryAsync"/> 的结果去重**：后者的行粒度是
+    /// **明细**且必须分页（<c>pageSize</c> 上限 200），拿它去重既把整行明细的载荷搬进内存，
+    /// 又只能覆盖最近的那一页——「上个月记过的摘要」会凭空不在候选里。
+    /// 聚合要的是 <c>GROUP BY</c>，那是查询形状上的差别，不是同一件事的两个参数集。
+    /// <para>
+    /// **口径与明细页一致**：只聚合**钱账户**（资金/负债）上有明细的交易，可见性同样复用
+    /// <see cref="IAccountService.ListByAccountSetAsync"/>——否则候选里会出现用户在明细页
+    /// 根本查不到的账（往来账户上的那条明细），而用户对着候选无从分辨。
+    /// </para>
+    /// <para>
+    /// <see cref="EntrySummaryOption.UsageCount"/> 数的是**笔数**不是明细行数：
+    /// 一笔交易恒有借贷两条明细，数行数会让每一次记账都被记成 2 次。
+    /// 判据不是前端要显示的数字好不好看，而是「候选里这一条被用过几次」这个问题的答案只有一个。
+    /// </para>
+    /// <para>
+    /// **不做任何形状归一**：不折叠大小写、不去空白后合并同义项，「早餐」与「早餐 」就是两条候选。
+    /// 摘要是用户自己敲下的自由文本，不是字典项——把两条不同的写法合并成一条，
+    /// 等于替用户改了账（提交上去的会是其中一条的写法，而另一条从此选不出来）。
+    /// </para>
+    /// <para>
+    /// 本方法同样**不写任何表**：它是纯读取，摘要没有停用/启用这一说，也没有任何汇总列。
+    /// </para>
+    /// </remarks>
+    Task<IReadOnlyList<EntrySummaryOption>> ListSummariesAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<TransactionType>? types,
+        int limit,
+        CancellationToken cancellationToken = default);
 }
+
+/// <summary>历史摘要的一条候选。</summary>
+/// <param name="Summary">摘要原文（用户当初敲下的写法，原样给出）。</param>
+/// <param name="LastUsedAt">
+/// 最近一次使用时间（UTC）：<see cref="Transaction.OccurredAt"/> 的最大值，
+/// **业务发生时间**而不是落库时间——补记往日支出时两者会差很远，而用户心里「上次用这条摘要」的时点
+/// 说的正是那笔账发生的时间。
+/// </param>
+/// <param name="UsageCount">
+/// 用了多少次（**笔数**，不是明细行数）：一笔交易由借贷两条明细构成，
+/// 数行数会让每一次记账都被计成 2 次。
+/// </param>
+public sealed record EntrySummaryOption(string Summary, DateTime LastUsedAt, int UsageCount);
 
 /// <summary>明细行（已解析出账户名与对手方，供端点直接映射为 DTO）。</summary>
 /// <param name="Id">明细主键。</param>
