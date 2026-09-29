@@ -705,19 +705,6 @@ onMounted(async () => {
           />
         </div>
 
-        <div class="field field-wide">
-          <label class="label" for="record-tags">标签（可选，可多个）</label>
-          <!-- 标签是多值的：候选中点选与手工输入新名字可以**同时**发生，两者都上报、由后端合并。
-               已选中的标签以芯片呈现，去掉一个即从数组里删掉——不做「文本 + 主键」那套单值契约，
-               理由见 TagMultiSelect 的文件头 -->
-          <TagMultiSelect
-            v-model:selected="selectedTags"
-            input-id="record-tags"
-            :options="tagOptions"
-            :placeholder="tagPlaceholder"
-          />
-        </div>
-
         <div class="field">
           <label class="label" for="record-amount">金额（{{ selectedCurrencyCode || '—' }}）</label>
           <!-- 刻意用 type="text" 而非 type="number"：后者的 v-model 会隐式转型，
@@ -746,6 +733,23 @@ onMounted(async () => {
             maxlength="128"
             autocomplete="off"
             :placeholder="meta.summaryPlaceholder"
+          />
+        </div>
+
+        <!-- 标签排在摘要之后：两者都是这笔账的描述性文字（「这笔账是什么」），而币种、两个账户、
+             金额、发生时间与分类是记账要素。**不要因为「标签与分类同属这笔账的标注」就把它挪回
+             分类相邻处**——语义归类与表单排布是两件事；改账弹窗（EntryEditDialog）按同一顺序摆字段，
+             两处必须一致 -->
+        <div class="field field-wide">
+          <label class="label" for="record-tags">标签（可选，可多个）</label>
+          <!-- 标签是多值的：候选中点选与手工输入新名字可以**同时**发生，两者都上报、由后端合并。
+               已选中的标签以芯片呈现，去掉一个即从数组里删掉——不做「文本 + 主键」那套单值契约，
+               理由见 TagMultiSelect 的文件头 -->
+          <TagMultiSelect
+            v-model:selected="selectedTags"
+            input-id="record-tags"
+            :options="tagOptions"
+            :placeholder="tagPlaceholder"
           />
         </div>
 

@@ -643,17 +643,6 @@ onMounted(async () => {
           </div>
 
           <div class="field">
-            <label class="label" for="edit-tags">标签（可选，可多个）</label>
-            <!-- 初值即这笔交易当前挂着的全部标签，删芯片即「这笔账不再标它」——改账下标签是覆盖语义 -->
-            <TagMultiSelect
-              v-model:selected="selectedTags"
-              input-id="edit-tags"
-              :options="tagOptions"
-              :placeholder="tagPlaceholder"
-            />
-          </div>
-
-          <div class="field">
             <label class="label" for="edit-amount">金额（{{ currencyCode || '—' }}）</label>
             <!-- 刻意用 type="text" 而非 type="number"：后者的 v-model 会隐式转型，
                  输入有效数字时是 number、清空时是 string，两种类型混在一个 ref 里 -->
@@ -681,6 +670,20 @@ onMounted(async () => {
               maxlength="128"
               autocomplete="off"
               :placeholder="meta.summaryPlaceholder"
+            />
+          </div>
+
+          <!-- 标签排在摘要之后，与记账表单（EntryRecordForm）同一顺序：两者都是这笔账的描述性文字，
+               而账户、金额、发生时间与分类是记账要素。**不要因为「标签与分类同属这笔账的标注」
+               就把它挪回分类相邻处**——语义归类与表单排布是两件事，理由详见 EntryRecordForm -->
+          <div class="field">
+            <label class="label" for="edit-tags">标签（可选，可多个）</label>
+            <!-- 初值即这笔交易当前挂着的全部标签，删芯片即「这笔账不再标它」——改账下标签是覆盖语义 -->
+            <TagMultiSelect
+              v-model:selected="selectedTags"
+              input-id="edit-tags"
+              :options="tagOptions"
+              :placeholder="tagPlaceholder"
             />
           </div>
 
