@@ -4,10 +4,15 @@
  * 以及其下的**最近交易**只读列表。
  *
  * 两块图表数据都来自后端落库的**按天记录**（总资产结算订阅、收入结算订阅、支出结算订阅各自在结算
- * 事件后逐日重算），本页**不做任何金额汇总**——「哪些账户算资产、哪些算负债、个人与公共如何相加、
- * 收支的符号」全部由后端一处定义（见 `ITotalAssetSettlementService` / `IIncomeSettlementService` /
- * `IExpenseSettlementService`），前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」
- * 这种谁也说不清的问题。图表部分只做一件事：把两条序列画出来。
+ * 事件后逐日重算）。「哪些账户算资产、哪些算负债、个人与公共如何相加、收支的符号」全部由后端一处
+ * 定义（见 `ITotalAssetSettlementService` / `IIncomeSettlementService` / `IExpenseSettlementService`），
+ * 前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」这种谁也说不清的问题。
+ * 图表部分只做一件事：把两条序列画出来。
+ *
+ * **本页只有一处相加**：收支面板标题下那三个概览数字是**本月合计**——把该面板已落库的按天记录
+ * 加起来（口径见执行规范 #67「月度概览只做同口径按天相加并注明来源」，界面上一行小字写明口径）。
+ * 总资产面板的三个数字则是**时点余额**（最新一天的总资产 / 净资产 / 负债），逐日相加没有业务含义
+ * ——「本月总资产合计」不是一个数——故那里原样取最新一个数据点。除此之外本页不做任何金额汇总。
  *
  * **两个面板共用一张图与一套模板**：折线交给 `components/TrendChart.vue`（Apache ECharts 6 的封装，
  * 几何、刻度、退化处理都由它负责），面板本身由 {@link panels} 描述后交给同一个 `v-for` 渲染。
@@ -101,8 +106,18 @@ interface ChartView {
    * 标哪几天由 `TrendChart` 决定（左端、中间、右端），本页只负责把日期写成 `M月D日`。
    */
   xLabels: string[]
-  /** 概览数字（取自最新一个数据点）。 */
+  /**
+   * 概览数字。**两个面板的口径不同**：总资产面板取**最新一个数据点**（三个数都是时点余额），
+   * 收支面板取**本月合计**（三个数都是按天记录相加，见 {@link flowsPanel}）。
+   */
   stats: StatView[]
+  /**
+   * 概览数字的口径说明，渲染在三个数字下方的一行次要小字。
+   *
+   * **只有需要写明口径的面板才给**：收支面板的数字是加出来的，不写一句「这是本月合计」，
+   * 用户无法从界面上分辨它和当日值；总资产面板是时点余额、读数即所得，不写。
+   */
+  statNote?: string
   /** 图例右侧的元信息（最新日期 · 天数 · 币种）。 */
   meta: string
   /** 图表的无障碍描述：把图上最关键的几个数字读出来，供读屏用户获得等价信息。 */
@@ -144,6 +159,10 @@ function buildMeta(latestLabel: string, dayCount: number, currencyLabel: string)
  *
  * **两条线共用一根纵轴**：`TrendChart` 只声明一根 `yAxis`，故「净资产低于总资产」这个事实在图上
  * 始终成立——一条线一根轴会让它消失（这也是全站不引入双轴图的原因）。
+ *
+ * **三个概览数字取自最新一个数据点**：总资产、净资产、负债都是**时点余额**，说的是「到这一天为止
+ * 账上还剩多少」，逐日相加没有业务含义（「本月总资产合计」不是一个数）。故这里既不平摊也不求和，
+ * 也不给口径小字——读数即所得。下方收支面板是另一套口径（本月合计），那里才有说明。
  */
 function assetsPanel(): Panel {
   const days = totalAssets.daily?.days ?? []
@@ -200,11 +219,27 @@ function assetsPanel(): Panel {
  *
  * **支出线与收入线同在正半轴**：接口给的两个金额都是正数（见后端 `IncomeExpenseDailyPoint`），
  * 图上不再叠一层符号——「哪个是花出去的」由图例与颜色说清，而「这个月净赚多少」由净值那个数字回答。
+ *
+ * **三个概览数字是本月合计，不是最新一天的值**（本页唯一一处相加）：接口下发的每个数据点都是
+ * **当日发生额**（见 `IncomeExpenseDaily` 的类型注释），故逐日相加即本月累计；
+ * 口径由执行规范 #67 定在前端——「月度概览只做同口径按天相加并注明来源」。
+ * 不为此另开后端汇总接口：同一份按天记录再让后端算一遍，等于给同一个数字立第二个真源；
+ * 界面上那行 `statNote` 就是「注明来源」那半句。
+ *
+ * **合计不是「整月合计」**：`days` 缺日不补零（后端口径），故相加得到的只是**已落库的那些天**
+ * 之和，即「截至最新结算日的本月累计」。未结算的日子不计入是**如实呈现**，不是漏算。
  */
 function flowsPanel(): Panel {
   const days = incomeExpenses.daily?.days ?? []
   const currencyLabel = incomeExpenses.daily?.currencyCode ?? ''
   const latest = days[days.length - 1]
+
+  // 逐日金额最多两位小数、一个自然月最多 31 个数据点，浮点累加的误差远小于两位小数的呈现精度
+  const monthIncome = days.reduce((sum, day) => sum + day.incomeTotal, 0)
+  const monthExpense = days.reduce((sum, day) => sum + day.expenseTotal, 0)
+  // 净额取「收入合计 − 支出合计」而不是逐日累加 `netTotal`：两者在十进制下恒等，
+  // 但取差保证界面上「净额」永远是**所显示的那两个数**之差，不会有末位漂移落成一分钱
+  const monthNet = monthIncome - monthExpense
 
   return {
     key: 'flows',
@@ -234,17 +269,20 @@ function flowsPanel(): Panel {
               },
             ],
             stats: [
-              { label: '收入', value: formatAmount(latest.incomeTotal) },
-              { label: '支出', value: formatAmount(latest.expenseTotal) },
-              { label: '净额', value: formatAmount(latest.netTotal) },
+              { label: '收入', value: formatAmount(monthIncome) },
+              { label: '支出', value: formatAmount(monthExpense) },
+              { label: '净额', value: formatAmount(monthNet) },
             ],
+            statNote: '三个数字是本月合计：按天记录逐日相加，尚未结算的日子不计入。',
             meta: buildMeta(formatDay(latest.date), days.length, currencyLabel),
             xLabels: days.map((day) => formatDay(day.date)),
+            // 读屏用户拿不到那行口径小字的位置关系，故口径（本月合计 + 截至哪一天）必须写进这一句里，
+            // 让他们听到的数字与视觉上的数字是同一个
             ariaLabel:
               `${period.value}收入与支出走势图，共 ${days.length} 个数据点。` +
-              `最新一天（${formatDay(latest.date)}）收入 ${formatAmount(latest.incomeTotal)}、` +
-              `支出 ${formatAmount(latest.expenseTotal)}、` +
-              `净额 ${formatAmount(latest.netTotal)}` +
+              `本月合计（截至 ${formatDay(latest.date)}）收入 ${formatAmount(monthIncome)}、` +
+              `支出 ${formatAmount(monthExpense)}、` +
+              `净额 ${formatAmount(monthNet)}` +
               `${currencyLabel === '' ? '' : ` ${currencyLabel}`}。`,
           },
   }
@@ -377,11 +415,15 @@ onMounted(() => {
         <p v-else-if="panel.chart === null" class="hint">{{ panel.emptyHint }}</p>
 
         <template v-else>
+          <!-- 口径小字是数字的注脚而不是另一块内容，故放在 .stats 里占满一行（见样式），
+               而不是面板的兄弟块——后者会与数字之间拉开面板的 0.9rem 块距。
+               只有给了 statNote 的面板才渲染（总资产面板是时点值，不写口径） -->
           <div class="stats">
             <div v-for="stat in panel.chart.stats" :key="stat.label" class="stat">
               <span class="stat-label">{{ stat.label }}</span>
               <strong class="stat-value">{{ stat.value }}</strong>
             </div>
+            <p v-if="panel.chart.statNote" class="stat-note">{{ panel.chart.statNote }}</p>
           </div>
 
           <div class="legend">
@@ -577,7 +619,8 @@ onMounted(() => {
   background: none;
 }
 
-/* 三个概览数字：等宽分栏，窄屏自动折行 */
+/* 三个概览数字：等宽分栏，窄屏自动折行。口径小字（.stat-note）也挂在这里，
+   故列间距（2rem）对它无效、行间距（0.5rem）正好当它和数字之间的那点距离 */
 .stats {
   display: flex;
   flex-wrap: wrap;
@@ -601,6 +644,18 @@ onMounted(() => {
   color: var(--color-heading);
   /* 数字等宽，切换账套时数字跳变不会带着整块布局左右晃 */
   font-variant-numeric: tabular-nums;
+}
+
+/* 概览数字的口径说明（收支面板的「本月合计」）。文案沿用全站的「次要小字」档
+   （12.5px / 1.7 / 0.7，与 .panel-note 同源），不另立一套字号。
+   `flex-basis: 100%` 让它整行独占、落在三个数字的下一行：与数字之间的距离于是取 .stats 的
+   行间距 0.5rem（比面板的 0.9rem 块距紧一档），读起来是数字的注脚而不是另起一块。
+   负外边距之类「把块距掰回来」的写法不必用，也就不引入新的间距常量 */
+.stat-note {
+  flex-basis: 100%;
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.7;
 }
 
 .legend {
