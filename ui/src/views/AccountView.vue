@@ -15,6 +15,14 @@
  * 切换页签只是换一个 computed，不重新请求。这与上面「不做本地过滤」并不矛盾——后者针对的是
  * 可见性/权限（前端过滤只会造出假防线），而按类型分组是展示分组，一行数据都没被丢掉。
  *
+ * **分页与合计按页签分工，两者互不重叠**：资金 / 负债账户由用户手工建立、数量可控，故**全量呈现**
+ * 并在表尾给**合计行**；往来账户由记账时按对手方名自动创建、条数会随记账增长，故**分页呈现**、
+ * 不给合计——往来账户记的是「谁欠谁」而不是「钱放在哪」，余额合计在它上面没有业务含义。
+ * 合计**按币种分行**：没有汇率来源，把不同币种的金额相加是凭空捏造的数字，故一个币种一行；
+ * 且只合计余额列，期初金额是历史值、与余额不是同一件事（两者只在账户还没有流水时才相等）。
+ * 分页是**纯前端切片**——接口一次就返回当前账套内我可见的全部账户（既不分页也不按类型过滤），
+ * 故页签切换依旧零请求，每页条数也只属于本页而不进 store。
+ *
  * 新建与修改统一走弹窗（【新增】/【编辑】→ 表单 →【保存】落表），不再有行内编辑。
  * 修改的可编辑字段只有名称：账户类型、归属范围、期初金额、**期初时间**与**币种**一经创建均不可修改，
  * 故在弹窗内一律只读呈现（不给可编辑控件，连禁用的也不给——禁用控件仍会暗示「以后能改」），
@@ -30,7 +38,7 @@
  *
  * 停用即软删除（数据行保留、可重新启用），故按钮文案统一用「停用」而非「删除」。
  *
- * 窄屏（<1024px）呈现为卡片流：与表格是同一份 `tabAccounts` 的**双呈现**，由文末唯一的 1023px
+ * 窄屏（<1024px）呈现为卡片流：与表格是同一份 `visibleAccounts` 的**双呈现**，由文末唯一的 1023px
  * 媒体查询用 `display` 切换（断点值与 `App.vue` 逐字一致，页面级不得自建断点或改用 `matchMedia`）。
  * 这里的 `display: none` 与「用 CSS 隐藏代替删除多余字段」不是一回事：后者删掉也不影响信息完整性，
  * 属死代码；前者隐藏的是**断点不适用时的整块呈现**，是双呈现的定义。前提是任一时刻恰有一份进入
@@ -136,6 +144,24 @@ const notice = ref('')
 const showInactive = ref(false)
 
 /**
+ * 分页页签的每页条数。
+ *
+ * 这是**纯前端分页**的页大小：`GET /api/accounts` 一次就返回当前账套内我可见的全部账户
+ * （接口既不分页、也不按类型过滤，见执行规范 #40 / #57），切片只是呈现层的事。
+ * 故常量落在本页而不进 store——`entries.ts` 里的 `ENTRY_PAGE_SIZE` 是「与后端约定的页大小」，
+ * 两者性质不同，合并只会让「改这里要不要同步后端」变成需要查证的问题。
+ */
+const ACCOUNT_PAGE_SIZE = 20
+
+/**
+ * 分页呈现的页签集合：只有往来账户。
+ *
+ * 写成集合而不是模板里的 `activeType === 'Contact'`——分页与否是**页签的属性**，
+ * 将来若要给别的页签也分页，改这一处即可，不会散落成多处条件。
+ */
+const PAGED_ACCOUNT_TYPES: readonly AccountType[] = ['Contact']
+
+/**
  * 当前页签的账户类型。
  *
  * 页签集合直接复用 `ACCOUNT_TYPE_OPTIONS`（资金/负债/往来三项）：它与后端枚举里
@@ -197,6 +223,105 @@ const accounts = computed(() => accountsStore.accounts)
 const tabAccounts = computed(() =>
   accounts.value.filter((account) => account.type === activeType.value),
 )
+
+/** 当前页签是否分页呈现。 */
+const isPagedTab = computed(() => PAGED_ACCOUNT_TYPES.includes(activeType.value))
+
+/**
+ * 当前页码（只在分页页签上有意义）。
+ *
+ * 状态里只存「用户翻到了第几页」这一件事，越界**不在状态里修**：列表变短（停用账户、取消勾选
+ * 「显示已停用」）会让页码一时超出总页数，由 {@link currentPage} 收敛即可，不必再写一处钳制，
+ * 也不会渲染出「第 5 / 3 页」。
+ *
+ * 复位到第 1 页只发生在**换了数据集**的三个时刻：切换页签、切换「显示已停用」、切换账套。
+ * 增删改后的重新拉取**不复位**——用户停用一个账户不该被踢回第一页。
+ */
+const pageIndex = ref(1)
+
+/** 当前页签的账户总数（分页与合计只是它的两种呈现）。 */
+const totalCount = computed(() => tabAccounts.value.length)
+
+/** 总页数；空列表时仍算 1 页，避免页码出现「第 1 / 0 页」。 */
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / ACCOUNT_PAGE_SIZE)))
+
+/** 实际生效的页码：`pageIndex` 的越界收敛。渲染与切片都取它，**不另存第二份状态**。 */
+const currentPage = computed(() => Math.min(pageIndex.value, totalPages.value))
+
+/**
+ * 当前要呈现的账户：分页页签取当页切片，其余页签全量。
+ *
+ * 表格、卡片流与合计行**都跟着它走**——「合计」与「所见行」因此恒为同一批数据，
+ * 不存在「合计的是一批、显示的是另一批」这种对不上账的可能。
+ */
+const visibleAccounts = computed(() =>
+  isPagedTab.value
+    ? tabAccounts.value.slice(
+        (currentPage.value - 1) * ACCOUNT_PAGE_SIZE,
+        currentPage.value * ACCOUNT_PAGE_SIZE,
+      )
+    : tabAccounts.value,
+)
+
+/**
+ * 序号：按当前页签的列表连续编号。
+ *
+ * 分页页签**跨页续号**（第 2 页首行是 21 而不是 1）——序号答的是「这是这份列表里的第几个」，
+ * 翻页只是换一屏去看同一份列表；不分页的页签上公式自然退化成行下标 +1。
+ */
+function rowNumber(index: number): number {
+  return (isPagedTab.value ? (currentPage.value - 1) * ACCOUNT_PAGE_SIZE : 0) + index + 1
+}
+
+/**
+ * 合计行：**按币种分组的余额合计**。
+ *
+ * **不跨币种相加**——项目没有汇率来源，把不同币种的金额加起来是凭空捏造的数字（执行规范 #45 / #67），
+ * 故一个币种一行；页签内只有一种币种时，合计恰好就是一行。只合计余额列，`initialBalance` 刻意不动：
+ * 它是历史值，与余额只在账户还没有任何流水时才相等，两者相加等于把「过去的家底」和「现在的家底」混成一个数。
+ *
+ * 口径 = **当前页签实际呈现的那批账户**（随「显示已停用」联动），不区分启用状态：
+ * 合计行与它上面的行同属一份所见即所得，勾上已停用就该一起算进来。
+ *
+ * 币种按代码升序排列，不让顺序随账户排列漂移——合计行只回答「各币种各有多少」，
+ * 拿后端的账户顺序当分组顺序会得到一份看起来随机、实则取决于公共/个人分布的清单。
+ */
+const currencyTotals = computed(() => {
+  const grouped = new Map<string, { currencyCode: string; accountCount: number; balance: number }>()
+
+  for (const account of tabAccounts.value) {
+    const total = grouped.get(account.currencyCode)
+    if (total === undefined) {
+      grouped.set(account.currencyCode, {
+        currencyCode: account.currencyCode,
+        accountCount: 1,
+        balance: account.balance,
+      })
+      continue
+    }
+
+    total.accountCount += 1
+    total.balance += account.balance
+  }
+
+  return [...grouped.values()].sort((left, right) =>
+    left.currencyCode.localeCompare(right.currencyCode),
+  )
+})
+
+/**
+ * 当前页签是否呈现合计行：只有不分页的页签（资金 / 负债）。
+ *
+ * 它不是「某个页签的特例」，而是分页的**互补面**——分页的列表上给全量合计会名不副实
+ * （标题写着合计、数字却只覆盖一页），故两者严格互斥，将来给资金/负债也加分页时
+ * 必须连同合计口径一起重新定义。
+ */
+const hasTotals = computed(() => !isPagedTab.value)
+
+/** 翻页：越界一律收敛到合法区间，与 {@link currentPage} 同一口径。 */
+function go(target: number): void {
+  pageIndex.value = Math.min(Math.max(1, target), totalPages.value)
+}
 
 /** 当前页签的类型标签，用于空态文案。 */
 const activeTypeLabel = computed(() => ACCOUNT_TYPE_LABELS[activeType.value])
@@ -462,6 +587,8 @@ watch(
     createOpen.value = false
     editTarget.value = null
     notice.value = ''
+    // 换的是另一批账户，页码无从沿用；页签则保持不动（见下）
+    pageIndex.value = 1
     // 页签是视图偏好而非账套数据，换账套后保持不动：新账套里同样有该类型的账户
 
     if (currentId === null) {
@@ -475,9 +602,16 @@ watch(
 
 // 切换「显示已停用」即时生效，无需用户再点一次刷新
 watch(showInactive, () => {
+  // 勾选换的是另一批行（多半也更长），页码无从沿用；合计行同样跟着这批行走
+  pageIndex.value = 1
   if (hasAccountSet.value) {
     void load()
   }
+})
+
+// 切换页签回到第 1 页：页签之间行数与排序互不相干，沿用上一页签的页码只会让人落在半空中
+watch(activeType, () => {
+  pageIndex.value = 1
 })
 
 onMounted(() => {
@@ -574,9 +708,9 @@ onMounted(() => {
             </tr>
           </thead>
           <tbody>
-            <!-- 序号按当前页签的列表重排：页签一变，行号就从 1 重新开始 -->
-            <tr v-for="(account, index) in tabAccounts" :key="account.id">
-              <td class="row-index">{{ index + 1 }}</td>
+            <!-- 序号按当前页签的列表重排：页签一变，行号就从 1 重新开始；分页页签跨页续号 -->
+            <tr v-for="(account, index) in visibleAccounts" :key="account.id">
+              <td class="row-index">{{ rowNumber(index) }}</td>
               <td class="name">{{ account.name }}</td>
               <td>
                 <span class="badge" :class="account.scope === 'Public' ? 'badge-public' : ''">
@@ -654,20 +788,36 @@ onMounted(() => {
               </td>
             </tr>
           </tbody>
+          <!--
+            表尾合计行：只给**不分页**的页签（资金 / 负债）。它们全量呈现，合计天然是全量；
+            往来页签分页呈现，越过一页的合计在这里名不副实，且它记的是「谁欠谁」而不是「钱放在哪」。
+            按币种分行是硬约束（没有汇率来源，跨币种相加是凭空捏造的数字），故行数 = 该页签出现的币种数。
+            `colspan` 合计为 9：标签 4（序号~币种）+ 期初金额 1（刻意不合计）+ 余额合计 1 + 尾部 3。
+          -->
+          <tfoot v-if="hasTotals && currencyTotals.length > 0">
+            <tr v-for="total in currencyTotals" :key="total.currencyCode">
+              <td colspan="4" class="subtotal-label">
+                合计 · {{ total.currencyCode }}（{{ total.accountCount }} 个账户）
+              </td>
+              <td class="amount"></td>
+              <td class="amount subtotal-value">{{ formatAmount(total.balance) }}</td>
+              <td colspan="3"></td>
+            </tr>
+          </tfoot>
         </table>
 
         <!--
-          窄屏（<1024px）的卡片流：与上面的表格是**同一份 tabAccounts 的双呈现**，默认 display:none，
+          窄屏（<1024px）的卡片流：与上面的表格是**同一份 visibleAccounts 的双呈现**，默认 display:none，
           由文末的 1023px 媒体查询启用（同时把表格整块隐藏）。宽窄两处必须同步改。
 
           与账目明细的卡片有两处刻意不同：
-          - **不呈现序号**（沿用明细页口径：序号只是表格里的行计数，本页的序号还只是「按当前页签从
-            1 重排」的行号，摆在卡片里更像账户编号）。
+          - **不呈现序号**（沿用明细页口径：序号只是表格里的行计数，本页的序号还只是「按当前页签
+            连续重排」的行号，摆在卡片里更像账户编号）。
           - **期初金额必须呈现**：它与余额只在账户还没有任何流水时才相等，是两个独立信息，
             故卡片把余额放主位、期初降为次要标注，而不是像明细页那样「三个金额只留一个」。
         -->
         <ul class="cards">
-          <li v-for="account in tabAccounts" :key="account.id" class="card">
+          <li v-for="account in visibleAccounts" :key="account.id" class="card">
             <div class="card-head">
               <span class="card-account">
                 <span class="card-name">{{ account.name }}</span>
@@ -759,6 +909,49 @@ onMounted(() => {
             {{ showInactive ? `暂无${activeTypeLabel}` : `暂无启用的${activeTypeLabel}` }}
           </li>
         </ul>
+
+        <!--
+          窄屏的合计条：与宽屏 <tfoot> 是**同一份 currencyTotals 的双呈现**（同值同口径），
+          默认 display:none，由文末 1023px 媒体查询启用（同时表格连同它的 tfoot 整块隐藏）。
+          宽窄两处必须同步改——合计行是本次需求的一半，漏了窄屏等于手机上少了一半功能。
+        -->
+        <section v-if="hasTotals && currencyTotals.length > 0" class="totals">
+          <p class="totals-title">合计</p>
+          <div class="totals-grid">
+            <div v-for="total in currencyTotals" :key="total.currencyCode" class="total">
+              <span class="total-label">
+                {{ total.currencyCode }} · {{ total.accountCount }} 个账户
+              </span>
+              <span class="total-value">{{ formatAmount(total.balance) }}</span>
+            </div>
+          </div>
+        </section>
+
+        <!--
+          分页器：只有往来页签有它，宽窄两档**共用同一份**（翻页不是呈现方式的一部分）。
+          文案与账目明细页逐字同源；空列表时整块不渲染，免得留下「第 1 / 1 页 · 共 0 条」的噪音。
+        -->
+        <div v-if="isPagedTab && totalCount > 0" class="pager">
+          <button
+            type="button"
+            class="ghost"
+            :disabled="currentPage <= 1 || accountsStore.loading"
+            @click="go(currentPage - 1)"
+          >
+            上一页
+          </button>
+          <span class="pager-info">
+            第 {{ currentPage }} / {{ totalPages }} 页 · 共 {{ totalCount }} 条
+          </span>
+          <button
+            type="button"
+            class="ghost"
+            :disabled="currentPage >= totalPages || accountsStore.loading"
+            @click="go(currentPage + 1)"
+          >
+            下一页
+          </button>
+        </div>
       </div>
     </template>
 
@@ -1207,6 +1400,90 @@ onMounted(() => {
   opacity: 0.6;
 }
 
+/* 表尾合计行：与表头同一档底色把它与数据行分开，且比表头更重（它是本页唯一被强调的一行） */
+.table tfoot td {
+  background: var(--color-background-mute);
+  font-weight: 600;
+}
+
+.table tfoot tr:last-child td {
+  border-bottom: 0;
+}
+
+/* 合计行的标签列与明细页「本页小计」同源：压在数字左侧，不抢余额的视觉 */
+.subtotal-label {
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+/* 合计的余额与明细行的余额同色：同一列上下不得出现两种写法 */
+.subtotal-value {
+  color: var(--color-accent-strong);
+}
+
+/* 分页器：与账目明细页逐字同源（同一组令牌与盒模型），不另造一套翻页样式 */
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.pager-info {
+  font-size: 13px;
+  opacity: 0.75;
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * 窄屏合计条：**默认不呈现**（宽屏走表格的 tfoot），由文末的 1023px 媒体查询启用。
+ * display: none 在这里是断点级的双呈现手段、不是死代码——理由同 .cards。
+ * 盒模型与 .card 同源：同一套边框/圆角/底色/投影令牌，只是把「一张卡」换成「一段汇总」。
+ */
+.totals {
+  display: none;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-mute);
+  box-shadow: var(--shadow-card);
+}
+
+.totals-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+/* 币种行数不定，故纵向排列而不像明细页那样等分三列 */
+.totals-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.45rem;
+}
+
+/* 币种与账户数在左、金额在右：多币种时逐行纵向比对，比并排两列更有用 */
+.total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.total-label {
+  font-size: 12.5px;
+  opacity: 0.75;
+}
+
+.total-value {
+  flex: none;
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /*
  * 窄屏卡片流：**默认不呈现**（宽屏走表格），由文末的 1023px 媒体查询启用。
  * display: none 在这里是断点级的双呈现手段、不是死代码——理由见文件头与模板注释。
@@ -1459,6 +1736,11 @@ onMounted(() => {
 
   .cards {
     display: flex;
+  }
+
+  /* 表格（连同它的 tfoot）整块隐藏，合计改由这张条承担——两份呈现任一时刻恰有一份可见 */
+  .totals {
+    display: block;
   }
 
   /*
