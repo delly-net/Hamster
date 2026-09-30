@@ -23,6 +23,12 @@ namespace Hamster.Api.Data.Entities;
 /// <para>
 /// 本表**只增不改**，与其父 <see cref="SettlementTask"/> 同一事务写入。
 /// </para>
+/// <para>
+/// **同一笔源交易可以有多行本表记录**：事后改账会由收集的复查补收再建一条同日增量任务，
+/// 里面装着改动后的新副本，而原来那一行**保持原样**（这正是「不改写历史」）。
+/// 故「这笔交易留档了吗」的判据是「存在一行副本的 <c>updated_at</c> 等于它当前的 <c>updated_at</c>」，
+/// 而不是「本表里有它的 source_transaction_id」——后者只能说明它**曾经**被留过档。
+/// </para>
 /// </remarks>
 [SugarTable("hamster_settlement_transaction")]
 [SugarIndex("idx_hamster_settlement_transaction_task", nameof(SettlementTaskId), OrderByType.Asc)]

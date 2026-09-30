@@ -865,7 +865,7 @@ storage, cluster coordination and console.
 
 | Job | Default time | What it does |
 |---|---|---|
-| `SettlementCollectionJob` | `00:05` | Groups every not-yet-settled transaction earlier than **today 00:00** by **account set + transaction date**, creates a `hamster_settlement_task` per group, and stores the group's transactions and all their entries as snapshots |
+| `SettlementCollectionJob` | `00:05` | Groups every not-yet-settled transaction earlier than **today 00:00** by **account set + transaction date**, creates a `hamster_settlement_task` per group, and stores the group's transactions and all their entries as snapshots; then **re-checks**: transactions back-dated into or edited on days that have already passed are collected into an extra same-day **incremental** settlement task |
 | `SettlementExecutionJob` | `01:00` | Publishes a `SettlementTriggeredEvent` for every settlement task that has not been executed yet |
 
 Three tables carry the result:
@@ -892,12 +892,32 @@ bound": **the whole history is collected the first time**. A missed run needs **
 the window is "watermark to today", not "exactly one day", so the next run sweeps up every day that
 was skipped. Days with no postings create no settlement task.
 
-**Settled days are frozen and never recomputed.** If a posting is edited after its day was settled,
-the snapshot keeps the values it had at settlement time (this is what "snapshot" is for), and a
-transaction *inserted into* an already-settled day is not swept in later — retro-fitting would make
-the rule "new postings show up, old ones don't", which a user cannot reason about. The unique index on
-`(account_set_id, transaction_date)` and the existence check make re-running the collection
-idempotent: same-day re-triggers and restarts create nothing.
+**The window answers "how far have we advanced", not "is every posting of that day on file", so each
+collection also runs a second pass: the re-check.** Take "on the 29th I back-dated a posting to the
+28th": the 28th already got its task at 00:05 on the 29th and the watermark moved to the 28th, so the
+window on the 30th is `[29th, 30th)` — the back-dated posting is dated the 28th, sits outside the
+window, and would be skipped as "that day already has a task" even if it were inside. It would
+therefore **never be collected** (the same trap catches "a day that had no postings, so got no task,
+and was back-filled later"). So after the window pass, each collection re-reads *all* the account
+set's transactions and *all* its snapshots and compares `(source_transaction_id, updated_at)`:
+a transaction with no snapshot at all, or whose current `updated_at` matches none of its snapshots
+(the posting was edited after it was filed), is "not on file as it stands" — such transactions are
+grouped by local day and each day gets **one extra same-day incremental settlement task** holding
+just those transactions and entries. The catch-up is therefore immediate: a task created at 00:05 is
+dispatched at 01:00, and the subscriptions recompute that day — which is *earlier than their own
+watermark* — because the lower bound also takes the earliest not-yet-executed task date (see the
+subscription section).
+
+**The original task and the snapshots already filed are never rewritten.** An executed task (including
+its `executed_at`) stays exactly as it was — rewriting it would be tampering with the settlement
+record — and when a posting is edited after its day was settled, the old snapshot keeps the values it
+had at settlement time (which is what "snapshot" is for); the edited version is carried by a fresh
+copy inside the catch-up task, so one transaction may own several snapshot rows. The price is that
+`(account_set_id, transaction_date)` **no longer carries a unique index** (a day may hold several
+tasks), so "the file for day D" is the **union** of every task row of that day. Idempotency of
+re-running now rests on the re-check's transaction-by-transaction comparison: once a catch-up task is
+stored, those transactions have a snapshot with a matching `updated_at`, and a second run finds
+nothing (same-day re-triggers and restarts create nothing).
 
 **The transaction date is a server-local date — the one deliberately non-UTC time column in the
 project.** It is a *date*, not an instant: "was the 25th settled" means the day the user sees, and the
@@ -908,10 +928,12 @@ settlement tasks. The resolved zone is printed at startup, and rows read back fr
 **not** be shifted again.
 
 **Distributed deployment uses a designated master node, not a lock.** `HAMSTER_JOB_NODE` empty means
-single-instance and the jobs run; `master` means run; anything else means do not. The unique index is a
-**fallback, not a substitute** for this — it degrades "two masters running at once" into "one wins, the
-other logs a conflict" rather than settling a day twice, but the mutual exclusion is the configuration
-and nothing here should be described as a distributed lock.
+single-instance and the jobs run; `master` means run; anything else means do not. **Mutual exclusion
+rests on that configuration alone**: the unique index was dropped to allow several tasks per day (the
+catch-up needs it), so there is no database-level fallback left, and two masters running at once will
+each create a task for the same day. The damage is bounded and self-healing — the surplus rows are
+duplicate snapshots, while the subscriptions and the dashboard recompute from the *live* transaction
+table with overwrite-writes, so no figure is wrong — but nothing here should be described as a lock.
 
 Both switches and both times are configurable, environment variables first:
 
@@ -1046,17 +1068,28 @@ default currency group.
 the freshly computed ones, inside one transaction. A half-written day left by a crash would show the
 reader a number that is neither the new value nor the old one, and that looks entirely normal.
 
-**A member who joins later gets their history backfilled.** The watermark is per (subscription,
-account set) while rows are per user, so a newly added member has no rows at all — advancing by the
-watermark alone would start their curve only from the day they joined. The lower bound for a run is
-therefore the **earliest** of the watermark and each member's last recorded day: if any member has no
-rows at all the bound disappears and every date for that account set is recomputed (safe, because
-recomputation is an overwrite), after which the bound returns to the watermark and only new days are
-processed. The same mechanism self-heals a write that failed after the watermark advanced, or rows
-removed by hand, both of which look like "a member's coverage lags the watermark". **With no fund or
-liability accounts at all it degrades to the watermark alone** — there is no currency to record and not
-a single row can be written, so an always-empty coverage would recompute all history on every execution
-day.
+**The lower bound is the earliest of three terms: the watermark, each member's last recorded day, and
+the earliest not-yet-executed settlement task date minus one day.**
+
+*The member-coverage term — a member who joins later gets their history backfilled.* The watermark is
+per (subscription, account set) while rows are per user, so a newly added member has no rows at all —
+advancing by the watermark alone would start their curve only from the day they joined. Hence each
+member's last recorded day also takes part: if any member has no rows at all the bound disappears and
+every date for that account set is recomputed (safe, because recomputation is an overwrite), after
+which the bound returns to the watermark and only new days are processed. The same mechanism self-heals
+a write that failed after the watermark advanced, or rows removed by hand, both of which look like "a
+member's coverage lags the watermark". **With no fund or liability accounts at all it degrades to the
+watermark and the unexecuted-task term** — there is no currency to record and not a single row can be
+written, so an always-empty coverage would recompute all history on every execution day.
+
+*The unexecuted-task term — letting a caught-up day back in.* The incremental task created by the
+re-check is dated **earlier than the watermark** (it catches up the very day that was already settled),
+while the watermark only says "I have already processed that day and beyond". Without this term the day
+would be filtered out by `> lower bound`: the event is dispatched, the subscription reports success,
+and the dashboard figures do not move — the hardest kind of failure to notice. The bound takes the day
+**before** it because the pending range is half-open, so that the day itself is included; when there is
+no unexecuted task the term **does not take part** at all (it must not remove the bound, which would
+recompute the whole history on every run).
 
 **A failure means no advance, and a retry on the next execution day.** The subscriber does not swallow
 exceptions: a failure on any day makes the dispatch count as failed, so the settlement task is **not**
@@ -1213,7 +1246,12 @@ The three settlement tables are likewise all-new (`hamster_settlement_task`,
 `hamster_settlement_transaction`, `hamster_settlement_entry`), so there are **no migrations and no
 backfill** for them — nothing existing is altered. They start empty, and the first collection run
 fills them from the transaction tables. Nothing is added to `hamster_transaction` except the
-`updated_at` column handled above.
+`updated_at` column handled above. The one exception is the **dropped unique index**: the re-check
+allows several settlement tasks per day, and the unique index on
+`(account_set_id, transaction_date)` was created by an earlier version — CodeFirst creates but never
+drops, so startup runs `DROP INDEX IF EXISTS uk_hamster_settlement_task_account_set_date` (valid on
+both databases; a harmless no-op when the index is absent). It is **not a data migration** — not a
+single row is touched, it only removes a constraint that no longer holds.
 
 The two total-asset tables are all-new as well (`hamster_settlement_subscription_execution`,
 `hamster_total_asset_settlement_record`) — another "add a table, alter no column" change, so **no

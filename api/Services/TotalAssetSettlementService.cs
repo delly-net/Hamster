@@ -10,6 +10,7 @@ namespace Hamster.Api.Services;
 /// <param name="transactions">交易业务服务：账户余额的**唯一**来源（<c>SumSignedAmountsAsync</c>）。</param>
 /// <param name="accountSets">账套服务：取账套成员列表（记录按用户分行，成员口径即此）。</param>
 /// <param name="executions">订阅执行水位。</param>
+/// <param name="settlements">结算服务：取「最早的未执行结算任务日期」，用于给下界让出被补收的那一天。</param>
 /// <param name="logger">日志记录器。</param>
 /// <remarks>
 /// **金额一律取自 <see cref="ITransactionService.SumSignedAmountsAsync"/>，本服务不自己查明细**：
@@ -27,6 +28,7 @@ public sealed class TotalAssetSettlementService(
     ITransactionService transactions,
     IAccountSetService accountSets,
     ISettlementSubscriptionExecutionService executions,
+    ISettlementService settlements,
     ILogger<TotalAssetSettlementService> logger) : ITotalAssetSettlementService
 {
     /// <summary>
@@ -57,7 +59,9 @@ public sealed class TotalAssetSettlementService(
 
         // 排序放在 C# 侧：Sqlite 把日期存成文本，「按文本排」与「按日期排」是否等价依赖存储格式，
         // 而这一处的顺序直接决定水位推进的顺序，不把它交给数据库（同 SettlementService.LoadWatermarksAsync）
-        var orderedDays = settledDays.OrderBy(day => day).ToList();
+        // **去重**：同一天现在可以有多条结算任务（复查补收会为补记到已结算日期的交易再建一条增量任务），
+        // 不去重会让这一天被重算两遍——幂等但白做，日志里的「重算 N 天」也会虚高。
+        var orderedDays = settledDays.Distinct().OrderBy(day => day).ToList();
 
         var moneyAccounts = await LoadMoneyAccountsAsync(accountSetId, cancellationToken);
         var memberIds = await LoadMemberIdsAsync(accountSetId, cancellationToken);
@@ -182,10 +186,11 @@ public sealed class TotalAssetSettlementService(
     }
 
     /// <summary>
-    /// 算出本次执行的**起始下界**（水位与「成员各自的记录覆盖度」中更早的那个）。
+    /// 算出本次执行的**起始下界**：水位、「每个成员已有记录的最后一天」、
+    /// 「最早的未执行结算任务日期减一天」三者中的**最早者**。
     /// </summary>
     /// <param name="accountSetId">账套主键。</param>
-    /// <param name="moneyAccounts">该账套的钱账户（为空时直接按水位走，见 remarks）。</param>
+    /// <param name="moneyAccounts">该账套的钱账户（为空时直接按水位与未执行任务走，见 remarks）。</param>
     /// <param name="memberIds">该账套的成员主键。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>下界日期；<c>null</c> 表示**无下界**（全部结算日期都要处理）。</returns>
@@ -197,11 +202,18 @@ public sealed class TotalAssetSettlementService(
     /// 某个成员一行都没有时下界直接消失（该账套的全部日期重算一遍），
     /// 这次重算会把每个成员在每一天的行都补齐，之后下界重新回到水位、只做增量。
     /// <para>
+    /// **第三项「最早的未执行结算任务日期减一天」是必须的**：复查补收建出的增量任务，其日期往往
+    /// **早于水位**（补的正是已经结算过的那一天），而水位只会说「我已经算到那一天之后了」——
+    /// 少了这一项，被补收的那一天会被「> 下界」这个条件挡在外面：事件照常派发、订阅照常成功、
+    /// 首页数字却一动不动，是最难发现的那种失败。
+    /// 减一天是因为待处理区间是**开区间**（<c>day &gt; 下界</c>），要让它自己被算进来。
+    /// </para>
+    /// <para>
     /// **同一个机制顺带自愈**：某一日写库失败而水位已推进（理论上不会发生，见 RunAsync 的注释）、
     /// 或记录表被人工清理过，都会表现为「成员覆盖度落后于水位」，下次执行自动补齐。
     /// </para>
     /// <para>
-    /// **钱账户为空时退化为只看水位**：此时没有任何币种可记，一行都写不出来，
+    /// **钱账户为空时退化为水位与未执行任务两者取早**：此时没有任何币种可记，一行都写不出来，
     /// 若仍沿用成员覆盖度，那个「永远为空」的覆盖度会让每个执行日都把历史重算一遍。
     /// </para>
     /// </remarks>
@@ -216,9 +228,24 @@ public sealed class TotalAssetSettlementService(
             accountSetId,
             cancellationToken);
 
+        var floor = watermark;
+
+        // 「最早的未执行结算任务」本身可能不存在（常态：没有待执行的任务）——此时这一项**不参与**比较，
+        // 而**不是**把下界变成「无下界」（那会让每次执行都把全部历史重算一遍）。
+        // 待处理区间是开区间（day > 下界），故要让那一天自己被算进来，下界取它的前一天。
+        var unexecutedDay = await settlements.FindEarliestUnexecutedDateAsync(accountSetId, cancellationToken);
+        if (unexecutedDay is { } pendingDay)
+        {
+            var candidate = pendingDay.AddDays(-1);
+            if (floor is null || candidate < floor.Value)
+            {
+                floor = candidate;
+            }
+        }
+
         if (moneyAccounts.Count == 0 || memberIds.Count == 0)
         {
-            return watermark;
+            return floor;
         }
 
         var stored = await db.Queryable<TotalAssetSettlementRecord>()
@@ -236,7 +263,6 @@ public sealed class TotalAssetSettlementService(
             }
         }
 
-        var floor = watermark;
         foreach (var memberId in memberIds)
         {
             if (!lastDayByUser.TryGetValue(memberId, out var lastDay))

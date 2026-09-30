@@ -18,6 +18,18 @@ public static class DatabaseInitializer
     /// <summary>交易表表名（与 <see cref="Transaction"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
     private const string TRANSACTION_TABLE = "hamster_transaction";
 
+    /// <summary>结算任务表表名（与 <see cref="SettlementTask"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
+    private const string SETTLEMENT_TASK_TABLE = "hamster_settlement_task";
+
+    /// <summary>
+    /// 结算任务表上「一天至多一条」那条历史唯一索引的名字。
+    /// </summary>
+    /// <remarks>
+    /// 名字写死在这里而不是从实体标注读：实体上那条索引**已经改名去唯一**（见 <see cref="SettlementTask"/>），
+    /// 这个名字只剩「把旧库上的遗留物摘掉」一个用途，读实体只会读到新名字。
+    /// </remarks>
+    private const string LEGACY_SETTLEMENT_TASK_UNIQUE_INDEX = "uk_hamster_settlement_task_account_set_date";
+
     /// <summary>
     /// 全部实体，供**逐表**建表使用；顺序沿用「先账号体系、再账套账目、后交易、最后标签、结算与结算订阅」。
     /// </summary>
@@ -109,6 +121,11 @@ public static class DatabaseInitializer
                 string.Join("、", TABLE_TYPES.Select(type => ResolveTableName(db, type))));
         }
 
+        // 摘掉结算任务表上的历史唯一索引（**必须先于任何写入**，故紧跟在建表之后）：
+        // 该索引由更早的版本以「一天至多一条结算任务」为前提建出，而复查补收现在要为
+        // 补记到已结算日期的交易再建一条同日增量任务，唯一索引会把第二条任务直接拒掉。
+        RunStep(logger, failures, $"撤销 {SETTLEMENT_TASK_TABLE} 的历史唯一索引", () => DropLegacySettlementTaskUniqueIndex(db, logger));
+
         // 播种**必须先于账户币种回填**：回填要用默认币种代码，而默认币种正是播种时标出来的。
         // 顺序依赖只存在于这两步之间，故它们相邻；其余回填彼此无关。
         RunStep(logger, failures, "币种播种", () =>
@@ -180,6 +197,37 @@ public static class DatabaseInitializer
             failures.Add(stepName);
             logger.LogError(ex, "数据库初始化步骤失败：{Step}（本步失败不影响其余步骤）", stepName);
         }
+    }
+
+    /// <summary>
+    /// 把结算任务表上「一天至多一条」那条历史唯一索引摘掉（历史库的升级路径）。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="logger">日志记录器。</param>
+    /// <remarks>
+    /// **为什么必须在建表之后、且必须显式执行一条 DDL**：CodeFirst 只负责「把实体上标注的东西建出来」，
+    /// 它**不会删除**实体上已经不存在的对象——旧版本建出的唯一索引会一直留在库里。
+    /// 而复查补收要为「事后补记到已结算日期」的交易再建一条同日增量任务，
+    /// 那条唯一索引会把第二条任务直接拒掉；更糟的是拒绝发生在
+    /// <c>UseTranAsync</c> 里面（异常默认被吞），表现为「补收静默无效」。
+    /// <para>
+    /// **<c>DROP INDEX IF EXISTS</c> 在 Sqlite 与 PostgreSQL 上都成立**，故不必按库型分支。
+    /// 索引不存在（全新库、或已经升级过的库）时它是无害的空操作，因此无条件执行、
+    /// 也不去查目录表判断存在性——那会让「查得到才删」成为新的失败点。
+    /// </para>
+    /// <para>
+    /// 日志只在**确实删掉了**索引时提示，而是否删掉由日志本身无从判断，故这句话写成陈述现状，
+    /// 不写成「已撤销」以免在全新库上说一句不实的话。
+    /// </para>
+    /// </remarks>
+    private static void DropLegacySettlementTaskUniqueIndex(ISqlSugarClient db, ILogger logger)
+    {
+        db.Ado.ExecuteCommand($"DROP INDEX IF EXISTS {LEGACY_SETTLEMENT_TASK_UNIQUE_INDEX}");
+
+        logger.LogInformation(
+            "结算任务表 {Table} 现已无 (account_set_id, transaction_date) 唯一索引：同日可以有多条结算任务" +
+            "（复查补收会为事后补记/改动的交易再建一条同日增量任务，原任务不动）",
+            SETTLEMENT_TASK_TABLE);
     }
 
     /// <summary>

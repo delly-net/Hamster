@@ -11,9 +11,15 @@ namespace Hamster.Api.Data.Entities;
 /// 本表是**结算的事实**：一条记录代表「某个账套的某一天，已经被结算过一次」。
 /// 它只增不改（<see cref="ExecutedAt"/> 是唯一的例外），删除它等于抹掉一次结算记录。
 /// <para>
-/// **按账套隔离**：交易归属账套，故结算也归属账套。唯一索引是复合的
+/// **按账套隔离**：交易归属账套，故结算也归属账套。索引是复合的
 /// <c>(account_set_id, transaction_date)</c> 而不是 <c>transaction_date</c> 单列——
-/// 单列唯一会让两个账套的同一天互相顶掉。
+/// 单列会忽略账套这一层。
+/// </para>
+/// <para>
+/// **同一天可以有多条（<c>(account_set_id, transaction_date)</c> 刻意不是唯一索引）**：
+/// 收集里的**复查补收**会把「事后补记到已结算日期」的交易单独建成一条**增量任务**，
+/// 原任务整条不动（它已经执行过，改写它就等于篡改历史结算记录）。
+/// 因此「某天的留档」= 该天全部任务行的**并集**，逐条读代码时不要再假设一天只有一条。
 /// </para>
 /// <para>
 /// **粒度是「天」，不设更细的时间字段**：交易日期的口径由收集窗口固定为整天
@@ -22,12 +28,11 @@ namespace Hamster.Api.Data.Entities;
 /// </remarks>
 [SugarTable("hamster_settlement_task")]
 [SugarIndex(
-    "uk_hamster_settlement_task_account_set_date",
+    "idx_hamster_settlement_task_account_set_date",
     nameof(AccountSetId),
     OrderByType.Asc,
     nameof(TransactionDate),
-    OrderByType.Asc,
-    true)]
+    OrderByType.Asc)]
 [SugarIndex("idx_hamster_settlement_task_account_set", nameof(AccountSetId), OrderByType.Asc)]
 [SugarIndex("idx_hamster_settlement_task_pending", nameof(ExecutedAt), OrderByType.Asc)]
 public sealed class SettlementTask
@@ -57,7 +62,7 @@ public sealed class SettlementTask
     /// 容易写漏的换算。</item>
     /// <item>它不参与任何与 UTC 时刻的比较——收集窗口的边界在 <c>SettlementService</c> 里
     /// 由本地 0 点转成 UTC 后再与 <see cref="Transaction.OccurredAt"/> 比对，
-    /// 本列只用于**分组、去重与水位**，三者都在本地日期语义下进行。</item>
+    /// 本列只用于**分组、按日取任务与水位**，三者都在本地日期语义下进行。</item>
     /// </list>
     /// <para>
     /// 读到本列时 <c>Kind</c> 为 <c>Unspecified</c>（两种库都不保存 Kind），

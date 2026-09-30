@@ -10,6 +10,7 @@ namespace Hamster.Api.Services;
 /// <param name="transactions">交易业务服务：当日收入发生额的**唯一**来源。</param>
 /// <param name="accountSets">账套服务：取账套成员列表。</param>
 /// <param name="executions">订阅执行水位。</param>
+/// <param name="settlements">结算服务：取「最早的未执行结算任务日期」，用于给下界让出被补收的那一天。</param>
 /// <param name="logger">日志记录器。</param>
 /// <remarks>
 /// 本类**只写与「收入」这张表有关的那几笔查询**（读覆盖度、删某日、插某日、读某月），
@@ -20,8 +21,9 @@ public sealed class IncomeSettlementService(
     ITransactionService transactions,
     IAccountSetService accountSets,
     ISettlementSubscriptionExecutionService executions,
+    ISettlementService settlements,
     ILogger<IncomeSettlementService> logger)
-    : DailyFlowSettlementServiceBase(db, transactions, accountSets, executions, logger), IIncomeSettlementService
+    : DailyFlowSettlementServiceBase(db, transactions, accountSets, executions, settlements, logger), IIncomeSettlementService
 {
     /// <inheritdoc />
     protected override string SubscriptionCode => IIncomeSettlementService.SUBSCRIPTION_CODE;

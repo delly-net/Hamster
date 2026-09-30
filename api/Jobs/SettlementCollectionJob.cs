@@ -1,11 +1,13 @@
 using Hamster.Api.Config;
+using Hamster.Api.Data.Entities;
 using Hamster.Api.Services;
 
 namespace Hamster.Api.Jobs;
 
 /// <summary>
 /// 交易统计定时任务：每天 <c>00:05</c>（可配置）把上一个执行日至今的交易按「账套 + 交易日期」
-/// 分组，建立结算任务并冗余存储其全部交易与明细。
+/// 分组，建立结算任务并冗余存储其全部交易与明细；同一次还会**复查补收**——
+/// 把事后补记/改动到已过去那些日子的交易，补建同日的增量结算任务。
 /// </summary>
 /// <remarks>
 /// 任务描述：「在每天的 0 点 5 分触发，判断并收集上一个执行日期 0 点 0 分（第一次执行不限初始时间）
@@ -53,18 +55,45 @@ public sealed class SettlementCollectionJob(
         if (result.IsEmpty)
         {
             logger.LogInformation(
-                "交易统计：窗口内没有待收集的交易（已收集到水位处，或这几天本就没有账），未新建结算任务");
+                "交易统计：窗口内没有待收集的交易、也没有需要补收的（已收集到水位处，或这几天本就没有账），未新建结算任务");
             return;
         }
 
         logger.LogInformation(
-            "交易统计：新建 {TaskCount} 个结算任务（{Tasks}），冗余存储 {TransactionCount} 笔交易、{EntryCount} 条明细",
-            result.CreatedTasks.Count,
-            string.Join(
-                "、",
-                result.CreatedTasks.Select(task =>
-                    $"账套 {task.AccountSetId} {task.TransactionDate:yyyy-MM-dd}")),
+            "交易统计：新建 {TaskCount} 个结算任务，冗余存储 {TransactionCount} 笔交易、{EntryCount} 条明细",
+            result.CreatedTasks.Count + result.RecheckTasks.Count,
             result.TransactionCount,
             result.EntryCount);
+
+        if (result.CreatedTasks.Count > 0)
+        {
+            logger.LogInformation(
+                "交易统计：窗口内新建 {TaskCount} 个结算任务（{Tasks}）",
+                result.CreatedTasks.Count,
+                Describe(result.CreatedTasks));
+        }
+
+        // 补收单独报一条：它代表「已结算过的日期又被补记/改动」，是值得一眼看见的事，
+        // 与「窗口正常往前推进」不是同一类信息（见 ISettlementService.CollectAsync）。
+        if (result.RecheckTasks.Count > 0)
+        {
+            logger.LogInformation(
+                "交易统计：复查补收新建 {TaskCount} 个同日增量结算任务（{Tasks}），" +
+                "这些日期早已结算过、原任务不动，本次只为补记/改动的交易补建任务并触发该日重算",
+                result.RecheckTasks.Count,
+                Describe(result.RecheckTasks));
+        }
     }
+
+    /// <summary>
+    /// 把一批结算任务渲染成「账套 X yyyy-MM-dd」的日志片段。
+    /// </summary>
+    /// <param name="tasks">结算任务列表。</param>
+    /// <returns>顿号分隔的任务描述。</returns>
+    /// <remarks>
+    /// 只写账套与日期、**不写任务主键**：补收的任务日期与已有任务重合，光看日期无法区分两者，
+    /// 但「这一天的账被补收了」这个事实本身才是日志要传达的东西，主键要查随时能查。
+    /// </remarks>
+    private static string Describe(IEnumerable<SettlementTask> tasks) =>
+        string.Join("、", tasks.Select(task => $"账套 {task.AccountSetId} {task.TransactionDate:yyyy-MM-dd}"));
 }
