@@ -238,6 +238,186 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         ];
     }
 
+    /// <inheritdoc />
+    public async Task<EntryCategoryTotals> ListCategoryTotalsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        CancellationToken cancellationToken = default)
+    {
+        // 可见账户先按账户服务取回，再收窄出「本币种 + 公共 / 本人个人 + 钱账户」这一组。
+        // 管理员在这里**不**沿用「可见即统计」：首页的按天记录按用户分行，分类占比必须与它同一口径，
+        // 否则管理员看到的饼图里会混进其他成员的个人支出。
+        var visible = await accounts.ListByAccountSetAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            includeInactive: true,
+            cancellationToken);
+
+        var targetIds = visible
+            .Where(item => item.Account.Type.IsMoneyAccount())
+            .Where(item => string.Equals(
+                item.Account.CurrencyCode, currencyCode, StringComparison.OrdinalIgnoreCase))
+            .Where(item => item.Account.Scope == AccountScope.Public
+                || (item.Account.Scope == AccountScope.Personal && item.Account.OwnerUserId == userId))
+            .Select(item => item.Account.Id)
+            .Distinct()
+            .ToArray();
+
+        if (targetIds.Length == 0)
+        {
+            return new EntryCategoryTotals([], []);
+        }
+
+        var flowTypes = new[] { TransactionType.Income, TransactionType.Expense };
+
+        // SQL 侧向两侧各放宽一秒做预筛，精确边界判定留在下面（理由见 LocalDay.PrefilterMargin）。
+        // 上界是半开区间：次月 1 日 0 点属于下个月。
+        var prefilterFloor = fromUtc - LocalDay.PrefilterMargin;
+        var prefilterCeiling = toUtc + LocalDay.PrefilterMargin;
+
+        // 分组投影带上 direction：收入与支出的「主账户明细」方向不同（借 / 贷），
+        // 而 SQL 里写「按类型取不同方向」的 OR 条件对 SqlSugar 的翻译不友好；
+        // 先把 (类型, 方向, 分类) 都聚合出来，再在内存里按 PrimaryDirection 留下主账户那一组。
+        // 这不会把行数放大：方向只有两个取值，分组数至多是「两类 × 两向 × 分类数」。
+        var aggregates = await BuildFlowQuery(
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+            .GroupBy((entry, tx) => new { tx.Type, entry.Direction, tx.CategoryId })
+            .Select((entry, tx) => new CategoryAggregateRow
+            {
+                Type = tx.Type,
+                Direction = entry.Direction,
+                CategoryId = tx.CategoryId,
+                Total = SqlFunc.AggregateSum(entry.Amount),
+            })
+            .ToListAsync(cancellationToken);
+
+        // 预筛多取回的两段窗（各一秒宽）：下界之前、上界及之后。SQL 的日期比较不依赖
+        // 文本小数位（见 LocalDay.PrefilterMargin），这里再用真正的 DateTime 判一次，
+        // 只把确实落在区间外的行减掉。
+        var boundaryRows = await BuildFlowQuery(
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+            .Where((entry, tx) =>
+                (tx.OccurredAt >= prefilterFloor && tx.OccurredAt < fromUtc) ||
+                (tx.OccurredAt >= toUtc && tx.OccurredAt < prefilterCeiling))
+            .Select((entry, tx) => new CategoryBoundaryRow
+            {
+                Type = tx.Type,
+                Direction = entry.Direction,
+                CategoryId = tx.CategoryId,
+                Amount = entry.Amount,
+                OccurredAt = tx.OccurredAt,
+            })
+            .ToListAsync(cancellationToken);
+
+        var totals = new Dictionary<(TransactionType Type, int? CategoryId), decimal>();
+        foreach (var row in aggregates)
+        {
+            if (row.Type.PrimaryDirection() != row.Direction)
+            {
+                continue;
+            }
+
+            totals[(row.Type, row.CategoryId)] = row.Total;
+        }
+
+        foreach (var row in boundaryRows)
+        {
+            if (row.Type.PrimaryDirection() != row.Direction)
+            {
+                continue;
+            }
+
+            // 理论上这两段窗都在区间外；此处再判一次是因为 SQLite 的日期是文本，
+            // 预筛窗口本身也可能把恰好落在边界上的行多取回来。
+            if (row.OccurredAt >= fromUtc && row.OccurredAt < toUtc)
+            {
+                continue;
+            }
+
+            var key = (row.Type, row.CategoryId);
+            totals[key] = totals.GetValueOrDefault(key) - row.Amount;
+        }
+
+        var categoryIds = totals
+            .Where(pair => pair.Key.CategoryId.HasValue && pair.Value != 0)
+            .Select(pair => pair.Key.CategoryId!.Value)
+            .Distinct()
+            .ToArray();
+        var categoryNames = await ResolveCategoryNamesAsync(categoryIds, cancellationToken);
+
+        // 分类行缺失（正常不会发生：分类只软删除）时并入「未分类」，
+        // 与 QueryAsync 只下发「主键与名称同生同灭」的分类保持同一呈现口径。
+        var resolved = new Dictionary<(TransactionType Type, int? CategoryId), decimal>();
+        foreach (var (key, amount) in totals)
+        {
+            if (amount == 0)
+            {
+                continue;
+            }
+
+            var categoryId = key.CategoryId is { } id && categoryNames.ContainsKey(id) ? id : (int?)null;
+            var resolvedKey = (key.Type, categoryId);
+            resolved[resolvedKey] = resolved.GetValueOrDefault(resolvedKey) + amount;
+        }
+
+        return new EntryCategoryTotals(
+            ToCategoryTotals(TransactionType.Income, resolved, categoryNames),
+            ToCategoryTotals(TransactionType.Expense, resolved, categoryNames));
+    }
+
+    /// <summary>
+    /// 构造「收入 / 支出分类合计」的基础查询：联表 + 账套 / 账户过滤 + 类型与时间窗。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="targetIds">目标账户主键（已收窄为本币种、公共 / 本人个人、钱账户）。</param>
+    /// <param name="floor">预筛下界（含）。</param>
+    /// <param name="ceiling">预筛上界（不含）。</param>
+    /// <param name="types">要统计的交易类型（调用方固定为收入 + 支出）。</param>
+    /// <returns>每次调用**新建**的查询对象。</returns>
+    /// <remarks>
+    /// 与 <see cref="BuildBaseQuery"/> 分开：那条查询还带标签、账户多选与可空的上下界，
+    /// 本查询的四个条件都是固定的，混用会把两种形状的差异藏进可选参数里。
+    /// </remarks>
+    private ISugarQueryable<TransactionEntry, Transaction> BuildFlowQuery(
+        int accountSetId,
+        int[] targetIds,
+        DateTime floor,
+        DateTime ceiling,
+        TransactionType[] types) =>
+        db.Queryable<TransactionEntry>()
+            .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
+            .Where((entry, tx) => tx.AccountSetId == accountSetId && targetIds.Contains(entry.AccountId))
+            .Where((entry, tx) => types.Contains(tx.Type))
+            .Where((entry, tx) => tx.OccurredAt >= floor && tx.OccurredAt < ceiling);
+
+    /// <summary>把内存里的分类合计整理成某一方向的对外列表。</summary>
+    /// <param name="type">收入或支出。</param>
+    /// <param name="totals">(类型, 分类) → 金额；分类已解析过、未分类为 <c>null</c>。</param>
+    /// <param name="categoryNames">分类主键 → 名称（含已停用分类）。</param>
+    /// <returns>按金额降序排列的分类合计。</returns>
+    /// <remarks>
+    /// 金额相同时按分类主键升序；未分类没有主键，在**同额**时排最后。
+    /// 不把未分类强制排到末尾：如果它确实是金额最大的一类，排第一才是如实呈现。
+    /// </remarks>
+    private static EntryCategoryTotal[] ToCategoryTotals(
+        TransactionType type,
+        IReadOnlyDictionary<(TransactionType Type, int? CategoryId), decimal> totals,
+        IReadOnlyDictionary<int, string> categoryNames) =>
+        [.. totals
+            .Where(pair => pair.Key.Type == type)
+            .Select(pair => new EntryCategoryTotal(
+                pair.Key.CategoryId,
+                pair.Key.CategoryId is { } id ? categoryNames.GetValueOrDefault(id) : null,
+                pair.Value))
+            .OrderByDescending(item => item.Amount)
+            .ThenBy(item => item.CategoryId.HasValue ? 0 : 1)
+            .ThenBy(item => item.CategoryId)];
+
     /// <summary>
     /// 取本次请求的可见账户，并拆出**钱账户**主键集。
     /// </summary>
@@ -495,13 +675,32 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             .Distinct()
             .ToArray();
 
-        if (categoryIds.Length == 0)
+        return await ResolveCategoryNamesAsync(categoryIds, cancellationToken);
+    }
+
+    /// <summary>
+    /// 批量取给定分类主键的名称。
+    /// </summary>
+    /// <param name="categoryIds">分类主键集合；空集合时不查库。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>分类主键到名称的映射；查不到的主键不出现在映射里。</returns>
+    /// <remarks>
+    /// 与按明细行取名的重载共用这一段：明细页按「本页出现的分类」取，分类占比按「聚合出的分类」取，
+    /// 两者只是**主键的来源**不同，查询与「含停用分类」的口径必须逐字一致。
+    /// </remarks>
+    private async Task<IReadOnlyDictionary<int, string>> ResolveCategoryNamesAsync(
+        IReadOnlyCollection<int> categoryIds,
+        CancellationToken cancellationToken)
+    {
+        if (categoryIds.Count == 0)
         {
             return new Dictionary<int, string>();
         }
 
+        var ids = categoryIds as int[] ?? [.. categoryIds];
+
         var categories = await db.Queryable<Category>()
-            .Where(category => categoryIds.Contains(category.Id))
+            .Where(category => ids.Contains(category.Id))
             .Select(category => new CategoryName { Id = category.Id, Name = category.Name })
             .ToListAsync(cancellationToken);
 
@@ -515,7 +714,8 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>交易主键到其标签列表的映射；不带标签的交易**不出现在映射里**（调用方按空列表处理）。</returns>
     /// <remarks>
-    /// 与 <see cref="ResolveCategoryNamesAsync"/> 同一取舍：**查名称而不是随投影联表带出**——
+    /// 与 <see cref="ResolveCategoryNamesAsync(IReadOnlyList{EntryRow}, CancellationToken)"/> 同一取舍：
+    /// **查名称而不是随投影联表带出**——
     /// 给 <see cref="BuildBaseQuery"/> 再挂一张表会让它变成三表联查，且标签是多值的，
     /// 联表会像标签筛选那样把行数乘开。一次 <c>IN</c> 查询批量取回，代价与页大小同阶。
     /// <para>
@@ -632,6 +832,47 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>该摘要被用过的**笔数**（不是明细行数）。</summary>
         public int UsageCount { get; set; }
+    }
+
+    /// <summary>
+    /// 分类合计的分组投影结果。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="EntryRow"/> 同为**可写属性的类**而非位置记录：SqlSugar 的 <c>Select</c>
+    /// 靠属性赋值而非构造参数映射。
+    /// </remarks>
+    private sealed class CategoryAggregateRow
+    {
+        /// <summary>交易类型。</summary>
+        public TransactionType Type { get; set; }
+
+        /// <summary>借贷方向；只保留与类型主方向一致的那一组。</summary>
+        public EntryDirection Direction { get; set; }
+
+        /// <summary>分类主键；未分类时为 <c>null</c>。</summary>
+        public int? CategoryId { get; set; }
+
+        /// <summary>该分组的发生额合计。</summary>
+        public decimal Total { get; set; }
+    }
+
+    /// <summary>边界修正查询的投影结果（预筛多取回的行）。</summary>
+    private sealed class CategoryBoundaryRow
+    {
+        /// <summary>交易类型。</summary>
+        public TransactionType Type { get; set; }
+
+        /// <summary>借贷方向。</summary>
+        public EntryDirection Direction { get; set; }
+
+        /// <summary>分类主键；未分类时为 <c>null</c>。</summary>
+        public int? CategoryId { get; set; }
+
+        /// <summary>明细金额（恒正）。</summary>
+        public decimal Amount { get; set; }
+
+        /// <summary>业务发生时间（UTC），用于精确判定是否真的落在区间外。</summary>
+        public DateTime OccurredAt { get; set; }
     }
 
     /// <summary>同笔交易的兄弟明细（用于定位对手方）。</summary>

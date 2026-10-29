@@ -77,6 +77,21 @@
   --color-transfer-soft: rgba(43, 108, 176, 0.12);
   --color-transfer-strong: #235a94;
 
+  /* 图表分类色板：只表达「这是哪一类」，不表达大小、正负或状态。
+     八色的**顺序**就是色觉安全的分配顺序（经 dataviz 色板校验：相邻对 CVD ΔE ≥ 8），
+     故**不得重排**；超过八类时由前端折叠成「其他」，**不得循环复用**。
+     亮/暗两套各自选值（暗色不是亮色的自动翻转）；--color-chart-neutral 专供「未分类」
+     这一没有身份含义的项，不参与分类色的顺序分配。 */
+  --color-chart-1: #2a78d6;
+  --color-chart-2: #eb6834;
+  --color-chart-3: #1baf7a;
+  --color-chart-4: #eda100;
+  --color-chart-5: #e87ba4;
+  --color-chart-6: #008300;
+  --color-chart-7: #6250d6;
+  --color-chart-8: #e34948;
+  --color-chart-neutral: #898781;
+
   /* 视觉强化令牌：渐变页底、圆角与柔和阴影 */
   --gradient-page: linear-gradient(160deg, #fffbf4 0%, #fdeedc 55%, #fbe3c8 100%);
   --radius-card: 18px;
@@ -122,6 +137,18 @@
     --color-transfer: #6fa8ff;
     --color-transfer-soft: rgba(111, 168, 255, 0.16);
     --color-transfer-strong: #9cc4ff;
+
+    /* 分类色板按暗色表面重新选值（同一批色相、为深色底重新取步），不是亮色值的机械翻转。
+       --color-chart-neutral 在两种模式下是同一个灰：它对两套表面都过 3:1。 */
+    --color-chart-1: #3987e5;
+    --color-chart-2: #d95926;
+    --color-chart-3: #199e70;
+    --color-chart-4: #c98500;
+    --color-chart-5: #d55181;
+    --color-chart-6: #008300;
+    --color-chart-7: #9085e9;
+    --color-chart-8: #e66767;
+    --color-chart-neutral: #898781;
 
     /* 渐变页底必须在此重新声明，否则暗色下会残留亮色奶油渐变 */
     --gradient-page: linear-gradient(160deg, #241b15 0%, #2a1f17 55%, #33251a 100%);

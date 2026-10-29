@@ -53,6 +53,17 @@ export const CHART_TOKENS = [
   '--color-border',
   '--color-border-hover',
   '--color-background-soft',
+  // 分类色板：分类占比饼图的扇区身份色。顺序即 dataviz 校验过的分配顺序，
+  // 页面只按名字取用（见 `categoryPie.ts`），不在这里重排或增删。
+  '--color-chart-1',
+  '--color-chart-2',
+  '--color-chart-3',
+  '--color-chart-4',
+  '--color-chart-5',
+  '--color-chart-6',
+  '--color-chart-7',
+  '--color-chart-8',
+  '--color-chart-neutral',
 ] as const
 
 /** 令牌名（形如 `--color-accent`）。 */

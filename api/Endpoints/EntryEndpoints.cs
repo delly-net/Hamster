@@ -45,6 +45,9 @@ public sealed class EntryEndpoints : IEndpoint
     /// <summary>排序方向：倒序。首页「最近交易」面板用它取最新的若干条。</summary>
     private const string ORDER_DESC = "desc";
 
+    /// <summary><c>month</c> 查询参数的格式：<c>YYYY-MM</c>。</summary>
+    private const string MONTH_FORMAT = "yyyy-MM";
+
     /// <summary>时间参数格式错误时的字段错误。</summary>
     private static readonly string[] TIME_ERROR =
         ["时间格式不正确，应为 ISO 8601 时间（如 2026-09-01T00:00:00Z）"];
@@ -278,6 +281,113 @@ public sealed class EntryEndpoints : IEndpoint
                 "返回项的 `summary` **原样给出用户当初敲下的写法**：不做大小写折叠、也不把去空白后相同的两条合并——" +
                 "摘要是自由文本而不是字典项，合并两条写法等于替用户改了账。" +
                 "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401。");
+
+        group.MapGet("/category-totals", async (
+                string? month,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                ICurrencyService currencies,
+                IEntryQueryService entries,
+                ILogger<EntryEndpoints> logger,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                if (!TryResolveMonth(month, out var monthStart))
+                {
+                    return Results.BadRequest(new { message = $"月份格式不正确，应为 {MONTH_FORMAT}" });
+                }
+
+                var monthLabel = monthStart.ToString(MONTH_FORMAT, CultureInfo.InvariantCulture);
+
+                // 与首页两张走势图同一条取舍：没有可用币种时返回空结果而不是 404，
+                // 前端把「没有币种可看」与「这个月没有发生额」都呈现成空态。
+                var currency = await currencies.GetDefaultAsync(cancellationToken);
+                if (currency is null)
+                {
+                    return Results.Ok(new EntryCategoryTotalsResponse(null, monthLabel, [], []));
+                }
+
+                // 月份是**服务器本地**的自然月：交易日期的分组口径跟着部署所在地走。
+                // 换算成 UTC 后交给查询服务；上界取次月 1 日 0 点（不含）。
+                var timeZone = LocalDay.ResolveTimeZone(logger);
+                var fromUtc = LocalDay.StartToUtc(monthStart, timeZone);
+                var toUtc = LocalDay.StartToUtc(monthStart.AddMonths(1), timeZone);
+
+                var result = await entries.ListCategoryTotalsAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    currency.Code,
+                    fromUtc,
+                    toUtc,
+                    cancellationToken);
+
+                return Results.Ok(EntryCategoryTotalsResponse.From(currency.Code, monthLabel, result));
+            })
+            .WithName("ListEntryCategoryTotals")
+            .WithSummary("收支分类合计")
+            .WithDescription(
+                "返回当前账套、**系统默认币种**下某个自然月内收入与支出**按分类的合计**，" +
+                "供首页的「收入构成 / 支出构成」百分比饼图使用。" +
+                "**只统计收入与支出两类交易**（各取主账户方向那一条明细：收入取借方、支出取贷方）：" +
+                "转账是账户之间的搬运、没有单侧发生额，期初余额也不是本月发生额，" +
+                "两者进入分类占比都会让「这个月的钱花在哪」失真。" +
+                "**账户范围是公共账户 + 当前用户本人的个人账户**的资金 / 负债账户；" +
+                "即使调用者是管理员也**不包含其他成员的个人账户**——首页的按天记录按用户分行，" +
+                "分类占比必须与它同一口径。" +
+                "金额恒为正、按分类分组；`categoryId` / `categoryName` **均为 null 表示未分类**，" +
+                "那是合法归集结果而不是数据缺失，照常出现在列表里。" +
+                "分类名由后端下发且**含已停用分类**（停用是「不再供新记账选择」，不是「历史上从未用过」）。" +
+                "排序为**金额降序**，金额相同时按分类主键升序（未分类在同额时排最后）。" +
+                "`month` 省略时取**服务器本地的当月**，格式为 `YYYY-MM`，非法取值返回 400；" +
+                "月份边界按服务器本地时区换算为 UTC，区间为 **[当月 1 日 0 点, 次月 1 日 0 点)**。" +
+                "没有可用币种时返回 `currencyCode = null` 与两个空数组，而不是 404。" +
+                "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
+    }
+
+    /// <summary>
+    /// 解析 <c>month</c> 查询参数；省略时取服务器本地的当月。
+    /// </summary>
+    /// <param name="month">查询参数原值（<c>YYYY-MM</c>，可为 <c>null</c>）。</param>
+    /// <param name="monthStart">解析结果：该月 1 日的本地日期（时刻部分为 00:00:00）。</param>
+    /// <returns>解析（或回落）成功返回 <c>true</c>；格式不合法返回 <c>false</c>。</returns>
+    /// <remarks>
+    /// 与 <c>TotalAssetEndpoints</c> / <c>IncomeExpenseEndpoints</c> 的同名方法逐字相同
+    /// （含「用 <c>TryParseExact</c> 而不是 <c>TryParse</c>」与「回落用 <see cref="DateTime.Now"/>」两条取舍）。
+    /// 刻意不抽公共方法：三处各自只有十几行，而抽出来就要为「首页口径」造一个共享类型，
+    /// 代价大于收益。
+    /// </remarks>
+    private static bool TryResolveMonth(string? month, out DateTime monthStart)
+    {
+        if (string.IsNullOrWhiteSpace(month))
+        {
+            var today = DateTime.Now.Date;
+            monthStart = new DateTime(today.Year, today.Month, 1);
+            return true;
+        }
+
+        if (!DateTime.TryParseExact(
+                month,
+                MONTH_FORMAT,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            monthStart = default;
+            return false;
+        }
+
+        monthStart = new DateTime(parsed.Year, parsed.Month, 1);
+        return true;
     }
 
     /// <summary>
@@ -599,6 +709,54 @@ public sealed record EntrySummaryOptionDto(string Summary, DateTime LastUsedAt, 
         option.Summary,
         DateTime.SpecifyKind(option.LastUsedAt, DateTimeKind.Utc),
         option.UsageCount);
+}
+
+/// <summary>收入与支出的分类合计（对外暴露）。</summary>
+/// <param name="CurrencyCode">
+/// 金额所属的币种代码；**一个启用币种都没有时为 <c>null</c>**（此时两个列表必为空）。
+/// </param>
+/// <param name="Month">实际查询的月份（<c>YYYY-MM</c>）；请求省略 <c>month</c> 时即服务器本地的当月。</param>
+/// <param name="Income">收入侧的分类合计，按金额降序；没有收入发生时为空数组。</param>
+/// <param name="Expense">支出侧的分类合计，按金额降序；没有支出发生时为空数组。</param>
+/// <remarks>
+/// 回带 <paramref name="CurrencyCode"/> 与 <paramref name="Month"/> 的理由同
+/// <see cref="IncomeExpenseDailyResponse"/>：两者都可能由服务端决定，前端不自己再猜一次。
+/// </remarks>
+public sealed record EntryCategoryTotalsResponse(
+    string? CurrencyCode,
+    string Month,
+    EntryCategoryTotalDto[] Income,
+    EntryCategoryTotalDto[] Expense)
+{
+    /// <summary>由服务层结果构造响应体。</summary>
+    /// <param name="currencyCode">实际统计的币种代码；无可用币种时为 <c>null</c>。</param>
+    /// <param name="month">实际查询的月份（<c>YYYY-MM</c>）。</param>
+    /// <param name="totals">服务层的分类合计。</param>
+    /// <returns>对外响应体。</returns>
+    public static EntryCategoryTotalsResponse From(
+        string? currencyCode,
+        string month,
+        EntryCategoryTotals totals) => new(
+        currencyCode,
+        month,
+        [.. totals.Income.Select(EntryCategoryTotalDto.From)],
+        [.. totals.Expense.Select(EntryCategoryTotalDto.From)]);
+}
+
+/// <summary>某个分类在本月的收入或支出合计（对外暴露）。</summary>
+/// <param name="CategoryId">分类主键；<c>null</c> 表示**未分类**（合法状态）。</param>
+/// <param name="CategoryName">
+/// 分类名称；未分类时为 <c>null</c>，与 <paramref name="CategoryId"/> 同生同灭。
+/// **已停用分类的名称照常给出**。
+/// </param>
+/// <param name="Amount">本月发生额，**恒为正**；方向由所在列表（收入 / 支出）表达。</param>
+public sealed record EntryCategoryTotalDto(int? CategoryId, string? CategoryName, decimal Amount)
+{
+    /// <summary>由服务层的分类合计构造 DTO。</summary>
+    /// <param name="item">服务层的分类合计。</param>
+    /// <returns>对外 DTO。</returns>
+    public static EntryCategoryTotalDto From(EntryCategoryTotal item) =>
+        new(item.CategoryId, item.CategoryName, item.Amount);
 }
 
 /// <summary>一页账目明细。</summary>

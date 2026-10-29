@@ -168,6 +168,52 @@ public interface IEntryQueryService
         IReadOnlyCollection<TransactionType>? types,
         int limit,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 按分类聚合某个时间区间内的**收入与支出发生额**，供首页的分类占比饼图使用。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只聚合该账套内的交易。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只统计该币种的账户；首页传的是系统默认币种。</param>
+    /// <param name="fromUtc">起始时刻（UTC，**含端点**）。</param>
+    /// <param name="toUtc">结束时刻（UTC，**不含端点**）。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>收入与支出两组「分类 → 金额」，各自按金额降序。</returns>
+    /// <remarks>
+    /// **只统计收入与支出两类交易**（各取「主账户」那一条明细）：转账是账户之间的搬运，
+    /// 没有单侧发生额；期初余额也不是「本月赚了 / 花了多少」。两者进入分类占比都会让
+    /// 「这个月的钱花在哪」失真，故与首页收支走势图保持同一口径。
+    /// <para>
+    /// **账户范围是「公共账户 + 当前用户本人的个人账户」**，即使调用者是管理员也不把他人的
+    /// 个人账户算进来：首页的按天记录本来就按用户分行，分类占比必须与它同一口径，
+    /// 否则同一页上会出现「走势图是我的、饼图是全家的」这种无从解释的差异。
+    /// 账户类型仍限资金 / 负债（<see cref="AccountTypeExtensions.IsMoneyAccount"/>），
+    /// 且只取 <paramref name="currencyCode"/> 这一种币种。
+    /// </para>
+    /// <para>
+    /// 金额恒为正（<see cref="TransactionEntry.Amount"/> 的库内口径），不按方向折算符号。
+    /// <see cref="EntryCategoryTotal.CategoryId"/> 为 <c>null</c> 表示**未分类**，照常返回：
+    /// 它是合法的归集结果，不是数据缺失。分类名一次 <c>IN</c> 查询解析，**含已停用分类**
+    /// （停用是「不再供新记账选择」，不是「历史上从未用过」）。
+    /// </para>
+    /// <para>
+    /// 时间区间是半开区间 <c>[fromUtc, toUtc)</c>，与结算的日界口径一致；
+    /// SQL 侧沿用 <see cref="LocalDay.PrefilterMargin"/> 的 ±1 秒预筛，再由 C# 精确修正边界。
+    /// </para>
+    /// <para>
+    /// 排序为**金额降序**；金额相同时按分类主键升序（未分类没有主键，排在最后）。
+    /// 未分类不强制排到末尾——如果它确实是金额最大的一类，排第一才是如实呈现。
+    /// </para>
+    /// </remarks>
+    Task<EntryCategoryTotals> ListCategoryTotalsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>历史摘要的一条候选。</summary>
@@ -182,6 +228,27 @@ public interface IEntryQueryService
 /// 数行数会让每一次记账都被计成 2 次。
 /// </param>
 public sealed record EntrySummaryOption(string Summary, DateTime LastUsedAt, int UsageCount);
+
+/// <summary>收入与支出的分类合计。</summary>
+/// <param name="Income">收入侧的分类合计，按金额降序。</param>
+/// <param name="Expense">支出侧的分类合计，按金额降序。</param>
+/// <remarks>
+/// 两侧**分开给出**而不是一条带方向的列表：首页画的是两张并排的饼图，
+/// 收入构成与支出构成各自成一份百分比，合并成一个列表只会让调用方再拆一次。
+/// 无任何发生额时两侧都是空列表（不是 <c>null</c>），前端据此呈现空态。
+/// </remarks>
+public sealed record EntryCategoryTotals(
+    IReadOnlyList<EntryCategoryTotal> Income,
+    IReadOnlyList<EntryCategoryTotal> Expense);
+
+/// <summary>某个分类在一个方向上的期间发生额。</summary>
+/// <param name="CategoryId">分类主键；<c>null</c> 表示**未分类**（合法状态）。</param>
+/// <param name="CategoryName">
+/// 分类名称；未分类时为 <c>null</c>。与 <paramref name="CategoryId"/> 同生同灭，
+/// **已停用分类的名称照常给出**。
+/// </param>
+/// <param name="Amount">期间发生额，**恒为正**。</param>
+public sealed record EntryCategoryTotal(int? CategoryId, string? CategoryName, decimal Amount);
 
 /// <summary>明细行（已解析出账户名与对手方，供端点直接映射为 DTO）。</summary>
 /// <param name="Id">明细主键。</param>

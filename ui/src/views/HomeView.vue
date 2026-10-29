@@ -1,18 +1,33 @@
 <script setup lang="ts">
 /**
- * `/` 首页（概览）：当前账套本月的**总资产走势**、**收支走势**两个图表面板，
- * 以及其下的**最近交易**只读列表。
+ * `/` 首页（概览）：当前账套本月的**总资产走势**、**收支走势**、**收支分类构成**，
+ * 以及**最近交易**只读列表。
  *
- * 两块图表数据都来自后端落库的**按天记录**（总资产结算订阅、收入结算订阅、支出结算订阅各自在结算
- * 事件后逐日重算）。「哪些账户算资产、哪些算负债、个人与公共如何相加、收支的符号」全部由后端一处
- * 定义（见 `ITotalAssetSettlementService` / `IIncomeSettlementService` / `IExpenseSettlementService`），
- * 前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」这种谁也说不清的问题。
- * 图表部分只做一件事：把两条序列画出来。
+ * **PC 上是左右两栏**（`grid-template-columns: minmax(0, 1fr) 280px`）：左栏自上而下是两张走势图
+ * 与分类饼图，右栏固定 280px、只放最近交易。最近交易是补充信息，固定在右侧后，左侧的走势与构成
+ * 可以连续往下读，不必在「结算数据」与「原始明细」两种时延之间来回横跳。窄于 1023px 时整页回落
+ * 为单栏，右栏自然排到最下方（不隐藏任何内容）。
+ *
+ * 两块走势图的数据来自后端落库的**按天记录**（总资产结算订阅、收入结算订阅、支出结算订阅各自在
+ * 结算事件后逐日重算）。「哪些账户算资产、哪些算负债、个人与公共如何相加、收支的符号」全部由后端
+ * 一处定义（见 `ITotalAssetSettlementService` / `IIncomeSettlementService` /
+ * `IExpenseSettlementService`），前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」这种
+ * 谁也说不清的问题。图表部分只做一件事：把两条序列画出来。
+ *
+ * **分类构成与最近交易是另一套时延**：前者是整月一次 GROUP BY 的实时聚合
+ * （`GET /api/entries/category-totals`），后者直接取原始明细（`GET /api/entries?order=desc`），
+ * 都与结算无关。账套刚建好、一次结算都没走完时，上面两块走势图是空的而下面两块是满的——
+ * 这不是矛盾，是两种数据来源的时延不同，界面上分别写明。
+ *
+ * **分类构成不做前端累加**：接口下发「分类 → 金额」，前端只把金额折成占比并折叠到最多 6 个扇区
+ * （`components/categoryPie.ts`）。可见性、币种、交易类型与月份边界全在后端一处定义；
+ * 拿明细页再算一遍，既会出现两种口径，也只能覆盖最近一页。
  *
  * **本页只有一处相加**：收支面板标题下那三个概览数字是**本月合计**——把该面板已落库的按天记录
  * 加起来（口径见执行规范 #67「月度概览只做同口径按天相加并注明来源」，界面上一行小字写明口径）。
  * 总资产面板的三个数字则是**时点余额**（最新一天的总资产 / 净资产 / 负债），逐日相加没有业务含义
- * ——「本月总资产合计」不是一个数——故那里原样取最新一个数据点。除此之外本页不做任何金额汇总。
+ * ——「本月总资产合计」不是一个数——故那里原样取最新一个数据点。除此之外本页不做任何金额汇总
+ * （饼图的百分比是单侧内部的占比折算，由 `CategoryPieChart` 负责，不是本页相加）。
  *
  * **两个面板共用一张图与一套模板**：折线交给 `components/TrendChart.vue`（Apache ECharts 6 的封装，
  * 几何、刻度、退化处理都由它负责），面板本身由 {@link panels} 描述后交给同一个 `v-for` 渲染。
@@ -38,10 +53,9 @@
  * 数据**可能不是今天的**：记录在结算事件之后才落库，故最新一天通常是「上一个结算日」。
  * 这一点写在副标题里，而不是让用户对着一个不动的数字猜。
  *
- * **第三块面板是「最近交易」**：与上面两块**没有任何数据关系**——它不依赖结算订阅，
- * 直接把当前账套里最新的若干条明细列出来（`GET /api/entries?order=desc`），故账套刚建好、
- * 一次结算都还没走完时，上面两块是空的而这里是满的：这不是矛盾，是「结算数据」与「原始明细」
- * 两种时延的如实呈现。
+ * **右栏的「最近交易」**：与走势图**没有任何数据关系**——它不依赖结算订阅，直接把当前账套里
+ * 最新的若干条明细列出来（`GET /api/entries?order=desc`），故账套刚建好、一次结算都还没走完时，
+ * 走势图是空的而这里是满的（分类构成同理，见上）。
  *
  * 它**只读**：不在首页给改账入口，也不重复明细页的筛选与分页——首页要回答的是「最近发生了什么」，
  * 而不是「我想查哪一段」，后者已经有 `/entries` 一页，标题行右侧那个链接就是通往它的路。
@@ -53,11 +67,14 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import { ApiError } from '@/api/http'
+import CategoryPieChart from '@/components/CategoryPieChart.vue'
 import { formatAmount } from '@/components/entryFormat'
 import RecentEntryList from '@/components/RecentEntryList.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import type { TrendSeriesSpec } from '@/components/trendChart'
 import { useAccountSetsStore } from '@/stores/accountSets'
+import { useCategoryTotalsStore } from '@/stores/categoryTotals'
+import type { EntryCategoryTotal } from '@/stores/categoryTotals'
 import { RECENT_ENTRY_LIMIT, useEntriesStore } from '@/stores/entries'
 import { useIncomeExpensesStore } from '@/stores/incomeExpenses'
 import { useTotalAssetsStore } from '@/stores/totalAssets'
@@ -65,6 +82,7 @@ import { useTotalAssetsStore } from '@/stores/totalAssets'
 const accountSets = useAccountSetsStore()
 const totalAssets = useTotalAssetsStore()
 const incomeExpenses = useIncomeExpensesStore()
+const categoryTotals = useCategoryTotalsStore()
 const entries = useEntriesStore()
 
 /** 日期文本（`yyyy-MM-dd`）的解析式，用于取「几月几日」。 */
@@ -74,20 +92,25 @@ const DAY_PATTERN = /^\d{4}-(\d{2})-(\d{2})$/
 const hasAccountSet = computed(() => accountSets.currentId !== null)
 
 /**
- * 三块面板各自的失败文案；无失败时为空串。
+ * 四块面板各自的失败文案；无失败时为空串。
  *
- * **分开存**：一块挂了不该把另外两块也变成错误——总资产接口的一次超时，
+ * **分开存**：一块挂了不该把其余几块也变成错误——总资产接口的一次超时，
  * 没有理由让已经查得到的明细列表变成一片空白。
  */
-const errors = ref<{ assets: string; flows: string; recent: string }>({
+const errors = ref<{ assets: string; flows: string; categories: string; recent: string }>({
   assets: '',
   flows: '',
+  categories: '',
   recent: '',
 })
 
 /** 任一接口在途（刷新按钮的禁用与文案据此判断）。 */
 const loading = computed(
-  () => totalAssets.loading || incomeExpenses.loading || entries.recentLoading,
+  () =>
+    totalAssets.loading ||
+    incomeExpenses.loading ||
+    categoryTotals.loading ||
+    entries.recentLoading,
 )
 
 /** 一个概览数字（面板顶部那三个之一）。 */
@@ -137,8 +160,10 @@ interface Panel {
 
 /** 图表周期的文案（`2026年9月`）；月份未知时退回「本月」。 */
 const period = computed(() => {
-  // 两个面板查的是同一台服务器的同一个月，取哪个都行；先有值的那个先算
-  const month = totalAssets.daily?.month ?? incomeExpenses.daily?.month
+  // 几块数据查的是同一台服务器的同一个月，取哪个都行；先有值的那个先算。
+  // 分类构成补在最后：它不依赖结算，账套刚建好时可能只有它有月份
+  const month =
+    totalAssets.daily?.month ?? incomeExpenses.daily?.month ?? categoryTotals.totals?.month
   if (month === undefined) {
     return '本月'
   }
@@ -147,6 +172,38 @@ const period = computed(() => {
   return year === undefined || monthPart === undefined
     ? month
     : `${year}年${Number(monthPart)}月`
+})
+
+/** 分类构成面板的呈现数据。 */
+interface CategoryView {
+  /** 是否已经拿到一次结果；`false` 时面板显示「加载中…」。 */
+  loaded: boolean
+  /** 接口下发的币种；`null` 表示一个启用币种都没有。 */
+  currencyCode: string | null
+  income: EntryCategoryTotal[]
+  expense: EntryCategoryTotal[]
+  /** 任一侧有分类合计。 */
+  hasData: boolean
+}
+
+/**
+ * 分类构成的三态数据。
+ *
+ * **用 `loaded` 而不是 `null` 判断**：`currencyCode` 为 `null` 本身就是一种明确的结果
+ * （「没有可用币种」），把它与「还没查过」并成同一个空值，会让用户看到一句与事实无关的提示。
+ */
+const categoryView = computed<CategoryView>(() => {
+  const result = categoryTotals.totals
+  const income = result?.income ?? []
+  const expense = result?.expense ?? []
+
+  return {
+    loaded: result !== null,
+    currencyCode: result?.currencyCode ?? null,
+    income,
+    expense,
+    hasData: income.length > 0 || expense.length > 0,
+  }
 })
 
 /** 图例右侧的元信息。币种为空串时不留一个孤零零的分隔点。 */
@@ -325,21 +382,21 @@ function formatDay(date: string): string {
 }
 
 /**
- * 拉取两块当月序列与最近交易。
+ * 拉取四块数据：两块当月走势序列、分类构成与最近交易。
  *
  * **不传月份**，由后端取服务器本地的当月：记录的日期是本地日期，
  * 跟着服务器走才不会与落库的日期错位（前端按浏览器时区算一个月，跨时区部署时就会差一天）。
  *
- * 三个请求**并发**发出、**各自**记账自己的失败：串行会让后面的面板白等前面的网络往返，
- * 而用 `Promise.all` 的「一票否决」语义则会让总资产接口的一次超时把收支面板与明细列表也
- * 一起变成空白。
+ * 四个请求**并发**发出、**各自**记账自己的失败：串行会让后面的面板白等前面的网络往返，
+ * 而用 `Promise.all` 的「一票否决」语义则会让总资产接口的一次超时把收支面板、分类构成与
+ * 明细列表也一起变成空白。
  */
 async function load(): Promise<void> {
   if (!hasAccountSet.value) {
     return
   }
 
-  errors.value = { assets: '', flows: '', recent: '' }
+  errors.value = { assets: '', flows: '', categories: '', recent: '' }
 
   await Promise.all([
     totalAssets.loadDaily().catch((error: unknown) => {
@@ -348,13 +405,16 @@ async function load(): Promise<void> {
     incomeExpenses.loadDaily().catch((error: unknown) => {
       errors.value.flows = error instanceof ApiError ? error.message : '加载收支失败'
     }),
+    categoryTotals.loadTotals().catch((error: unknown) => {
+      errors.value.categories = error instanceof ApiError ? error.message : '加载分类构成失败'
+    }),
     entries.loadRecent().catch((error: unknown) => {
       errors.value.recent = error instanceof ApiError ? error.message : '加载最近交易失败'
     }),
   ])
 }
 
-// 账套切换后必须重来一遍：三块数据都按账套隔离，且**图表记录按用户分行**——
+// 账套切换后必须重来一遍：四块数据都按账套隔离，且**图表记录与分类合计按用户分行**——
 // 同一本账套里换个人看到的个人账户不同，故结果是「这个账套里、我这个人的」那一份；
 // 明细同样按账套隔离（可见性由后端按当前用户判定）。
 // 未选择账套时清空，避免退出登录后仍残留可见数据。
@@ -366,8 +426,9 @@ watch(
   async (currentId) => {
     totalAssets.clear()
     incomeExpenses.clear()
+    categoryTotals.clear()
     entries.clearRecent()
-    errors.value = { assets: '', flows: '', recent: '' }
+    errors.value = { assets: '', flows: '', categories: '', recent: '' }
 
     if (currentId === null) {
       return
@@ -390,9 +451,9 @@ onMounted(() => {
       <div>
         <h1 class="title">概览</h1>
         <p class="subtitle">
-          {{ period }}的走势概览（含公共账户）。数据由结算订阅在每个结算日之后按天落库，
-          故最新一天通常是上一个结算日，而不是今天。页面底部另给出当前账套最近的
-          {{ RECENT_ENTRY_LIMIT }} 条账目明细，那一块取的是原始明细、与结算无关。
+          {{ period }}的走势与分类概览（含公共账户）。走势数据由结算订阅在每个结算日之后按天落库，
+          故最新一天通常是上一个结算日，而不是今天；分类构成与另附的最近
+          {{ RECENT_ENTRY_LIMIT }} 条明细则实时取自账目明细，与结算无关（PC 上最近交易位于右侧栏）。
         </p>
       </div>
       <div class="head-actions">
@@ -408,82 +469,131 @@ onMounted(() => {
     </p>
 
     <template v-else>
-      <section v-for="panel in panels" :key="panel.key" class="panel">
-        <h2 class="panel-title">{{ panel.title }}</h2>
+      <div class="layout">
+        <div class="main-column">
+          <section v-for="panel in panels" :key="panel.key" class="panel">
+            <h2 class="panel-title">{{ panel.title }}</h2>
 
-        <p v-if="panel.error !== ''" class="error">{{ panel.error }}</p>
-        <p v-else-if="panel.chart === null" class="hint">{{ panel.emptyHint }}</p>
+            <p v-if="panel.error !== ''" class="error">{{ panel.error }}</p>
+            <p v-else-if="panel.chart === null" class="hint">{{ panel.emptyHint }}</p>
 
-        <template v-else>
-          <!-- 口径小字是数字的注脚而不是另一块内容，故放在 .stats 里占满一行（见样式），
-               而不是面板的兄弟块——后者会与数字之间拉开面板的 0.9rem 块距。
-               只有给了 statNote 的面板才渲染（总资产面板是时点值，不写口径） -->
-          <div class="stats">
-            <div v-for="stat in panel.chart.stats" :key="stat.label" class="stat">
-              <span class="stat-label">{{ stat.label }}</span>
-              <strong class="stat-value">{{ stat.value }}</strong>
+            <template v-else>
+              <!-- 口径小字是数字的注脚而不是另一块内容，故放在 .stats 里占满一行（见样式），
+                   而不是面板的兄弟块——后者会与数字之间拉开面板的 0.9rem 块距。
+                   只有给了 statNote 的面板才渲染（总资产面板是时点值，不写口径） -->
+              <div class="stats">
+                <div v-for="stat in panel.chart.stats" :key="stat.label" class="stat">
+                  <span class="stat-label">{{ stat.label }}</span>
+                  <strong class="stat-value">{{ stat.value }}</strong>
+                </div>
+                <p v-if="panel.chart.statNote" class="stat-note">{{ panel.chart.statNote }}</p>
+              </div>
+
+              <div class="legend">
+                <span v-for="item in panel.chart.series" :key="item.key" class="legend-item">
+                  <!-- 色块与折线共用一个令牌名：这里由浏览器解析 `var()`，TrendChart 把同一个名字
+                       解析成 canvas 认得的具体色值。两处颜色因此只有一个定义处 -->
+                  <i class="swatch" :style="{ backgroundColor: `var(${item.colorToken})` }" />
+                  {{ item.label }}
+                </span>
+                <span class="legend-meta">{{ panel.chart.meta }}</span>
+              </div>
+
+              <!-- 折线的绘制（坐标系、刻度、悬停读数）全部交给组件；本页只把序列喂进去 -->
+              <div class="chart">
+                <TrendChart
+                  :series="panel.chart.series"
+                  :x-labels="panel.chart.xLabels"
+                  :description="panel.chart.ariaLabel"
+                />
+              </div>
+            </template>
+          </section>
+
+          <!--
+            分类构成：与上面的走势图**不是同一套数据来源**——这里取整月一次 GROUP BY 的实时聚合，
+            不依赖结算，故账套刚建好时它可能已经有数，而走势图还是空的。
+            折叠、占比与配色都交给 `CategoryPieChart`；本页只负责取数与三态。
+          -->
+          <section class="panel category-panel">
+            <div>
+              <h2 class="panel-title">收入与支出分类构成（本月）</h2>
+              <p class="panel-note">
+                按本月账目明细的发生额实时汇总；只统计系统默认币种与资金/负债账户
+                （含公共账户与本人在本账套的个人账户），转账与期初不计入。两个饼图各自按本侧
+                合计计算百分比；最多 6 个扇区，金额最大的分类优先，「未分类」始终单独保留，
+                其余合并为「其他」。
+              </p>
             </div>
-            <p v-if="panel.chart.statNote" class="stat-note">{{ panel.chart.statNote }}</p>
-          </div>
 
-          <div class="legend">
-            <span v-for="item in panel.chart.series" :key="item.key" class="legend-item">
-              <!-- 色块与折线共用一个令牌名：这里由浏览器解析 `var()`，TrendChart 把同一个名字
-                   解析成 canvas 认得的具体色值。两处颜色因此只有一个定义处 -->
-              <i class="swatch" :style="{ backgroundColor: `var(${item.colorToken})` }" />
-              {{ item.label }}
-            </span>
-            <span class="legend-meta">{{ panel.chart.meta }}</span>
-          </div>
-
-          <!-- 折线的绘制（坐标系、刻度、悬停读数）全部交给组件；本页只把序列喂进去 -->
-          <div class="chart">
-            <TrendChart
-              :series="panel.chart.series"
-              :x-labels="panel.chart.xLabels"
-              :description="panel.chart.ariaLabel"
-            />
-          </div>
-        </template>
-      </section>
-
-      <!--
-        最近交易：**排在两张走势图之后**——本页的身份是「走势概览」，明细是补充而不是主体。
-        整块**只读**：不给改账入口、不引入弹窗，也不重复明细页的筛选与分页，
-        要看全部或要改账都走标题行右侧那个链接。
-        行的呈现交给 `RecentEntryList`（记账页的「最近 N 次同类型交易」用的是同一个组件，
-        两处对同一份明细的读法不会分叉）；本页只负责取数与三态里的前两条。
-      -->
-      <section class="panel">
-        <div class="panel-head">
-          <div>
-            <h2 class="panel-title">最近交易</h2>
-            <p class="panel-note">
-              按发生时间倒序，最多 {{ RECENT_ENTRY_LIMIT }} 条；只含资金账户与负债账户上的明细
-              （与「账目明细」页同一口径，一笔转账会占两行）。
+            <p v-if="errors.categories !== ''" class="error">{{ errors.categories }}</p>
+            <p v-else-if="!categoryView.loaded" class="hint">加载中…</p>
+            <p v-else-if="categoryView.currencyCode === null" class="hint">
+              还没有可用的币种，请先在管理端添加币种后记账。
             </p>
-          </div>
-          <!-- 次要按钮的样子与页头【刷新】同源（同一套 .ghost 规则）；这里是链接而非按钮，
-               点击只做路由跳转，不发任何请求 -->
-          <RouterLink class="ghost" :to="{ name: 'entries' }">查看全部明细</RouterLink>
+            <p v-else-if="!categoryView.hasData" class="hint">本月还没有收入与支出明细。</p>
+
+            <!-- 一侧没有数据时仍渲染两个图：该侧显示自己的空态，另一侧照常画饼。
+                 两张图并排，窄容器的网格会自动折成一列（见 .pie-grid） -->
+            <div v-else class="pie-grid">
+              <CategoryPieChart
+                title="收入构成"
+                :items="categoryView.income"
+                :currency-code="categoryView.currencyCode"
+                :period="period"
+                empty-text="本月还没有收入。"
+              />
+              <CategoryPieChart
+                title="支出构成"
+                :items="categoryView.expense"
+                :currency-code="categoryView.currencyCode"
+                :period="period"
+                empty-text="本月还没有支出。"
+              />
+            </div>
+          </section>
         </div>
 
-        <!-- 三态与上面两块面板同一套写法：失败、加载中、无数据。
-             空态文案**不复用 emptyHint**：那个函数里的「还没有可用币种」分支对明细不成立
-             ——明细没有币种维度，套用会得到一句与事实无关的提示。 -->
-        <p v-if="errors.recent !== ''" class="error">{{ errors.recent }}</p>
-        <p v-else-if="entries.recentItems === null" class="hint">加载中…</p>
+        <aside class="side-column">
+          <!--
+            最近交易：PC 上**固定在右栏**（280px）——本页的主体是走势与构成，明细是补充。
+            整块**只读**：不给改账入口、不引入弹窗，也不重复明细页的筛选与分页，
+            要看全部或要改账都走标题行右侧那个链接。
+            行的呈现交给 `RecentEntryList`（记账页的「最近 N 次同类型交易」用的是同一个组件，
+            两处对同一份明细的读法不会分叉）；本页只负责取数与三态里的前两条。
+          -->
+          <section class="panel">
+            <div class="panel-head">
+              <div>
+                <h2 class="panel-title">最近交易</h2>
+                <p class="panel-note">
+                  按发生时间倒序，最多 {{ RECENT_ENTRY_LIMIT }} 条；只含资金账户与负债账户上的明细
+                  （与「账目明细」页同一口径，一笔转账会占两行）。
+                </p>
+              </div>
+              <!-- 次要按钮的样子与页头【刷新】同源（同一套 .ghost 规则）；这里是链接而非按钮，
+                   点击只做路由跳转，不发任何请求 -->
+              <RouterLink class="ghost" :to="{ name: 'entries' }">查看全部明细</RouterLink>
+            </div>
 
-        <!-- 空态与列表都由组件承担（`emptyText` 由本页给：明细没有币种维度，那句空态不能复用
-             `emptyHint` 里任何一条与币种有关的说法）。本页仍传 `show-type`：这块面板混排三种类型，
-             交易类型标签是用户区分「账户之间的搬运」与「真正的收支」的唯一线索 -->
-        <RecentEntryList
-          v-else
-          :entries="entries.recentItems"
-          empty-text="当前账套还没有账目明细。"
-          show-type
-        />
-      </section>
+            <!-- 三态与上面几块面板同一套写法：失败、加载中、无数据。
+                 空态文案**不复用 emptyHint**：那个函数里的「还没有可用币种」分支对明细不成立
+                 ——明细没有币种维度，套用会得到一句与事实无关的提示。 -->
+            <p v-if="errors.recent !== ''" class="error">{{ errors.recent }}</p>
+            <p v-else-if="entries.recentItems === null" class="hint">加载中…</p>
+
+            <!-- 空态与列表都由组件承担（`emptyText` 由本页给：明细没有币种维度，那句空态不能复用
+                 `emptyHint` 里任何一条与币种有关的说法）。本页仍传 `show-type`：这块面板混排三种类型，
+                 交易类型标签是用户区分「账户之间的搬运」与「真正的收支」的唯一线索 -->
+            <RecentEntryList
+              v-else
+              :entries="entries.recentItems"
+              empty-text="当前账套还没有账目明细。"
+              show-type
+            />
+          </section>
+        </aside>
+      </div>
     </template>
   </main>
 </template>
@@ -495,6 +605,25 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+/*
+ * PC 双栏：左栏吃满剩余宽度（`minmax(0, 1fr)` 防止内容把网格撑破），右栏固定 280px。
+ * `align-items: start` 让两栏各自按内容高度排布，右侧卡片不会被拉成与左栏等高。
+ */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 1rem;
+  align-items: start;
+}
+
+.main-column,
+.side-column {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
 }
 
 .head {
@@ -577,6 +706,38 @@ onMounted(() => {
   border-radius: var(--radius-card);
   background: var(--color-background-soft);
   box-shadow: var(--shadow-card);
+}
+
+/* 右栏固定 280px，内容宽度只有约 250px：面板内边距收紧一档，给行文字多留一点宽度 */
+.side-column .panel {
+  padding: 0.9rem 0.9rem 0.75rem;
+}
+
+/*
+ * 右栏里的最近交易：默认的「左侧三行文字 + 右侧金额」横排会把两者挤在一起，
+ * 故让金额落到行末、靠右对齐；其他页面里的同一组件不受影响。
+ */
+.side-column :deep(.recent-row) {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.2rem;
+}
+
+.side-column :deep(.recent-amount) {
+  align-self: flex-end;
+  font-size: 14px;
+}
+
+/*
+ * 两张饼图并排：每列至少 220px，容器不足时自动折成一列。
+ * 用 `auto-fit` 而不是再写一个断点——左栏在 PC 上约 900px、手机上只有三百多，
+ * 同一条规则在两种宽度下都成立。
+ */
+.pie-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
 }
 
 /* 面板标题：用 h2 而不是「加大加粗的 p」，读屏用户据此在页内跳转 */
@@ -703,10 +864,30 @@ onMounted(() => {
   gap: 0.5rem;
 }
 
-/* 窄屏：图表降高，避免一屏只看得见曲线看不见别的 */
+/* 窄屏：整页回落为单栏，图表降高，避免一屏只看得见曲线看不见别的 */
 @media (max-width: 1023px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .chart {
     height: 180px;
+  }
+
+  /* 单栏后右栏不再受 280px 约束，恢复常规卡片内边距与最近交易的横排（金额回到行末） */
+  .side-column .panel {
+    padding: 1rem 1.1rem 0.85rem;
+  }
+
+  .side-column :deep(.recent-row) {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 1rem;
+  }
+
+  .side-column :deep(.recent-amount) {
+    align-self: auto;
+    font-size: 15px;
   }
 }
 </style>
