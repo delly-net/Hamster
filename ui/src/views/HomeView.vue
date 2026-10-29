@@ -3,6 +3,14 @@
  * `/` 首页（概览）：当前账套本月的**总资产走势**、**收支走势**、**收支分类构成**，
  * 以及**最近交易**只读列表。
  *
+ * **每月 1 号整页改看上个月的全月数据**：月初的「本月」只有一天甚至零天数据，看着像没记账；
+ * 故 1 号当天把三块按月的取数（总资产、收支、分类构成）显式指向**上个月**，页面标题、口径小字
+ * 与空态文案随之改写成「上月」。判定按**浏览器本地日期**、只在 1 号生效（见
+ * {@link resolveOverviewMonth}）——这是「这一页想看哪个月」的展示规则，零后端契约改动。
+ * 右侧「最近交易」取的是最新若干条明细，与月份无关，不参与这次切月。
+ * 上月**最后一天**的记录要等 1 号 01:00 的结算任务执行后才落库，故 1 号凌晨那几小时里
+ * 这条数据可能还没出现——按既有的「缺日不补零」口径如实呈现，不做特殊处理。
+ *
  * **PC 上是左右两栏**（`grid-template-columns: minmax(0, 1fr) 280px`）：左栏自上而下是两张走势图
  * 与分类饼图，右栏固定 280px、只放最近交易。最近交易是补充信息，固定在右侧后，左侧的走势与构成
  * 可以连续往下读，不必在「结算数据」与「原始明细」两种时延之间来回横跳。窄于 1023px 时整页回落
@@ -23,7 +31,8 @@
  * （`components/categoryPie.ts`）。可见性、币种、交易类型与月份边界全在后端一处定义；
  * 拿明细页再算一遍，既会出现两种口径，也只能覆盖最近一页。
  *
- * **本页只有一处相加**：收支面板标题下那三个概览数字是**本月合计**——把该面板已落库的按天记录
+ * **本页只有一处相加**：收支面板标题下那三个概览数字是**本月合计**（1 号看上月时为**上月全月合计**）
+ * ——把该面板已落库的按天记录
  * 加起来（口径见执行规范 #67「月度概览只做同口径按天相加并注明来源」，界面上一行小字写明口径）。
  * 总资产面板的三个数字则是**时点余额**（最新一天的总资产 / 净资产 / 负债），逐日相加没有业务含义
  * ——「本月总资产合计」不是一个数——故那里原样取最新一个数据点。除此之外本页不做任何金额汇总
@@ -92,6 +101,40 @@ const DAY_PATTERN = /^\d{4}-(\d{2})-(\d{2})$/
 const hasAccountSet = computed(() => accountSets.currentId !== null)
 
 /**
+ * 概览取数的月份：**每月 1 号整页改看上个月的全月数据**，其余日期返回 `undefined`
+ * （不传月份，交给后端取服务器本地当月，与其余页面的既有口径一致）。
+ *
+ * **按浏览器本地日期判定**：这是「这一页想看哪个月」的展示规则，不是落库口径，
+ * 故放在页面里、零后端契约改动；代价是跨时区用户的 1 号与服务器差几小时。
+ *
+ * 取上月用 `new Date(y, m - 1, 1)` 而不是减天数：跨年（1 月 → 上年 12 月）天然正确，
+ * 也避开了 `toISOString()` 的 UTC 截断——那是「月初算成上月末」的经典来源。
+ */
+function resolveOverviewMonth(now: Date): string | undefined {
+  if (now.getDate() !== 1) {
+    return undefined
+  }
+
+  const previous = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  return `${previous.getFullYear()}-${String(previous.getMonth() + 1).padStart(2, '0')}`
+}
+
+/** 概览当前查询的月份；`undefined` 表示交给后端取服务器本地当月。 */
+const overviewMonth = ref<string | undefined>(resolveOverviewMonth(new Date()))
+
+/**
+ * 概览文案里的月份称呼：1 号看的是上个月，其余日期是本月。
+ *
+ * **文案必须跟着数据走**：数据切到上月而标题仍写「本月」，视觉、读屏与数字三者互相矛盾。
+ */
+const overviewMonthLabel = computed(() => (overviewMonth.value === undefined ? '本月' : '上月'))
+
+/** 收支面板口径小字里的合计称呼：1 号看的是**上个月全月**的合计。 */
+const statsScope = computed(() =>
+  overviewMonth.value === undefined ? '本月合计' : '上月全月合计',
+)
+
+/**
  * 四块面板各自的失败文案；无失败时为空串。
  *
  * **分开存**：一块挂了不该把其余几块也变成错误——总资产接口的一次超时，
@@ -131,7 +174,8 @@ interface ChartView {
   xLabels: string[]
   /**
    * 概览数字。**两个面板的口径不同**：总资产面板取**最新一个数据点**（三个数都是时点余额），
-   * 收支面板取**本月合计**（三个数都是按天记录相加，见 {@link flowsPanel}）。
+   * 收支面板取**本月合计**（1 号时是**上月全月合计**；三个数都是按天记录相加，见
+   * {@link flowsPanel}）。
    */
   stats: StatView[]
   /**
@@ -158,14 +202,15 @@ interface Panel {
   chart: ChartView | null
 }
 
-/** 图表周期的文案（`2026年9月`）；月份未知时退回「本月」。 */
+/** 图表周期的文案（`2026年9月`）；月份未知时退回当前概览的月份称呼。 */
 const period = computed(() => {
   // 几块数据查的是同一台服务器的同一个月，取哪个都行；先有值的那个先算。
   // 分类构成补在最后：它不依赖结算，账套刚建好时可能只有它有月份
   const month =
     totalAssets.daily?.month ?? incomeExpenses.daily?.month ?? categoryTotals.totals?.month
   if (month === undefined) {
-    return '本月'
+    // 数据还没回来（或全部失败）时，至少别把「1 号看上月」说成本月
+    return overviewMonthLabel.value
   }
 
   const [year, monthPart] = month.split('-')
@@ -228,7 +273,7 @@ function assetsPanel(): Panel {
 
   return {
     key: 'assets',
-    title: '总资产与净资产（本月，含公共账户）',
+    title: `总资产与净资产（${overviewMonthLabel.value}，含公共账户）`,
     error: errors.value.assets,
     emptyHint: emptyHint(
       totalAssets.loading,
@@ -277,7 +322,8 @@ function assetsPanel(): Panel {
  * **支出线与收入线同在正半轴**：接口给的两个金额都是正数（见后端 `IncomeExpenseDailyPoint`），
  * 图上不再叠一层符号——「哪个是花出去的」由图例与颜色说清，而「这个月净赚多少」由净值那个数字回答。
  *
- * **三个概览数字是本月合计，不是最新一天的值**（本页唯一一处相加）：接口下发的每个数据点都是
+ * **三个概览数字是本月合计（1 号时是上月全月合计），不是最新一天的值**（本页唯一一处相加）：
+ * 接口下发的每个数据点都是
  * **当日发生额**（见 `IncomeExpenseDaily` 的类型注释），故逐日相加即本月累计；
  * 口径由执行规范 #67 定在前端——「月度概览只做同口径按天相加并注明来源」。
  * 不为此另开后端汇总接口：同一份按天记录再让后端算一遍，等于给同一个数字立第二个真源；
@@ -300,7 +346,7 @@ function flowsPanel(): Panel {
 
   return {
     key: 'flows',
-    title: '收入与支出（本月，含公共账户）',
+    title: `收入与支出（${overviewMonthLabel.value}，含公共账户）`,
     error: errors.value.flows,
     emptyHint: emptyHint(
       incomeExpenses.loading,
@@ -330,14 +376,14 @@ function flowsPanel(): Panel {
               { label: '支出', value: formatAmount(monthExpense) },
               { label: '净额', value: formatAmount(monthNet) },
             ],
-            statNote: '三个数字是本月合计：按天记录逐日相加，尚未结算的日子不计入。',
+            statNote: `三个数字是${statsScope.value}：按天记录逐日相加，尚未结算的日子不计入。`,
             meta: buildMeta(formatDay(latest.date), days.length, currencyLabel),
             xLabels: days.map((day) => formatDay(day.date)),
             // 读屏用户拿不到那行口径小字的位置关系，故口径（本月合计 + 截至哪一天）必须写进这一句里，
             // 让他们听到的数字与视觉上的数字是同一个
             ariaLabel:
               `${period.value}收入与支出走势图，共 ${days.length} 个数据点。` +
-              `本月合计（截至 ${formatDay(latest.date)}）收入 ${formatAmount(monthIncome)}、` +
+              `${statsScope.value}（截至 ${formatDay(latest.date)}）收入 ${formatAmount(monthIncome)}、` +
               `支出 ${formatAmount(monthExpense)}、` +
               `净额 ${formatAmount(monthNet)}` +
               `${currencyLabel === '' ? '' : ` ${currencyLabel}`}。`,
@@ -368,7 +414,7 @@ function emptyHint(
     return '还没有可用的币种，请先在管理端添加币种后记账。'
   }
 
-  return `本月还没有结算数据：${noDataHint}`
+  return `${overviewMonthLabel.value}还没有结算数据：${noDataHint}`
 }
 
 /** 把 `yyyy-MM-dd` 显示成 `M月D日`；无法解析时原样回显。 */
@@ -382,10 +428,11 @@ function formatDay(date: string): string {
 }
 
 /**
- * 拉取四块数据：两块当月走势序列、分类构成与最近交易。
+ * 拉取四块数据：两块走势序列、分类构成与最近交易。
  *
- * **不传月份**，由后端取服务器本地的当月：记录的日期是本地日期，
- * 跟着服务器走才不会与落库的日期错位（前端按浏览器时区算一个月，跨时区部署时就会差一天）。
+ * **月份只在 1 号显式传**（{@link resolveOverviewMonth}）：其余日期仍不传月份，由后端取
+ * 服务器本地的当月——记录的日期是本地日期，跟着服务器走才不会与落库的日期错位。
+ * 最近交易与结算、月份都无关（它取的是当前账套最新若干条明细），故不参与这次切月。
  *
  * 四个请求**并发**发出、**各自**记账自己的失败：串行会让后面的面板白等前面的网络往返，
  * 而用 `Promise.all` 的「一票否决」语义则会让总资产接口的一次超时把收支面板、分类构成与
@@ -396,16 +443,18 @@ async function load(): Promise<void> {
     return
   }
 
+  // 每次取数重新判定一次：页面跨零点后点【刷新】，1 号的切月规则要能跟上
+  overviewMonth.value = resolveOverviewMonth(new Date())
   errors.value = { assets: '', flows: '', categories: '', recent: '' }
 
   await Promise.all([
-    totalAssets.loadDaily().catch((error: unknown) => {
+    totalAssets.loadDaily(overviewMonth.value).catch((error: unknown) => {
       errors.value.assets = error instanceof ApiError ? error.message : '加载总资产失败'
     }),
-    incomeExpenses.loadDaily().catch((error: unknown) => {
+    incomeExpenses.loadDaily(overviewMonth.value).catch((error: unknown) => {
       errors.value.flows = error instanceof ApiError ? error.message : '加载收支失败'
     }),
-    categoryTotals.loadTotals().catch((error: unknown) => {
+    categoryTotals.loadTotals(overviewMonth.value).catch((error: unknown) => {
       errors.value.categories = error instanceof ApiError ? error.message : '加载分类构成失败'
     }),
     entries.loadRecent().catch((error: unknown) => {
@@ -517,9 +566,9 @@ onMounted(() => {
           -->
           <section class="panel category-panel">
             <div>
-              <h2 class="panel-title">收入与支出分类构成（本月）</h2>
+              <h2 class="panel-title">收入与支出分类构成（{{ overviewMonthLabel }}）</h2>
               <p class="panel-note">
-                按本月账目明细的发生额实时汇总；只统计系统默认币种与资金/负债账户
+                按{{ overviewMonthLabel }}账目明细的发生额实时汇总；只统计系统默认币种与资金/负债账户
                 （含公共账户与本人在本账套的个人账户），转账与期初不计入。两个饼图各自按本侧
                 合计计算百分比；最多 6 个扇区，金额最大的分类优先，「未分类」始终单独保留，
                 其余合并为「其他」。
@@ -531,7 +580,9 @@ onMounted(() => {
             <p v-else-if="categoryView.currencyCode === null" class="hint">
               还没有可用的币种，请先在管理端添加币种后记账。
             </p>
-            <p v-else-if="!categoryView.hasData" class="hint">本月还没有收入与支出明细。</p>
+            <p v-else-if="!categoryView.hasData" class="hint">
+              {{ overviewMonthLabel }}还没有收入与支出明细。
+            </p>
 
             <!-- 一侧没有数据时仍渲染两个图：该侧显示自己的空态，另一侧照常画饼。
                  两张图并排，窄容器的网格会自动折成一列（见 .pie-grid） -->
@@ -541,14 +592,14 @@ onMounted(() => {
                 :items="categoryView.income"
                 :currency-code="categoryView.currencyCode"
                 :period="period"
-                empty-text="本月还没有收入。"
+                :empty-text="`${overviewMonthLabel}还没有收入。`"
               />
               <CategoryPieChart
                 title="支出构成"
                 :items="categoryView.expense"
                 :currency-code="categoryView.currencyCode"
                 :period="period"
-                empty-text="本月还没有支出。"
+                :empty-text="`${overviewMonthLabel}还没有支出。`"
               />
             </div>
           </section>
