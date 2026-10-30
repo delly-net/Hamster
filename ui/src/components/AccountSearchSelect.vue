@@ -13,6 +13,12 @@
  *
  * 只在**用户输入**时反推 `id`（命中同名账户则取之，否则清空），而**不监听 `text` 的变化**：
  * 父组件复位表单时会同时写入文本与 id，若此处再按文本反推一次，同名账户之间就会选错。
+ *
+ * 余额有**两处**呈现，说的是同一件事：候选行右侧一段（挑的时候比大小），以及**选中之后输入框
+ * 下方的一行小字**（定下来之后还要看着它填金额）。后者必须放在浮层之外——候选列表在点选与失焦时
+ * 都会收起，余额若只活在浮层里，选中那一刻就随之消失了。它只在 `id` 命中候选时渲染：手输一个
+ * 候选之外的名字（`id` 为 `null`，收支的对手方允许）没有余额可言，说一个数就是编。
+ * 记账表单与改账弹窗共用本组件，两处口径因此天然一致。
  */
 import { computed, ref } from 'vue'
 import { ACCOUNT_SCOPE_LABELS, type Account } from '@/stores/accounts'
@@ -102,6 +108,30 @@ const rows = computed(() =>
   filtered.value.map((account) => ({ account, balance: balanceText(account) })),
 )
 
+/**
+ * 当前选定的账户：`id` 命中候选时取那一条，否则为 `null`。
+ *
+ * 命中判据只有 `id` 一个——它正是不存在时那段文本的唯一凭据：`id` 有值即「选了哪个账户」，
+ * 为空则是「还没选」或「打了一个候选之外的新名字」，两者都没有余额可言。
+ * 故**不按文本回查**：文本随时可改，`id` 已由 `onInput` 同步反推过，再查一次只是第二处判据。
+ */
+const selectedAccount = computed<Account | null>(
+  () => props.options.find((account) => account.id === props.id) ?? null,
+)
+
+/**
+ * 选定账户的余额文本（格式与候选行右侧同一份）；未选定时为 `null`。
+ *
+ * 非有限数的情形由 {@link balanceText} 一并折成 `null`，整行因此不渲染——与候选行同一口径：
+ * 空白不会被读成「该账户余额为零」，但绝不能渲染出 `NaN CNY`。
+ */
+const selectedBalance = computed(() =>
+  selectedAccount.value === null ? null : balanceText(selectedAccount.value),
+)
+
+/** 余额行的元素 id，供输入框的 `aria-describedby` 关联；未选中时不存在该元素。 */
+const selectedBalanceId = computed(() => `${props.inputId}-balance`)
+
 /** 命中的同名账户：**去空白后全等**（不是子串匹配），取第一个。 */
 function matchByName(value: string): Account | null {
   const normalized = value.trim().toLowerCase()
@@ -134,31 +164,42 @@ function choose(account: Account): void {
 
 <template>
   <div class="picker">
-    <input
-      :id="inputId"
-      :value="text"
-      type="text"
-      autocomplete="off"
-      :placeholder="placeholder"
-      :disabled="disabled"
-      @input="onInput"
-      @focus="open = true"
-      @blur="open = false"
-    />
+    <!-- 相对定位的包装只为候选浮层：它要贴着输入框下沿，而余额行在包装之外——
+         若把浮层挂在整个 .picker 上，选中后多出的那一行会把浮层整体推下去、与输入框脱开 -->
+    <div class="input-area">
+      <input
+        :id="inputId"
+        :value="text"
+        type="text"
+        autocomplete="off"
+        :placeholder="placeholder"
+        :disabled="disabled"
+        :aria-describedby="selectedBalance === null ? undefined : selectedBalanceId"
+        @input="onInput"
+        @focus="open = true"
+        @blur="open = false"
+      />
 
-    <!-- @mousedown.prevent：按下时不让输入框失焦，点击事件才会真正落到候选上 -->
-    <ul v-if="open && filtered.length > 0" class="options">
-      <li v-for="row in rows" :key="row.account.id">
-        <button type="button" class="option" @mousedown.prevent="choose(row.account)">
-          <span class="option-name">{{ row.account.name }}</span>
-          <span class="option-meta">{{ ACCOUNT_SCOPE_LABELS[row.account.scope] }}</span>
-          <!-- 余额排在候选行的最右侧并等宽呈现：同一浮层里各项余额因此纵向对齐，
-               一眼能比出哪个账户钱多（选转出账户/支出账户时正是要看这个）。
-               余额非有限数时不渲染这一段，而不是留个占位标记，理由见 `balanceText` -->
-          <span v-if="row.balance" class="option-balance">{{ row.balance }}</span>
-        </button>
-      </li>
-    </ul>
+      <!-- @mousedown.prevent：按下时不让输入框失焦，点击事件才会真正落到候选上 -->
+      <ul v-if="open && filtered.length > 0" class="options">
+        <li v-for="row in rows" :key="row.account.id">
+          <button type="button" class="option" @mousedown.prevent="choose(row.account)">
+            <span class="option-name">{{ row.account.name }}</span>
+            <span class="option-meta">{{ ACCOUNT_SCOPE_LABELS[row.account.scope] }}</span>
+            <!-- 余额排在候选行的最右侧并等宽呈现：同一浮层里各项余额因此纵向对齐，
+                 一眼能比出哪个账户钱多（选转出账户/支出账户时正是要看这个）。
+                 余额非有限数时不渲染这一段，而不是留个占位标记，理由见 `balanceText` -->
+            <span v-if="row.balance" class="option-balance">{{ row.balance }}</span>
+          </button>
+        </li>
+      </ul>
+    </div>
+
+    <!-- 选定后的余额：候选浮层在点选与失焦时都会收起，故余额必须活在浮层之外，
+         否则「选中那一刻」正是它消失的时刻。只在 `id` 命中候选时渲染——手输的新名字没有余额 -->
+    <p v-if="selectedBalance !== null" :id="selectedBalanceId" class="selected-balance">
+      当前余额 <span class="selected-balance-value">{{ selectedBalance }}</span>
+    </p>
 
     <p v-if="open && showNoMatch" class="tip" @mousedown.prevent>
       <template v-if="freeText"
@@ -170,12 +211,17 @@ function choose(account: Account): void {
 </template>
 
 <style scoped>
-/* 相对定位的容器：候选列表与提示浮在输入框下方，不撑开表单布局 */
+/* 纵向排列输入区、余额行与提示；三者都在流里，互相撑开的是字段高度而不是浮层 */
 .picker {
-  position: relative;
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+}
+
+/* 候选浮层的定位基准：只包住输入框。浮层因此恒贴输入框下沿——
+   若挂在 .picker 上，选中后出现的余额行会把浮层整体推下一行 */
+.input-area {
+  position: relative;
 }
 
 .picker input {
@@ -260,6 +306,20 @@ function choose(account: Account): void {
   font-size: 12px;
   opacity: 0.7;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 选定后的余额：与 .tip 同为次要小字（12.5px / 1.6 / 0.7），数字等宽——
+   换账户时数位不左右跳动，也就不会把「8,120.00」看成另一个数。
+   **中性呈现**：负余额靠负号表达，不借用收/支/转账主题色（同候选行右侧那段的口径） */
+.selected-balance {
+  font-size: 12.5px;
+  line-height: 1.6;
+  opacity: 0.7;
+  padding: 0 0.1rem;
+}
+
+.selected-balance-value {
   font-variant-numeric: tabular-nums;
 }
 
