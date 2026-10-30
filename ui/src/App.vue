@@ -104,9 +104,28 @@ async function handleLogout(): Promise<void> {
           aria-label="展开功能菜单"
           @click="sidebarOpen = !sidebarOpen"
         >
-          <span class="menu-toggle-bar" />
-          <span class="menu-toggle-bar" />
-          <span class="menu-toggle-bar" />
+          <!--
+            图标用一枚内联 SVG，而不是三段空 `<span>` 拼横线：空元素没有内容、也没有显式宽度，
+            全靠父级纵向 flex 的 `align-items: stretch` 拉伸才有条宽，三条的间距又全靠 `gap`——
+            这两条隐式前提任一条在目标浏览器上不成立，按钮的边框照常画出来、框里却是空白
+            （移动端「菜单图标不显示」的成因）。SVG 的尺寸与描边写在 presentation attribute 上，
+            不经过任何 CSS 规则就能画出来；颜色走 `currentColor`，由 `.menu-toggle` 的 color 提供。
+          -->
+          <svg
+            class="menu-toggle-icon"
+            viewBox="0 0 18 14"
+            width="18"
+            height="14"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path
+              d="M1 1h16M1 7h16M1 13h16"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            />
+          </svg>
         </button>
 
         <img alt="Hamster logo" class="brand-logo" src="@/assets/logo.png" width="34" height="34" />
@@ -328,25 +347,30 @@ async function handleLogout(): Promise<void> {
   }
 }
 
+/*
+ * 汉堡按钮：只负责「方框 + 居中」，图标本身由内联 SVG 自带尺寸与描边（见模板注释）。
+ * 这里不再用 `flex-direction: column` + `gap` + 空 span 拼横线——那套写法把图标的可见性
+ * 绑在「空元素被拉伸」与「flex gap 生效」两条隐式前提上，失效时方框还在、里面空白。
+ * 只给 color，SVG 的 `stroke="currentColor"` 取它作线条颜色，仍只引用语义令牌。
+ */
 .menu-toggle {
   display: none;
-  flex-direction: column;
+  align-items: center;
   justify-content: center;
-  gap: 4px;
   width: 34px;
   height: 34px;
-  padding: 0 7px;
+  padding: 0;
   border: 1px solid var(--color-border-hover);
   border-radius: var(--radius-control);
   background: none;
+  color: var(--color-accent-strong);
   cursor: pointer;
 }
 
-.menu-toggle-bar {
+.menu-toggle-icon {
   display: block;
-  height: 2px;
-  border-radius: 1px;
-  background-color: var(--color-accent-strong);
+  /* 尺寸由 SVG 的 width/height 属性给定：不被 flex 拉伸、也不参与收缩 */
+  flex: none;
 }
 
 .app-body {

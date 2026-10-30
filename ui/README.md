@@ -150,6 +150,7 @@ ui/
 |---|---|
 | 骨架 | [`src/App.vue`](src/App.vue) 渲染 `header.app-header` + `div.app-body`（`aside.app-sidebar` 菜单 + `main.app-main` 内容区） |
 | header 左侧 | 汉堡按钮（仅窄屏）+ 产品 Logo（34px）+ 产品名「仓鼠理财管家」 |
+| 汉堡图标 | **内联 SVG**，不是用空 `<span>` 拼三条横线：尺寸（18×14）与描边（2px、圆头）写在 `width` / `height` / `viewBox` / `stroke-*` 属性上，颜色走 `currentColor`（由 `.menu-toggle` 的 `color: var(--color-accent-strong)` 提供）。空元素只能靠父级 flex 的 `align-items: stretch` 才有宽度、间距还依赖 `gap`，任一条不成立就只剩空白方框（移动端「菜单图标不显示」的成因），故**不得改回 span 拼条** |
 | header 右侧 | **仅宽屏**。已登录时依次为**用户名 → 当前账套名 +【切换】→【退出登录】**；未登录时仅显示「登录 / 注册」入口 |
 | 功能菜单 | 数据源为 [`src/config/menu.ts`](src/config/menu.ts)，以**路由名**指向路由；`adminOnly: true` 的项（接口调试、用户管理、账套管理、币种管理）仅管理员渲染；「首页」「收入」「支出」「转账」「账户管理」「分类管理」「标签管理」「账目明细」「月报表」「日报表」与末尾的「用户设置」面向所有登录用户。记账是最高频的日常动作，故「收入」「支出」「转账」三个入口紧随首页；「分类管理」「标签管理」与「账户管理」同属记账的基础字典，故紧随其后；「月报表」是查账的另一种读法（月份区间 + 账户 / 标签筛选，按月看整体），故紧随「账目明细」，「日报表」再在其后（同一套能力的按日粒度） |
 | 滚动模型 | `main.css` 把非空白布局的 `#app` 锁为整屏高度 + `overflow: hidden`，滚动交给 `.app-main`；header 与侧栏因此保持不动 |
