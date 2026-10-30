@@ -225,6 +225,9 @@ function choose(account: Account): void {
 }
 
 .picker input {
+  /* 输入框原先直接挂在 .picker（纵向 flex）上，靠 align-items: stretch 撑满字段宽；
+     包进 .input-area 后拉伸只落到那层包装，input 会退回浏览器默认宽度（约 20 字符）。 */
+  width: 100%;
   padding: 0.5rem 0.7rem;
   border: 1px solid var(--color-border-hover);
   border-radius: var(--radius-control);
