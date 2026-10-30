@@ -261,6 +261,60 @@ public interface IEntryQueryService
         DateTime toUtc,
         TimeZoneInfo timeZone,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 按任意日期区间聚合「按日 / 按分类 / 按标签」三份收入与支出合计，供「日报表」页使用。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只聚合该账套内的交易。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只统计该币种的账户；日报表传的是系统默认币种。</param>
+    /// <param name="fromUtc">起始时刻（UTC，**含端点**）。</param>
+    /// <param name="toUtc">结束时刻（UTC，**不含端点**）。</param>
+    /// <param name="timeZone">
+    /// 服务器本地时区（由 <see cref="LocalDay.ResolveTimeZone"/> 解析并缓存）。
+    /// 日期的分组口径跟着部署所在地走，故由调用方传入而不是在服务里每次重查。
+    /// </param>
+    /// <param name="accountIds">
+    /// 账户筛选：与「本币种 + 公共 / 本人个人 + 钱账户」的可见集合**求交**；
+    /// 省略或空集合即不限账户。不可见 / 非本币种 / 往来账户被静默剔除（不报错）。
+    /// </param>
+    /// <param name="tagIds">标签筛选：去重后**任一命中**；省略或空集合即不限标签。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>三份聚合：按日收支、按分类合计、按标签合计。</returns>
+    /// <remarks>
+    /// **三份结果从同一批行派生**：本方法只取一次候选行，再在内存里同时折出按日、按分类与按标签
+    /// 三个视角。若分成三个查询，任意两处的时间窗、可见性与标签条件都可能漂移成
+    /// 「折线里有、饼图里却没有」——这正是本项目反复避免的第二份真源。
+    /// <para>
+    /// **口径与 <see cref="ListDailyFlowsAsync"/> / <see cref="ListCategoryTotalsAsync"/> 逐条相同**：
+    /// 只统计收入与支出两类交易（各取「主账户」那一条明细：收入取借方、支出取贷方）；
+    /// 账户范围是「公共账户 + 当前用户本人的个人账户」的资金 / 负债账户，且只取
+    /// <paramref name="currencyCode"/> 这一种币种；管理员**不**把他人的个人账户算进来。
+    /// </para>
+    /// <para>
+    /// **标签是「多值」维度，与分类不同**：一笔交易挂多个标签时，其金额在**每个标签下各计一次**
+    /// （金额不摊分），故各标签金额之和可能大于区间收支合计；没有标签的交易归入
+    /// <see cref="EntryTagTotal.TagId"/> 为 <c>null</c> 的「未打标签」一项——那是合法归集结果，
+    /// 与分类维度的「未分类」同构。分类维度仍按交易头那一个分类归集，不存在重复计入。
+    /// </para>
+    /// <para>
+    /// **按日结果只含有发生额的日期**（缺日不补零），补零是呈现层的决定；
+    /// 时间区间是半开区间 <c>[fromUtc, toUtc)</c>，SQL 侧沿用
+    /// <see cref="LocalDay.PrefilterMargin"/> 的 ±1 秒预筛，再由 C# 精确修正边界。
+    /// </para>
+    /// </remarks>
+    Task<EntryDailyReport> ListDailyReportAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>历史摘要的一条候选。</summary>
@@ -322,6 +376,40 @@ public sealed record EntryDailyFlow(
     decimal IncomeTotal,
     decimal ExpenseTotal,
     decimal NetTotal);
+
+/// <summary>某个标签在一个方向上的区间发生额。</summary>
+/// <param name="TagId">标签主键；<c>null</c> 表示**未打标签**（合法状态）。</param>
+/// <param name="TagName">标签名称；未打标签时为 <c>null</c>。**已停用标签的名称照常给出**。</param>
+/// <param name="Amount">
+/// 期间发生额，**恒为正**。一笔交易挂多个标签时，其金额在**每个标签下各计一次**，
+/// 故各标签金额之和可能大于区间收支合计（见 <see cref="IEntryQueryService.ListDailyReportAsync"/>）。
+/// </param>
+public sealed record EntryTagTotal(int? TagId, string? TagName, decimal Amount);
+
+/// <summary>收入与支出的标签合计。</summary>
+/// <param name="Income">收入侧的标签合计，按金额降序。</param>
+/// <param name="Expense">支出侧的标签合计，按金额降序。</param>
+/// <remarks>
+/// 两侧分开给出而不是一条带方向的列表：日报表的收入构成与支出构成各自成一张饼图，
+/// 与 <see cref="EntryCategoryTotals"/> 同一取舍。
+/// </remarks>
+public sealed record EntryTagTotals(
+    IReadOnlyList<EntryTagTotal> Income,
+    IReadOnlyList<EntryTagTotal> Expense);
+
+/// <summary>日报表的三份聚合：按日、按分类、按标签。</summary>
+/// <param name="Days">按日期升序的按日收支；**只含至少有一笔收支的日期**。</param>
+/// <param name="Categories">按分类的收入与支出合计。</param>
+/// <param name="Tags">按标签的收入与支出合计。</param>
+/// <remarks>
+/// 三份结果由**同一次查询**派生（见 <see cref="IEntryQueryService.ListDailyReportAsync"/>），
+/// 因此口径天然一致：折线、饼图与表格不会出现「一处有一处没有」。
+/// 无任何发生额时三份都是空集合（不是 <c>null</c>），前端据此呈现空态。
+/// </remarks>
+public sealed record EntryDailyReport(
+    IReadOnlyList<EntryDailyFlow> Days,
+    EntryCategoryTotals Categories,
+    EntryTagTotals Tags);
 
 /// <summary>明细行（已解析出账户名与对手方，供端点直接映射为 DTO）。</summary>
 /// <param name="Id">明细主键。</param>

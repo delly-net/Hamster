@@ -33,6 +33,9 @@ export const menuItems: MenuItem[] = [
   // 月报表是「查账」的另一读法（按月看整体，而不是逐笔看明细），故紧随账目明细；
   // 同样面向所有登录用户、不设 adminOnly
   { label: '月报表', routeName: 'reports' },
+  // 日报表是「查账」的第三层读法（区间自选 + 账户 / 标签筛选），与月报表同属报表页，故紧随其后；
+  // 同样面向所有登录用户、不设 adminOnly
+  { label: '日报表', routeName: 'daily-reports' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },
   { label: '用户管理', routeName: 'admin-users', adminOnly: true },
   { label: '账套管理', routeName: 'admin-account-sets', adminOnly: true },

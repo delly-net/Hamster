@@ -15,6 +15,16 @@ namespace Hamster.Api.Services;
 /// </param>
 public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accounts) : IEntryQueryService
 {
+    /// <summary>
+    /// 标签关联按交易主键分块查询时每块的主键数。
+    /// </summary>
+    /// <remarks>
+    /// 一次 <c>IN</c> 带上万个主键会撞上 Sqlite 的 SQL 变量上限（默认 999 或 32766，取决于构建），
+    /// 而日报表的区间可达一年、交易笔数可能上万。400 既远低于任何构建的下限，
+    /// 又不至于把往返次数堆得太多。
+    /// </remarks>
+    private const int TAG_LINK_CHUNK_SIZE = 400;
+
     /// <inheritdoc />
     public async Task<EntryQueryPage> QueryAsync(
         int accountSetId,
@@ -276,7 +286,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // 先把 (类型, 方向, 分类) 都聚合出来，再在内存里按 PrimaryDirection 留下主账户那一组。
         // 这不会把行数放大：方向只有两个取值，分组数至多是「两类 × 两向 × 分类数」。
         var aggregates = await BuildFlowQuery(
-                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes, [])
             .GroupBy((entry, tx) => new { tx.Type, entry.Direction, tx.CategoryId })
             .Select((entry, tx) => new CategoryAggregateRow
             {
@@ -291,7 +301,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // 文本小数位（见 LocalDay.PrefilterMargin），这里再用真正的 DateTime 判一次，
         // 只把确实落在区间外的行减掉。
         var boundaryRows = await BuildFlowQuery(
-                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes, [])
             .Where((entry, tx) =>
                 (tx.OccurredAt >= prefilterFloor && tx.OccurredAt < fromUtc) ||
                 (tx.OccurredAt >= toUtc && tx.OccurredAt < prefilterCeiling))
@@ -396,7 +406,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // 取回的是**主账户那一条明细**的候选行（每笔交易至多一行符合主方向），量级是「本月交易笔数」，
         // 不是「本月全库明细」，月报表的规模下可以接受。
         var rows = await BuildFlowQuery(
-                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes, [])
             .Select((entry, tx) => new DailyFlowRow
             {
                 Type = tx.Type,
@@ -441,6 +451,263 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
                     pair.Value.Income - pair.Value.Expense)),
         ]);
     }
+
+    /// <inheritdoc />
+    public async Task<EntryDailyReport> ListDailyReportAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default)
+    {
+        // 目标账户：先取「本币种 + 公共 / 本人个人 + 钱账户」，再与请求的账户主键**求交**。
+        // 求交而不是报错：不可见账户、其他币种账户、往来账户都被静默剔除，交集为空就是
+        // 「这些账户上没有任何可统计的收支」，返回空结果而不是 400——与 QueryAsync 同一取舍，
+        // 报错会让 accountIds 变成探测他人账户的探针。
+        var targetIds = await ResolveFlowAccountIdsAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            currencyCode,
+            cancellationToken);
+
+        if (accountIds is { Count: > 0 })
+        {
+            var requested = accountIds.ToHashSet();
+            targetIds = [.. targetIds.Where(requested.Contains)];
+        }
+
+        if (targetIds.Length == 0)
+        {
+            return EmptyDailyReport();
+        }
+
+        var tagFilter = tagIds is null || tagIds.Count == 0
+            ? []
+            : tagIds.Distinct().ToArray();
+
+        var flowTypes = new[] { TransactionType.Income, TransactionType.Expense };
+
+        // SQL 侧向两侧各放宽一秒做预筛，精确边界判定留在下面（理由见 LocalDay.PrefilterMargin）。
+        // 上界是半开区间：结束日期的次日 0 点属于区间之外。
+        var prefilterFloor = fromUtc - LocalDay.PrefilterMargin;
+        var prefilterCeiling = toUtc + LocalDay.PrefilterMargin;
+
+        // 一次取回候选行，三份聚合都从这一批派生：口径天然一致，不存在「折线有、饼图没有」。
+        // 与 ListDailyFlowsAsync 同样取**主账户那一条明细**的候选，量级是「区间内交易笔数」。
+        var rows = await BuildFlowQuery(
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes, tagFilter)
+            .Select((entry, tx) => new ReportFlowRow
+            {
+                TransactionId = tx.Id,
+                Type = tx.Type,
+                Direction = entry.Direction,
+                CategoryId = tx.CategoryId,
+                OccurredAt = tx.OccurredAt,
+                Amount = entry.Amount,
+            })
+            .ToListAsync(cancellationToken);
+
+        // 只留下「主账户那一条、且真正落在区间内」的行：一笔交易恒有借贷两条明细，
+        // 另一条落在对手方账户上，计进来会把同一笔钱数两遍。
+        var primary = new List<ReportFlowRow>(rows.Count);
+        foreach (var row in rows)
+        {
+            if (row.Type.PrimaryDirection() != row.Direction)
+            {
+                continue;
+            }
+
+            if (row.OccurredAt < fromUtc || row.OccurredAt >= toUtc)
+            {
+                continue;
+            }
+
+            primary.Add(row);
+        }
+
+        if (primary.Count == 0)
+        {
+            return EmptyDailyReport();
+        }
+
+        var totalsByDay = new Dictionary<DateTime, (decimal Income, decimal Expense)>();
+        var categoryTotals = new Dictionary<(TransactionType Type, int? CategoryId), decimal>();
+
+        foreach (var row in primary)
+        {
+            var day = LocalDay.DateOf(row.OccurredAt, timeZone);
+            var current = totalsByDay.GetValueOrDefault(day);
+            totalsByDay[day] = row.Type == TransactionType.Income
+                ? (current.Income + row.Amount, current.Expense)
+                : (current.Income, current.Expense + row.Amount);
+
+            var categoryKey = (row.Type, row.CategoryId);
+            categoryTotals[categoryKey] = categoryTotals.GetValueOrDefault(categoryKey) + row.Amount;
+        }
+
+        var categoryIds = categoryTotals
+            .Where(pair => pair.Key.CategoryId.HasValue)
+            .Select(pair => pair.Key.CategoryId!.Value)
+            .Distinct()
+            .ToArray();
+        var categoryNames = await ResolveCategoryNamesAsync(categoryIds, cancellationToken);
+
+        // 分类行缺失（正常不会发生：分类只软删除）时并入「未分类」，
+        // 与 ListCategoryTotalsAsync 保持同一呈现口径。
+        var resolvedCategories = new Dictionary<(TransactionType Type, int? CategoryId), decimal>();
+        foreach (var (key, amount) in categoryTotals)
+        {
+            var categoryId = key.CategoryId is { } id && categoryNames.ContainsKey(id) ? id : (int?)null;
+            var resolvedKey = (key.Type, categoryId);
+            resolvedCategories[resolvedKey] = resolvedCategories.GetValueOrDefault(resolvedKey) + amount;
+        }
+
+        var tags = await BuildTagTotalsAsync(primary, cancellationToken);
+
+        return new EntryDailyReport(
+            ToDailyFlows(totalsByDay),
+            new EntryCategoryTotals(
+                ToCategoryTotals(TransactionType.Income, resolvedCategories, categoryNames),
+                ToCategoryTotals(TransactionType.Expense, resolvedCategories, categoryNames)),
+            tags);
+    }
+
+    /// <summary>
+    /// 把内存里的按日合计整理成按日期升序的对外列表。
+    /// </summary>
+    /// <param name="totalsByDay">本地日 → （收入合计, 支出合计）。</param>
+    /// <returns>按日期升序的按日收支；两侧金额恒为正，净额才带符号。</returns>
+    private static EntryDailyFlow[] ToDailyFlows(
+        IReadOnlyDictionary<DateTime, (decimal Income, decimal Expense)> totalsByDay) =>
+        [.. totalsByDay
+            .OrderBy(pair => pair.Key)
+            .Select(pair => new EntryDailyFlow(
+                pair.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                pair.Value.Income,
+                pair.Value.Expense,
+                pair.Value.Income - pair.Value.Expense))];
+
+    /// <summary>
+    /// 由主方向明细行聚合出「按标签」的收入与支出合计。
+    /// </summary>
+    /// <param name="rows">已收窄为「主账户那一条、落在区间内」的明细行。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>收入侧与支出侧各一份标签合计，按金额降序。</returns>
+    /// <remarks>
+    /// **一笔交易挂多个标签时，其金额在每个标签下各计一次**（金额不摊分）：标签是「多值」维度，
+    /// 分摊金额需要引入一个任意的舍入规则，而「这个标签下有多少钱」按原额计入才是用户能核对的。
+    /// 代价是各标签金额之和可能大于区间收支合计，接口与页面都写明这一点。
+    /// <para>
+    /// 关联行按交易主键**分块**查询：一次 <c>IN</c> 带上万个主键会撞上 Sqlite 的 SQL 变量上限
+    /// （默认 999 或 32766，取决于构建），区间长达一年时确实可能达到那个量级。
+    /// </para>
+    /// </remarks>
+    private async Task<EntryTagTotals> BuildTagTotalsAsync(
+        IReadOnlyList<ReportFlowRow> rows,
+        CancellationToken cancellationToken)
+    {
+        var transactionIds = rows.Select(row => row.TransactionId).Distinct().ToArray();
+        if (transactionIds.Length == 0)
+        {
+            return new EntryTagTotals([], []);
+        }
+
+        var tagIdsByTransaction = new Dictionary<int, List<int>>();
+        foreach (var chunk in transactionIds.Chunk(TAG_LINK_CHUNK_SIZE))
+        {
+            var links = await db.Queryable<TransactionTag>()
+                .Where(link => chunk.Contains(link.TransactionId))
+                .Select(link => new ReportTagLinkRow
+                {
+                    TransactionId = link.TransactionId,
+                    TagId = link.TagId,
+                })
+                .ToListAsync(cancellationToken);
+
+            foreach (var link in links)
+            {
+                if (!tagIdsByTransaction.TryGetValue(link.TransactionId, out var linkedTagIds))
+                {
+                    linkedTagIds = [];
+                    tagIdsByTransaction[link.TransactionId] = linkedTagIds;
+                }
+
+                linkedTagIds.Add(link.TagId);
+            }
+        }
+
+        var allTagIds = tagIdsByTransaction.Values
+            .SelectMany(ids => ids)
+            .Distinct()
+            .ToArray();
+
+        // 标签名一次 IN 查询解析，**含已停用标签**：停用是「不再供新记账选择」，不是「历史上从未用过」。
+        var tagNames = allTagIds.Length == 0
+            ? new Dictionary<int, string>()
+            : (await db.Queryable<Tag>()
+                .Where(tag => allTagIds.Contains(tag.Id))
+                .Select(tag => new TagNameRow { Id = tag.Id, Name = tag.Name })
+                .ToListAsync(cancellationToken))
+                .ToDictionary(row => row.Id, row => row.Name);
+
+        var totals = new Dictionary<(TransactionType Type, int? TagId), decimal>();
+        foreach (var row in rows)
+        {
+            if (!tagIdsByTransaction.TryGetValue(row.TransactionId, out var linked) || linked.Count == 0)
+            {
+                var untaggedKey = (row.Type, (int?)null);
+                totals[untaggedKey] = totals.GetValueOrDefault(untaggedKey) + row.Amount;
+                continue;
+            }
+
+            foreach (var tagId in linked.Distinct())
+            {
+                // 标签行缺失（正常不会发生：标签只软删除）时并入「未打标签」，
+                // 与分类行缺失并入「未分类」同一口径。
+                var resolvedId = tagNames.ContainsKey(tagId) ? tagId : (int?)null;
+                var key = (row.Type, resolvedId);
+                totals[key] = totals.GetValueOrDefault(key) + row.Amount;
+            }
+        }
+
+        return new EntryTagTotals(
+            ToTagTotals(TransactionType.Income, totals, tagNames),
+            ToTagTotals(TransactionType.Expense, totals, tagNames));
+    }
+
+    /// <summary>把内存里的标签合计整理成某一方向的对外列表。</summary>
+    /// <param name="type">收入或支出。</param>
+    /// <param name="totals">(类型, 标签) → 金额；未打标签为 <c>null</c>。</param>
+    /// <param name="tagNames">标签主键 → 名称（含已停用标签）。</param>
+    /// <returns>按金额降序排列的标签合计。</returns>
+    /// <remarks>
+    /// 金额相同时按标签主键升序；未打标签没有主键，在**同额**时排最后——
+    /// 与 <see cref="ToCategoryTotals"/> 对「未分类」的处理逐条相同。
+    /// </remarks>
+    private static EntryTagTotal[] ToTagTotals(
+        TransactionType type,
+        IReadOnlyDictionary<(TransactionType Type, int? TagId), decimal> totals,
+        IReadOnlyDictionary<int, string> tagNames) =>
+        [.. totals
+            .Where(pair => pair.Key.Type == type)
+            .Select(pair => new EntryTagTotal(
+                pair.Key.TagId,
+                pair.Key.TagId is { } id ? tagNames.GetValueOrDefault(id) : null,
+                pair.Value))
+            .OrderByDescending(item => item.Amount)
+            .ThenBy(item => item.TagId.HasValue ? 0 : 1)
+            .ThenBy(item => item.TagId)];
+
+    /// <summary>空日报表（无目标账户、无任何发生额时直接给出，不必再查库）。</summary>
+    /// <returns>三份聚合都为空的日报表结果。</returns>
+    private static EntryDailyReport EmptyDailyReport() =>
+        new([], new EntryCategoryTotals([], []), new EntryTagTotals([], []));
 
     /// <summary>
     /// 取「本账套、本币种、公共 / 本人个人、资金 / 负债」这一组账户主键。
@@ -499,22 +766,33 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <param name="floor">预筛下界（含）。</param>
     /// <param name="ceiling">预筛上界（不含）。</param>
     /// <param name="types">要统计的交易类型（调用方固定为收入 + 支出）。</param>
+    /// <param name="tagIds">标签筛选集；**空数组表示不限标签**（任一命中，用 EXISTS 表达）。</param>
     /// <returns>每次调用**新建**的查询对象。</returns>
     /// <remarks>
-    /// 与 <see cref="BuildBaseQuery"/> 分开：那条查询还带标签、账户多选与可空的上下界，
-    /// 本查询的四个条件都是固定的，混用会把两种形状的差异藏进可选参数里。
+    /// 与 <see cref="BuildBaseQuery"/> 分开：那条查询还带账户多选与可空的上下界，
+    /// 本查询的其余条件都是固定的，混用会把两种形状的差异藏进可选参数里。
+    /// <para>
+    /// **标签条件同样用相关子查询、不联表**：一笔交易可以挂多个标签，联进来会让
+    /// 「按日 / 按分类」的聚合把同一笔金额数两遍（与 <see cref="BuildBaseQuery"/> 同一理由）。
+    /// </para>
     /// </remarks>
     private ISugarQueryable<TransactionEntry, Transaction> BuildFlowQuery(
         int accountSetId,
         int[] targetIds,
         DateTime floor,
         DateTime ceiling,
-        TransactionType[] types) =>
+        TransactionType[] types,
+        int[] tagIds) =>
         db.Queryable<TransactionEntry>()
             .LeftJoin<Transaction>((entry, tx) => entry.TransactionId == tx.Id)
             .Where((entry, tx) => tx.AccountSetId == accountSetId && targetIds.Contains(entry.AccountId))
             .Where((entry, tx) => types.Contains(tx.Type))
-            .Where((entry, tx) => tx.OccurredAt >= floor && tx.OccurredAt < ceiling);
+            .Where((entry, tx) => tx.OccurredAt >= floor && tx.OccurredAt < ceiling)
+            .WhereIF(
+                tagIds.Length > 0,
+                (entry, tx) => SqlFunc.Subqueryable<TransactionTag>()
+                    .Where(link => link.TransactionId == tx.Id && tagIds.Contains(link.TagId))
+                    .Any());
 
     /// <summary>把内存里的分类合计整理成某一方向的对外列表。</summary>
     /// <param name="type">收入或支出。</param>
@@ -1002,6 +1280,59 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>发生额，恒为正；方向由 <see cref="Direction"/> 与 <see cref="Type"/> 表达。</summary>
         public decimal Amount { get; set; }
+    }
+
+    /// <summary>
+    /// 日报表的候选行投影：一笔交易的「主账户方向」明细。
+    /// </summary>
+    /// <remarks>
+    /// 比 <see cref="DailyFlowRow"/> 多带 <see cref="TransactionId"/> 与 <see cref="CategoryId"/>：
+    /// 本投影同时支撑按日、按分类与按标签三份聚合，故它必须足以回答这三个问题。
+    /// 与既有投影一样是**可写属性的类**而非位置记录——SqlSugar 的 <c>Select</c> 靠属性赋值映射。
+    /// </remarks>
+    private sealed class ReportFlowRow
+    {
+        /// <summary>所属交易主键（按标签归集时用来查关联行）。</summary>
+        public int TransactionId { get; set; }
+
+        /// <summary>交易类型（收入或支出）。</summary>
+        public TransactionType Type { get; set; }
+
+        /// <summary>借贷方向；只保留与类型主方向一致的行。</summary>
+        public EntryDirection Direction { get; set; }
+
+        /// <summary>交易分类主键；未分类时为 <c>null</c>。</summary>
+        public int? CategoryId { get; set; }
+
+        /// <summary>业务发生时间（UTC）；按日归集前折算成本地日。</summary>
+        public DateTime OccurredAt { get; set; }
+
+        /// <summary>发生额，恒为正；方向由 <see cref="Direction"/> 与 <see cref="Type"/> 表达。</summary>
+        public decimal Amount { get; set; }
+    }
+
+    /// <summary>交易标签关联的查询结果（只取两个主键）。</summary>
+    private sealed class ReportTagLinkRow
+    {
+        /// <summary>所属交易主键。</summary>
+        public int TransactionId { get; set; }
+
+        /// <summary>标签主键。</summary>
+        public int TagId { get; set; }
+    }
+
+    /// <summary>标签名称的查询结果（只取主键与名称）。</summary>
+    /// <remarks>
+    /// 与 <see cref="CategoryName"/> 形状相同却单列一类：两者查的是不同的表，
+    /// 借用一个类名会让「这个字典装的是分类还是标签」在阅读时失去唯一的答案。
+    /// </remarks>
+    private sealed class TagNameRow
+    {
+        /// <summary>标签主键。</summary>
+        public int Id { get; set; }
+
+        /// <summary>标签名称。</summary>
+        public string Name { get; set; } = string.Empty;
     }
 
     /// <summary>边界修正查询的投影结果（预筛多取回的行）。</summary>

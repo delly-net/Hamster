@@ -96,6 +96,16 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/daily-reports',
+      name: 'daily-reports',
+      // 日报表（任意日期区间 + 账户 / 标签筛选后实时汇总分类、标签、按日走势与逐日明细），
+      // 面向所有登录用户，故不设 requiresAdmin。与 /reports 分开成两页：
+      // 月报表只回答「某个自然月整体如何」，日报表的区间由用户自选、还带账户与标签筛选，
+      // 两者共享同一套「只计收支、默认币种、资金/负债账户」口径，但读法不同
+      component: () => import('../views/DailyReportView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       // 用户设置（修改密码 + 软件关于信息），面向所有登录用户，故不设 requiresAdmin

@@ -48,6 +48,26 @@ public sealed class EntryEndpoints : IEndpoint
     /// <summary><c>month</c> 查询参数的格式：<c>YYYY-MM</c>。</summary>
     private const string MONTH_FORMAT = "yyyy-MM";
 
+    /// <summary><c>from</c> / <c>to</c> 日期参数的格式：<c>yyyy-MM-dd</c>（服务器本地日期）。</summary>
+    private const string DATE_FORMAT = "yyyy-MM-dd";
+
+    /// <summary>日报表允许的最长日期区间（天，闭区间计数）。</summary>
+    /// <remarks>
+    /// 区间按日展开：表格一天一行、折线一天一点。没有上限时一个请求就能让前端渲染十年的日期，
+    /// 而「日报表」的实际用途远用不到一年以上。366 天给闰年留出余量。
+    /// </remarks>
+    private const int MAX_REPORT_DAYS = 366;
+
+    /// <summary>日期参数格式错误时的字段错误。</summary>
+    private static readonly string[] DATE_ERROR =
+        [$"日期格式不正确，应为 {DATE_FORMAT}（如 2026-10-01）"];
+
+    /// <summary>日期区间非法时的字段错误。</summary>
+    private static readonly string[] DATE_RANGE_ERROR = ["结束日期不能早于开始日期"];
+
+    /// <summary>日期区间过长时的字段错误。</summary>
+    private static readonly string[] DATE_SPAN_ERROR = [$"日期区间不能超过 {MAX_REPORT_DAYS} 天"];
+
     /// <summary>时间参数格式错误时的字段错误。</summary>
     private static readonly string[] TIME_ERROR =
         ["时间格式不正确，应为 ISO 8601 时间（如 2026-09-01T00:00:00Z）"];
@@ -424,6 +444,172 @@ public sealed class EntryEndpoints : IEndpoint
                 "月份边界按服务器本地时区换算为 UTC，区间为 **[当月 1 日 0 点, 次月 1 日 0 点)**。" +
                 "没有可用币种时返回 `currencyCode = null` 与空数组，而不是 404。" +
                 "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
+
+        group.MapGet("/daily-report", async (
+                string? from,
+                string? to,
+                int[]? accountIds,
+                int[]? tagIds,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                ICurrencyService currencies,
+                IEntryQueryService entries,
+                ILogger<EntryEndpoints> logger,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                var errors = new Dictionary<string, string[]>();
+
+                // 日期按 **yyyy-MM-dd** 解析：日报表的区间由用户直接选日期，而不是选月份再切。
+                // 绑成 string 再自行解析的理由同 `GET /api/entries`：非法输入要得到字段级中文错误，
+                // 而不是框架的空白 400。
+                var hasFrom = TryParseLocalDate(from, out var fromDay, errors, "from");
+                var hasTo = TryParseLocalDate(to, out var toDay, errors, "to");
+
+                // 省略即默认「服务器本地当月 1 日 ~ 今天」：与账目明细页的初始区间同一读法，
+                // 也避免把当月尚未到来的日子摊进按日表格。
+                var now = DateTime.Now;
+                var effectiveFrom = hasFrom ? fromDay : new DateTime(now.Year, now.Month, 1);
+                var effectiveTo = hasTo ? toDay : now.Date;
+
+                if (errors.Count == 0)
+                {
+                    if (effectiveFrom > effectiveTo)
+                    {
+                        errors["to"] = DATE_RANGE_ERROR;
+                    }
+                    else if ((effectiveTo - effectiveFrom).TotalDays + 1 > MAX_REPORT_DAYS)
+                    {
+                        errors["to"] = DATE_SPAN_ERROR;
+                    }
+                }
+
+                if (errors.Count > 0)
+                {
+                    return Results.ValidationProblem(errors);
+                }
+
+                var fromLabel = effectiveFrom.ToString(DATE_FORMAT, CultureInfo.InvariantCulture);
+                var toLabel = effectiveTo.ToString(DATE_FORMAT, CultureInfo.InvariantCulture);
+
+                // 与分类合计、按日收支同一条取舍：没有可用币种时返回空结果而不是 404。
+                var currency = await currencies.GetDefaultAsync(cancellationToken);
+                if (currency is null)
+                {
+                    return Results.Ok(new EntryDailyReportResponse(
+                        null,
+                        fromLabel,
+                        toLabel,
+                        [],
+                        new EntryCategoryTotalsDto([], []),
+                        new EntryTagTotalsDto([], [])));
+                }
+
+                // 日期区间是**服务器本地**的闭区间：分组口径跟着部署所在地走。
+                // 上界取结束日期的**次日 0 点**（不含），于是「结束日期当天的全部账」都落在区间内。
+                var timeZone = LocalDay.ResolveTimeZone(logger);
+                var fromUtc = LocalDay.StartToUtc(effectiveFrom, timeZone);
+                var toUtc = LocalDay.StartToUtc(effectiveTo.AddDays(1), timeZone);
+
+                var result = await entries.ListDailyReportAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    currency.Code,
+                    fromUtc,
+                    toUtc,
+                    timeZone,
+                    accountIds,
+                    tagIds,
+                    cancellationToken);
+
+                return Results.Ok(EntryDailyReportResponse.Create(
+                    currency.Code, fromLabel, toLabel, result));
+            })
+            .WithName("GetEntryDailyReport")
+            .WithSummary("日报表聚合（按日 / 按分类 / 按标签）")
+            .WithDescription(
+                "返回当前账套、**系统默认币种**下任意日期区间内的三份聚合，供「日报表」页使用：" +
+                "按日收支（折线与表格）、按分类合计（两张饼图）、按标签合计（两张饼图）。" +
+                "**三份结果由同一次查询派生**：同一批主方向明细行在服务端内存里同时折出三个视角，" +
+                "故折线、饼图与表格的口径天然一致，不会出现「一处有、一处没有」。" +
+                "**这是实时聚合**：直接统计交易明细，与 `/api/entries/daily-flows` 同源，" +
+                "但区间不再限定为自然月、并额外支持账户与标签筛选。" +
+                "**只统计收入与支出两类交易**（各取主账户方向那一条明细：收入取借方、支出取贷方）：" +
+                "转账是账户之间的搬运、没有单侧发生额，期初余额也不是区间发生额，两者均不计入。" +
+                "**账户范围是公共账户 + 当前用户本人的个人账户**的资金 / 负债账户；" +
+                "即使调用者是管理员也**不包含其他成员的个人账户**——与 `category-totals` / `daily-flows` 同一口径。" +
+                "`accountIds` 可重复传参、省略即不限账户；**不可见账户、非默认币种账户与往来账户会被静默剔除**" +
+                "（不报错、也不返回其数据），交集为空时返回全空结果——若对不可见账户报错，这个参数就成了探测他人账户的探针。" +
+                "`tagIds` 可重复传参、省略即不限标签，**匹配语义是「任一命中」**；" +
+                "与 `accountIds` 同时给出时是「且」的关系，两个维度各自收窄。" +
+                "**标签是多值维度**：一笔交易挂多个标签时，其金额在**每个标签下各计一次**（金额不摊分），" +
+                "故 `tags` 各标签金额之和可能大于区间收支合计；没有标签的交易归入 `tagId` / `tagName` 均为 null 的" +
+                "「未打标签」一项。分类维度仍按交易头那一个分类归集，不存在重复计入；" +
+                "`categoryId` / `categoryName` 均为 null 表示「未分类」——两者都是合法的归集结果，不是数据缺失。" +
+                "分类名与标签名由后端下发且**含已停用项**（停用是「不再供新记账选择」，不是「历史上从未用过」）。" +
+                "`days` **只含至少有一笔收支的日期**（按服务器本地日期升序）：补零是呈现层的决定，" +
+                "日报表的数据源是实时的，空白日就是真实的 0。" +
+                "`from` / `to` 为 **yyyy-MM-dd** 的服务器本地日期，**闭区间**（含结束当天）；" +
+                "省略 `from` 取服务器本地当月 1 日、省略 `to` 取服务器本地今天。" +
+                "日期格式非法返回 400 并在 `errors.from` / `errors.to` 给出字段级错误；" +
+                "`from` 晚于 `to`、或区间超过 366 天返回 400 并在 `errors.to` 说明原因。" +
+                "没有可用币种时返回 `currencyCode = null` 与三份空集合，而不是 404。" +
+                "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
+    }
+
+    /// <summary>
+    /// 解析 <c>yyyy-MM-dd</c> 日期参数。
+    /// </summary>
+    /// <param name="value">查询参数原值；<c>null</c> 或空白表示省略。</param>
+    /// <param name="day">解析结果（时刻部分为 00:00:00）。</param>
+    /// <param name="errors">字段级错误收集器；非法取值时写入 <paramref name="key"/>。</param>
+    /// <param name="key">字段名（<c>from</c> / <c>to</c>）。</param>
+    /// <returns>成功解析返回 <c>true</c>；省略或格式非法返回 <c>false</c>。</returns>
+    /// <remarks>
+    /// 用 <see cref="DateTime.TryParseExact(string, string, IFormatProvider, DateTimeStyles, out DateTime)"/>
+    /// 而不是 <c>TryParse</c>：后者会把 <c>2026-1-1</c> 之类的写法也当作合法，
+    /// 而接口声明的格式只有一个，宽进会让前端两种写法各写一遍。
+    /// <para>
+    /// **省略与非法都返回 false，区别在是否写错误**：调用方据 <c>errors.ContainsKey</c> 判断
+    /// 是否继续（非法时已写错误），省略则各自回落默认值。
+    /// </para>
+    /// </remarks>
+    private static bool TryParseLocalDate(
+        string? value,
+        out DateTime day,
+        Dictionary<string, string[]> errors,
+        string key)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            day = default;
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(
+                value,
+                DATE_FORMAT,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            day = default;
+            errors[key] = DATE_ERROR;
+            return false;
+        }
+
+        day = parsed.Date;
+        return true;
     }
 
     /// <summary>
@@ -885,6 +1071,93 @@ public sealed record EntryDailyFlowDto(
         flow.IncomeTotal,
         flow.ExpenseTotal,
         flow.NetTotal);
+}
+
+/// <summary>日报表的三份聚合（对外暴露）。</summary>
+/// <param name="CurrencyCode">
+/// 金额所属的币种代码；**一个启用币种都没有时为 <c>null</c>**（此时三份集合必为空）。
+/// </param>
+/// <param name="From">实际查询的起始日期（<c>yyyy-MM-dd</c>，服务器本地日期，**含**）。</param>
+/// <param name="To">实际查询的结束日期（<c>yyyy-MM-dd</c>，服务器本地日期，**含**）。</param>
+/// <param name="Days">按日期升序的按日收支；**只含至少有一笔收支的日期**。</param>
+/// <param name="Categories">按分类的收入与支出合计。</param>
+/// <param name="Tags">按标签的收入与支出合计。</param>
+/// <remarks>
+/// 回带 <paramref name="CurrencyCode"/>、<paramref name="From"/> 与 <paramref name="To"/> 的理由同
+/// <see cref="EntryDailyFlowsResponse"/>：它们都可能由**服务端**决定（省略参数时取当月 1 日 ~ 今天），
+/// 调用方不把它们带回来就只能自己再猜一次。
+/// </remarks>
+public sealed record EntryDailyReportResponse(
+    string? CurrencyCode,
+    string From,
+    string To,
+    EntryDailyFlowDto[] Days,
+    EntryCategoryTotalsDto Categories,
+    EntryTagTotalsDto Tags)
+{
+    /// <summary>由服务层结果构造响应体。</summary>
+    /// <param name="currencyCode">实际统计的币种代码；无可用币种时为 <c>null</c>。</param>
+    /// <param name="from">实际查询的起始日期（<c>yyyy-MM-dd</c>）。</param>
+    /// <param name="to">实际查询的结束日期（<c>yyyy-MM-dd</c>）。</param>
+    /// <param name="report">服务层的三份聚合。</param>
+    /// <returns>对外响应体。</returns>
+    /// <remarks>
+    /// **方法名是 <c>Create</c> 而不是其余 DTO 的 <c>From</c>**：本记录已有名为
+    /// <paramref name="from"/> 的属性，同名静态方法会与它冲突（CS0102）。
+    /// 这是命名让位，不是口径差异。
+    /// </remarks>
+    public static EntryDailyReportResponse Create(
+        string? currencyCode,
+        string from,
+        string to,
+        EntryDailyReport report) => new(
+        currencyCode,
+        from,
+        to,
+        [.. report.Days.Select(EntryDailyFlowDto.From)],
+        new EntryCategoryTotalsDto(
+            [.. report.Categories.Income.Select(EntryCategoryTotalDto.From)],
+            [.. report.Categories.Expense.Select(EntryCategoryTotalDto.From)]),
+        new EntryTagTotalsDto(
+            [.. report.Tags.Income.Select(EntryTagTotalDto.From)],
+            [.. report.Tags.Expense.Select(EntryTagTotalDto.From)]));
+}
+
+/// <summary>收入与支出的分类合计（日报表响应内嵌）。</summary>
+/// <param name="Income">收入侧的分类合计，按金额降序。</param>
+/// <param name="Expense">支出侧的分类合计，按金额降序。</param>
+public sealed record EntryCategoryTotalsDto(
+    EntryCategoryTotalDto[] Income,
+    EntryCategoryTotalDto[] Expense);
+
+/// <summary>收入与支出的标签合计（日报表响应内嵌）。</summary>
+/// <param name="Income">收入侧的标签合计，按金额降序。</param>
+/// <param name="Expense">支出侧的标签合计，按金额降序。</param>
+/// <remarks>
+/// **各标签金额之和可能大于区间收支合计**：一笔交易挂多个标签时，其金额在每个标签下各计一次。
+/// 调用方在呈现层须写明这一点，不能把它当成「一分不多、一分不少」的拆分。
+/// </remarks>
+public sealed record EntryTagTotalsDto(
+    EntryTagTotalDto[] Income,
+    EntryTagTotalDto[] Expense);
+
+/// <summary>某个标签在区间内的收入或支出合计（对外暴露）。</summary>
+/// <param name="TagId">标签主键；<c>null</c> 表示**未打标签**（合法状态）。</param>
+/// <param name="TagName">
+/// 标签名称；未打标签时为 <c>null</c>，与 <paramref name="TagId"/> 同生同灭。
+/// **已停用标签的名称照常给出**。
+/// </param>
+/// <param name="Amount">
+/// 区间发生额，**恒为正**；方向由所在列表（收入 / 支出）表达。
+/// 一笔多标签交易会在每个标签下各计一次（见 <see cref="EntryTagTotalsDto"/>）。
+/// </param>
+public sealed record EntryTagTotalDto(int? TagId, string? TagName, decimal Amount)
+{
+    /// <summary>由服务层的标签合计构造 DTO。</summary>
+    /// <param name="item">服务层的标签合计。</param>
+    /// <returns>对外 DTO。</returns>
+    public static EntryTagTotalDto From(EntryTagTotal item) =>
+        new(item.TagId, item.TagName, item.Amount);
 }
 
 /// <summary>一页账目明细。</summary>

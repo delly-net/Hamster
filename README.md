@@ -795,6 +795,39 @@ live versus settled.
 Failure contract: 400 without the account-set header, 401 when not signed in, 403 when the account set
 is unknown or not yours.
 
+###### Daily report (arbitrary date range)
+
+The `/daily-reports` page asks four questions about the same slice of the ledger at once — how income
+and expense break down by category, how they break down by tag, what each day's income and expense
+were, and a day-by-day table with a range total. Answering them from `daily-flows` + `category-totals`
+would mean three separate scans filtered three ways, with no guarantee that the line, the pies and the
+table describe the same rows. It therefore has one aggregate endpoint that derives all three views
+from a single fetch:
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/entries/daily-report?from=YYYY-MM-DD&to=YYYY-MM-DD&accountIds=&tagIds=` | Bearer | Three aggregations over one date range of the current account set: `{ currencyCode, from, to, days, categories, tags }`. `days` is `{ date, incomeTotal, expenseTotal, netTotal }` ascending by **server-local day** and contains **only days with movement** (the front end zero-fills). `categories` is `{ income, expense }`, each an array of `{ categoryId, categoryName, amount }`; `null` id / name means "uncategorised". `tags` is `{ income, expense }`, each an array of `{ tagId, tagName, amount }`; `null` id / name means "untagged". `from` defaults to the server-local 1st of the current month, `to` to the server-local today. **Closed interval** (the end date's whole day is included), converted to UTC with the server's local time zone, half-open `[from 00:00, to+1 00:00)`. `accountIds` / `tagIds` are repeatable; omitting them means no restriction on that dimension, and the two are **AND**ed. An account id that is invisible, in another currency or a transfer/ledger account is **silently dropped** (intersecting to an empty set returns an empty result, not a 400 — a 400 would make the parameter a probe for other people's accounts). A tag id that matches nothing simply matches nothing. With no usable currency the response is `currencyCode = null` and three empty collections, not a 404. A malformed date, `from` later than `to`, or a span over **366 days** is a 400 as a field-level error on `from` / `to` |
+
+**Tag totals do not add up to the range totals, by design.** A transaction can carry several tags;
+its full amount is counted **once under each tag** (the backend does not apportion it), so the sum of
+the per-tag amounts can exceed the range's income (or expense). Apportioning by proportion would turn
+"how much did this tag account for" into an estimate nobody can audit; counting it in full is at least
+a truthful answer to "is this money related to this tag". A transaction with no tags lands in the
+`tagId = null` "untagged" bucket, exactly as an uncategorised transaction lands in "uncategorised" —
+both are legitimate groupings, not missing data. Categories, by contrast, live on the transaction head
+as a single value, so they cannot double-count.
+
+**Everything else is the same contract as `daily-flows` / `category-totals`**: only the system default
+currency, public accounts plus the caller's own personal accounts (being an admin does not pull other
+people's personal accounts in), money accounts only, and only the primary direction of income and
+expense (income on the debit side, expense on the credit side). Transfers and opening balances do not
+participate. Days are grouped in server-local time with the ±1 second SQL prefilter followed by the
+exact C# boundary check. Tag and category names are returned including inactive ones (deactivating
+means "no longer offered when recording", not "never used").
+
+Failure contract: 400 without the account-set header, 401 when not signed in, 403 when the account set
+is unknown or not yours.
+
 ###### Historical summary candidates
 
 The record form and the edit dialog offer the summaries already used in this account set, so a user

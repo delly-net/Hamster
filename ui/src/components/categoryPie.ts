@@ -39,6 +39,15 @@ export const MAX_CATEGORY_SLICES = 6
 /** 未分类的呈现文案（后端的 `categoryId` 为 `null`）。 */
 export const UNCLASSIFIED_LABEL = '未分类'
 
+/**
+ * 「空值分项」在别处维度的默认称呼之外的用法：标签维度传「未打标签」。
+ *
+ * **不把这层差异做成第二个饼图模块**：两个维度的数据形状相同（一个 `null` 键 + 若干具名项），
+ * 折叠、排序、百分比与配色的规则也逐条相同，差别只在「`null` 那一项叫什么」。
+ * 调用方通过 {@link buildCategorySlices} 的 `nullLabel` 传入即可，默认仍是「未分类」。
+ */
+export const UNTAGGED_LABEL = '未打标签'
+
 /** 折叠桶的呈现文案。 */
 export const OTHER_LABEL = '其他'
 
@@ -151,9 +160,13 @@ function sliceKey(item: EntryCategoryTotal): string {
  * 一个异常值把整张图的百分比算成 `NaN`（扇区角度会退化成不可见的 0，看起来像「没有这一类」）。
  *
  * @param items 本侧（收入或支出）的分类合计，顺序不限。
+ * @param nullLabel 「空值分项」的呈现文案：分类维度是「未分类」，标签维度传「未打标签」。
  * @returns 最多 6 个扇区，按金额降序；无有效数据时为空数组。
  */
-export function buildCategorySlices(items: readonly EntryCategoryTotal[]): CategoryPieSlice[] {
+export function buildCategorySlices(
+  items: readonly EntryCategoryTotal[],
+  nullLabel: string = UNCLASSIFIED_LABEL,
+): CategoryPieSlice[] {
   const sorted = items
     .filter((item) => Number.isFinite(item.amount) && item.amount > 0)
     .slice()
@@ -182,7 +195,7 @@ export function buildCategorySlices(items: readonly EntryCategoryTotal[]): Categ
 
     slices.push({
       key: sliceKey(item),
-      name: item.categoryName ?? UNCLASSIFIED_LABEL,
+      name: item.categoryName ?? nullLabel,
       amount: item.amount,
       percent: (item.amount / total) * 100,
       colorToken,
@@ -198,7 +211,7 @@ export function buildCategorySlices(items: readonly EntryCategoryTotal[]): Categ
       key: 'other',
       // 未分类顶掉第 5 名后，它不会落进折叠桶；保留这个判断是为了让折叠规则本身完整：
       // 万一上游改了「始终保留未分类」的规则，图例也不会悄悄把未分类藏进「其他」
-      name: containsUnclassified ? `${OTHER_LABEL}（含${UNCLASSIFIED_LABEL}）` : OTHER_LABEL,
+      name: containsUnclassified ? `${OTHER_LABEL}（含${nullLabel}）` : OTHER_LABEL,
       amount,
       percent: (amount / total) * 100,
       colorToken: CATEGORY_COLOR_TOKENS[paletteIndex] ?? '--color-chart-neutral',

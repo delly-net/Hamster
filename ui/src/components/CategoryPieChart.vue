@@ -28,6 +28,7 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { EntryCategoryTotal } from '@/stores/categoryTotals'
 import {
+  UNCLASSIFIED_LABEL,
   buildCategoryPieLabel,
   buildCategoryPieOption,
   buildCategorySlices,
@@ -40,18 +41,28 @@ import type { ChartTheme } from './trendChart'
 
 use([CanvasRenderer, PieChart, TooltipComponent])
 
-const props = defineProps<{
-  /** 图名（「收入构成」/「支出构成」），同时用作系列名。 */
-  title: string
-  /** 本侧的「分类 → 金额」；为空时呈现 `emptyText`。 */
-  items: readonly EntryCategoryTotal[]
-  /** 金额所属币种；`null` 表示没有可用币种（调用方通常已先拦掉这种情形）。 */
-  currencyCode: string | null
-  /** 周期文案（如「2026年10月」），用于合计行与读屏描述。 */
-  period: string
-  /** 本侧没有数据时的提示文案。 */
-  emptyText: string
-}>()
+const props = withDefaults(
+  defineProps<{
+    /** 图名（「收入构成」/「支出构成」），同时用作系列名。 */
+    title: string
+    /** 本侧的「分类 → 金额」；为空时呈现 `emptyText`。 */
+    items: readonly EntryCategoryTotal[]
+    /** 金额所属币种；`null` 表示没有可用币种（调用方通常已先拦掉这种情形）。 */
+    currencyCode: string | null
+    /** 周期文案（如「2026年10月」），用于合计行与读屏描述。 */
+    period: string
+    /** 本侧没有数据时的提示文案。 */
+    emptyText: string
+    /**
+     * 「空值分项」的呈现文案（`categoryId` 为 `null` 的那一项叫法）。
+     *
+     * 默认「未分类」。**标签维度传「未打标签」**：数据形状与折叠规则完全相同，
+     * 差别只在 `null` 表示的是「没有分类」还是「没有标签」（见 `categoryPie.ts`）。
+     */
+    nullLabel?: string
+  }>(),
+  { nullLabel: UNCLASSIFIED_LABEL },
+)
 
 /**
  * 当前配色下的绘图主题。
@@ -62,7 +73,7 @@ const props = defineProps<{
 const theme = ref<ChartTheme>(readChartTheme())
 
 /** 折叠、排序、算占比与颜色都在这里一次完成。 */
-const slices = computed(() => buildCategorySlices(props.items))
+const slices = computed(() => buildCategorySlices(props.items, props.nullLabel))
 
 /** 本侧合计：用于标题旁的数字与宽度为 0 时的兜底判断。 */
 const total = computed(() => slices.value.reduce((sum, slice) => sum + slice.amount, 0))
