@@ -58,6 +58,19 @@ public sealed class EntryEndpoints : IEndpoint
     /// </remarks>
     private const int MAX_REPORT_DAYS = 366;
 
+    /// <summary>月报表默认的月份跨度（月，闭区间计数）：从当前月往前推，含当月。</summary>
+    /// <remarks>
+    /// 只在**省略参数**时使用；与前端「默认过去 12 个月」保持一致。
+    /// </remarks>
+    private const int DEFAULT_REPORT_MONTHS = 12;
+
+    /// <summary>月报表允许的最长月份区间（月，闭区间计数）。</summary>
+    /// <remarks>
+    /// 区间按月份展开：表格一月一行、折线一月一点。36 个月（3 年）给纵向对比留出空间，
+    /// 又不至于让一次聚合扫过十年以上的历史。前端同样按 36 拦截，两端拦的是不同的事。
+    /// </remarks>
+    private const int MAX_REPORT_MONTHS = 36;
+
     /// <summary>日期参数格式错误时的字段错误。</summary>
     private static readonly string[] DATE_ERROR =
         [$"日期格式不正确，应为 {DATE_FORMAT}（如 2026-10-01）"];
@@ -67,6 +80,16 @@ public sealed class EntryEndpoints : IEndpoint
 
     /// <summary>日期区间过长时的字段错误。</summary>
     private static readonly string[] DATE_SPAN_ERROR = [$"日期区间不能超过 {MAX_REPORT_DAYS} 天"];
+
+    /// <summary>月份参数格式错误时的字段错误。</summary>
+    private static readonly string[] MONTH_ERROR =
+        [$"月份格式不正确，应为 {MONTH_FORMAT}（如 2026-10）"];
+
+    /// <summary>月份区间非法时的字段错误。</summary>
+    private static readonly string[] MONTH_RANGE_ERROR = ["结束月份不能早于开始月份"];
+
+    /// <summary>月份区间过长时的字段错误。</summary>
+    private static readonly string[] MONTH_SPAN_ERROR = [$"月份区间不能超过 {MAX_REPORT_MONTHS} 个月"];
 
     /// <summary>时间参数格式错误时的字段错误。</summary>
     private static readonly string[] TIME_ERROR =
@@ -565,6 +588,136 @@ public sealed class EntryEndpoints : IEndpoint
                 "`from` 晚于 `to`、或区间超过 366 天返回 400 并在 `errors.to` 说明原因。" +
                 "没有可用币种时返回 `currencyCode = null` 与三份空集合，而不是 404。" +
                 "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
+
+        // 月报表：与上方日报表同一套口径、同一份聚合内核，只是把时间粒度从「日」换成「月」。
+        group.MapGet("/monthly-report", async (
+                string? from,
+                string? to,
+                int[]? accountIds,
+                int[]? tagIds,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                ICurrencyService currencies,
+                IEntryQueryService entries,
+                ILogger<EntryEndpoints> logger,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                var errors = new Dictionary<string, string[]>();
+
+                // 月份按 **yyyy-MM** 解析：月报表的区间由用户直接选月份，而不是选日期再折算。
+                // 绑成 string 再自行解析的理由同 `GET /api/entries`：
+                // 非法输入要得到字段级中文错误，而不是框架的空白 400。
+                var hasFrom = TryParseLocalMonth(from, out var fromMonth, errors, "from");
+                var hasTo = TryParseLocalMonth(to, out var toMonth, errors, "to");
+
+                // 省略即默认「当前月往前推 11 个月 ~ 当前月」，共 12 个月（**含当月**）：
+                // 与前端默认区间同构，也避免调用方自己再算一次「过去 12 个月」。
+                var now = DateTime.Now;
+                var currentMonth = new DateTime(now.Year, now.Month, 1);
+                var effectiveFrom = hasFrom
+                    ? fromMonth
+                    : currentMonth.AddMonths(-(DEFAULT_REPORT_MONTHS - 1));
+                var effectiveTo = hasTo ? toMonth : currentMonth;
+
+                if (errors.Count == 0)
+                {
+                    var monthCount = ((effectiveTo.Year - effectiveFrom.Year) * 12)
+                        + effectiveTo.Month
+                        - effectiveFrom.Month
+                        + 1;
+
+                    if (effectiveFrom > effectiveTo)
+                    {
+                        errors["to"] = MONTH_RANGE_ERROR;
+                    }
+                    else if (monthCount > MAX_REPORT_MONTHS)
+                    {
+                        errors["to"] = MONTH_SPAN_ERROR;
+                    }
+                }
+
+                if (errors.Count > 0)
+                {
+                    return Results.ValidationProblem(errors);
+                }
+
+                var fromLabel = effectiveFrom.ToString(MONTH_FORMAT, CultureInfo.InvariantCulture);
+                var toLabel = effectiveTo.ToString(MONTH_FORMAT, CultureInfo.InvariantCulture);
+
+                // 与分类合计、按日收支同一条取舍：没有可用币种时返回空结果而不是 404。
+                var currency = await currencies.GetDefaultAsync(cancellationToken);
+                if (currency is null)
+                {
+                    return Results.Ok(new EntryMonthlyReportResponse(
+                        null,
+                        fromLabel,
+                        toLabel,
+                        [],
+                        new EntryCategoryTotalsDto([], []),
+                        new EntryTagTotalsDto([], [])));
+                }
+
+                // 月份区间是**服务器本地**的闭区间：上界取结束月份的**次月 1 日 0 点**（不含），
+                // 于是「结束月份整月的账」都落在区间内；当月尚未结束时自然只有截至今天的数据。
+                var timeZone = LocalDay.ResolveTimeZone(logger);
+                var fromUtc = LocalDay.StartToUtc(effectiveFrom, timeZone);
+                var toUtc = LocalDay.StartToUtc(effectiveTo.AddMonths(1), timeZone);
+
+                var result = await entries.ListMonthlyReportAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    currency.Code,
+                    fromUtc,
+                    toUtc,
+                    timeZone,
+                    accountIds,
+                    tagIds,
+                    cancellationToken);
+
+                return Results.Ok(EntryMonthlyReportResponse.Create(
+                    currency.Code, fromLabel, toLabel, result));
+            })
+            .WithName("GetEntryMonthlyReport")
+            .WithSummary("月报表聚合（按月 / 按分类 / 按标签）")
+            .WithDescription(
+                "返回当前账套、**系统默认币种**下任意月份区间内的三份聚合，供「月报表」页使用：" +
+                "按月收支（折线与表格）、按分类合计（两张饼图）、按标签合计（两张饼图）。" +
+                "**三份结果由同一次查询派生**：同一批主方向明细行在服务端内存里同时折出三个视角，" +
+                "故折线、饼图与表格的口径天然一致，不会出现「一处有、一处没有」。" +
+                "**这是实时聚合**：直接统计交易明细，按月分组按**服务器本地时区**在 C# 侧折算" +
+                "（不在 SQL 侧按月 GROUP BY），与 `daily-report` 共用同一份取数与可见性实现。" +
+                "**只统计收入与支出两类交易**（各取主账户方向那一条明细：收入取借方、支出取贷方）：" +
+                "转账是账户之间的搬运、没有单侧发生额，期初余额也不是区间发生额，两者均不计入。" +
+                "**账户范围是公共账户 + 当前用户本人的个人账户**的资金 / 负债账户；" +
+                "即使调用者是管理员也**不包含其他成员的个人账户**——与 `category-totals` / `daily-report` 同一口径。" +
+                "`accountIds` 可重复传参、省略即不限账户；**不可见账户、非默认币种账户与往来账户会被静默剔除**" +
+                "（不报错、也不返回其数据），交集为空时返回全空结果——若对不可见账户报错，这个参数就成了探测他人账户的探针。" +
+                "`tagIds` 可重复传参、省略即不限标签，**匹配语义是「任一命中」**；" +
+                "与 `accountIds` 同时给出时是「且」的关系，两个维度各自收窄。" +
+                "**标签是多值维度**：一笔交易挂多个标签时，其金额在**每个标签下各计一次**（金额不摊分），" +
+                "故 `tags` 各标签金额之和可能大于区间收支合计；没有标签的交易归入 `tagId` / `tagName` 均为 null 的" +
+                "「未打标签」一项。分类维度仍按交易头那一个分类归集，不存在重复计入；" +
+                "`categoryId` / `categoryName` 均为 null 表示「未分类」——两者都是合法的归集结果，不是数据缺失。" +
+                "分类名与标签名由后端下发且**含已停用项**（停用是「不再供新记账选择」，不是「历史上从未用过」）。" +
+                "`months` **只含至少有一笔收支的月份**（按服务器本地月份升序）：补零是呈现层的决定，" +
+                "月报表的数据源是实时的，空白月份就是真实的 0。" +
+                "`from` / `to` 为 **yyyy-MM** 的服务器本地月份，**闭区间**（含结束月份整月）；" +
+                "省略 `from` 取当前月往前推 11 个月、省略 `to` 取当前月。" +
+                "月份格式非法返回 400 并在 `errors.from` / `errors.to` 给出字段级错误；" +
+                "`from` 晚于 `to`、或区间超过 36 个月返回 400 并在 `errors.to` 说明原因。" +
+                "没有可用币种时返回 `currencyCode = null` 与三份空集合，而不是 404。" +
+                "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
     }
 
     /// <summary>
@@ -609,6 +762,48 @@ public sealed class EntryEndpoints : IEndpoint
         }
 
         day = parsed.Date;
+        return true;
+    }
+
+    /// <summary>
+    /// 解析 <c>yyyy-MM</c> 月份参数。
+    /// </summary>
+    /// <param name="value">查询参数原值；<c>null</c> 或空白表示省略。</param>
+    /// <param name="monthStart">解析结果：该月 1 日（时刻部分为 00:00:00）。</param>
+    /// <param name="errors">字段级错误收集器；非法取值时写入 <paramref name="key"/>。</param>
+    /// <param name="key">字段名（<c>from</c> / <c>to</c>）。</param>
+    /// <returns>成功解析返回 <c>true</c>；省略或格式非法返回 <c>false</c>。</returns>
+    /// <remarks>
+    /// 与 <see cref="TryParseLocalDate"/> 同构，只是粒度换成月：**省略与非法都返回 <c>false</c>，
+    /// 区别在是否写错误**——调用方据 <c>errors.ContainsKey</c> 判断是否继续，省略则各自回落默认值。
+    /// 用 <c>TryParseExact</c> 而不是 <c>TryParse</c>：接口声明的格式只有一个，
+    /// 宽进会让前端两种写法各写一遍。
+    /// </remarks>
+    private static bool TryParseLocalMonth(
+        string? value,
+        out DateTime monthStart,
+        Dictionary<string, string[]> errors,
+        string key)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            monthStart = default;
+            return false;
+        }
+
+        if (!DateTime.TryParseExact(
+                value,
+                MONTH_FORMAT,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            monthStart = default;
+            errors[key] = MONTH_ERROR;
+            return false;
+        }
+
+        monthStart = new DateTime(parsed.Year, parsed.Month, 1);
         return true;
     }
 
@@ -1121,6 +1316,70 @@ public sealed record EntryDailyReportResponse(
         new EntryTagTotalsDto(
             [.. report.Tags.Income.Select(EntryTagTotalDto.From)],
             [.. report.Tags.Expense.Select(EntryTagTotalDto.From)]));
+}
+
+/// <summary>月报表聚合的响应体。</summary>
+/// <param name="CurrencyCode">实际统计的币种代码；无可用币种时为 <c>null</c>。</param>
+/// <param name="From">实际查询的起始月份（<c>yyyy-MM</c>，服务器本地月份，**含**）。</param>
+/// <param name="To">实际查询的结束月份（<c>yyyy-MM</c>，服务器本地月份，**含**）。</param>
+/// <param name="Months">按月份升序的按月收支；**只含至少有一笔收支的月份**。</param>
+/// <param name="Categories">按分类的收入与支出合计。</param>
+/// <param name="Tags">按标签的收入与支出合计。</param>
+/// <remarks>
+/// 与 <see cref="EntryDailyReportResponse"/> 同构，只是 <c>days</c> 换成 <c>months</c>：
+/// 调用方的呈现层可以按同一套规则处理两种粒度。
+/// </remarks>
+public sealed record EntryMonthlyReportResponse(
+    string? CurrencyCode,
+    string From,
+    string To,
+    EntryMonthlyFlowDto[] Months,
+    EntryCategoryTotalsDto Categories,
+    EntryTagTotalsDto Tags)
+{
+    /// <summary>由服务层结果构造响应体。</summary>
+    /// <param name="currencyCode">实际统计的币种代码；无可用币种时为 <c>null</c>。</param>
+    /// <param name="from">实际查询的起始月份（<c>yyyy-MM</c>）。</param>
+    /// <param name="to">实际查询的结束月份（<c>yyyy-MM</c>）。</param>
+    /// <param name="report">服务层的三份聚合。</param>
+    /// <returns>对外响应体。</returns>
+    /// <remarks>
+    /// **方法名同样是 <c>Create</c>**：本记录已有名为 <paramref name="from"/> 的属性，
+    /// 同名静态方法会与它冲突（CS0102）——与 <see cref="EntryDailyReportResponse"/> 同一命名让位。
+    /// </remarks>
+    public static EntryMonthlyReportResponse Create(
+        string? currencyCode,
+        string from,
+        string to,
+        EntryMonthlyReport report) => new(
+        currencyCode,
+        from,
+        to,
+        [.. report.Months.Select(EntryMonthlyFlowDto.From)],
+        new EntryCategoryTotalsDto(
+            [.. report.Categories.Income.Select(EntryCategoryTotalDto.From)],
+            [.. report.Categories.Expense.Select(EntryCategoryTotalDto.From)]),
+        new EntryTagTotalsDto(
+            [.. report.Tags.Income.Select(EntryTagTotalDto.From)],
+            [.. report.Tags.Expense.Select(EntryTagTotalDto.From)]));
+}
+
+/// <summary>某个月份的收入、支出与净额（对外暴露）。</summary>
+/// <param name="Month">月份（<c>yyyy-MM</c>，**服务器本地月份**）。</param>
+/// <param name="IncomeTotal">当月收入合计，**恒为非负**。</param>
+/// <param name="ExpenseTotal">当月支出合计，**恒为非负**。</param>
+/// <param name="NetTotal">净额 = <paramref name="IncomeTotal"/> − <paramref name="ExpenseTotal"/>（**带符号**）。</param>
+public sealed record EntryMonthlyFlowDto(
+    string Month,
+    decimal IncomeTotal,
+    decimal ExpenseTotal,
+    decimal NetTotal)
+{
+    /// <summary>由服务层的按月收支构造 DTO。</summary>
+    /// <param name="item">服务层的按月收支。</param>
+    /// <returns>对外 DTO。</returns>
+    public static EntryMonthlyFlowDto From(EntryMonthlyFlow item) =>
+        new(item.Month, item.IncomeTotal, item.ExpenseTotal, item.NetTotal);
 }
 
 /// <summary>收入与支出的分类合计（日报表响应内嵌）。</summary>

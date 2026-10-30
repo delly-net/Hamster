@@ -2,48 +2,73 @@
 /**
  * /reports 页面：月报表。
  *
- * 在「账目明细」的实时口径上再多一层**按月**的读法：选定一个自然月，回答三件事——
- * 这个月一共赚了多少、花了多少（月度汇总）；每天各是多少（按日双折线）；
- * 钱花在哪些分类上（收入 / 支出按分类合并的汇总表）。
+ * 在账目明细的实时口径上再给一层**按任意月份区间**的读法：选好区间、账户与标签后，
+ * 一次请求回答四件事——收入 / 支出各按分类怎么构成（两张饼图）、按标签怎么构成（两张饼图）、
+ * 每个月的收入与支出走势（双折线）、每月一行的收支与净额（表格 + 合计）。
  *
- * **数据是实时聚合的，不是结算快照**：按日收支来自 `GET /api/entries/daily-flows`，
- * 分类汇总来自 `GET /api/entries/category-totals`，两者都由后端直接统计交易明细，
- * 与账目明细页同源，含尚未结算的日期。首页那两张走势图读的是结算订阅落库的按天记录，
- * 二者口径相同（默认币种、公共 + 本人个人、资金 / 负债账户、只计收入与支出），
- * 差别只在「实时 / 已结算」——本页不复用结算接口，否则今天就看不到今天的收支。
+ * **与日报表同一套能力，只把时间粒度从「日」换成「月」**：日报表看「这段时间的每一天」，
+ * 月报表看「这几年里的每个月」——跨年对比、按账户 / 标签收窄，都是明细页分页与单月视图
+ * 表达不了的读法。两者的口径逐条相同（默认币种、公共 + 本人个人、资金 / 负债账户、
+ * 只计收入与支出、转账与期初不计），差别只在区间与粒度。
  *
- * **折线的横轴是整月每一天**：后端只返回「真的发生过收支」的日期（它不补零），
- * 本页把所选月份 1 日到月末缺的日期补成 0。这与首页结算图表的「缺日不补零」**刻意不同**：
- * 那里的空白日表示「还没结算」，补 0 会把「没算」画成「就是 0」；而本页的数据源是实时的，
- * 空白日的含义就是「当天没有收入与支出」，0 是事实。补零只发生在**呈现层**，
- * 后端接口仍如实给出有发生额的日期。
+ * **四块数据来自同一个请求**（`GET /api/entries/monthly-report`）：后端一次取回候选明细，
+ * 在内存里同时折出按月、按分类与按标签，故折线、饼图与表格的口径天然一致，
+ * 不会出现「折线有、饼图没有」。页面因此只维护一个请求状态，不逐块拼装，
+ * 也就没有「一块失败、另一块还在显示上一份数据」的画面。
  *
- * **分类汇总表复用 `category-totals`**：它与按日接口的口径逐条一致，没必要为同一份聚合再造一个端点。
- * 页面把收入侧与支出侧按分类主键合并成一张表（`categoryId = null` 即「未分类」）并按两侧合计降序，
- * 于是「这个月哪一类进出最多」在同一行里直接可读。金额格式仍走 `formatUnsigned` / `formatSigned`
- * ——收入、支出列显示正数，只有净额列保留符号（与账目明细页同一约定）。
+ * **补零只发生在呈现层**：后端只返回「真的发生过收支」的月份，本页按所选区间逐月补齐——
+ * 月报表的数据源是实时的，空白月就是真实的 0（与首页结算图表的「缺日不补零」刻意不同：
+ * 那里的空白表示「还没结算」，补 0 会把「没算」画成「就是 0」）。本月尚未结束时，
+ * 本月这一点就是截至今天的发生额，不按整月折算、也不预测。
+ * 表格里没有发生额的月份收入 / 支出两列显示「—」，净额仍按符号给出（零就是 `+0.00`）。
  *
- * **月份默认浏览器本地当前月**，不沿用首页「每月 1 号看上月」的规则（#92 明确只作用于首页）；
- * 切换月份或账套都会重新取数。页面不提供账户 / 标签筛选：报表口径固定为
- * 「公共 + 本人个人、系统默认币种、资金 / 负债账户」，逐账户的筛选留给账目明细页。
+ * **标签是多值维度**：一笔交易挂多个标签时，其金额在**每个标签下各计一次**（后端不摊分），
+ * 故各标签金额之和可能大于区间收支合计；这一点在标签契约里逐字写明，页面不试图「修正」它。
+ * 分类则是交易头上的**一个**分类，不存在重复计入。没有标签的交易归入「未打标签」，
+ * 与「未分类」一样是合法的归集结果，不是数据缺失。
  *
- * 两块数据**各自加载、各自失败**：分类汇总接口的一次超时，没有理由让已经查得到的按日曲线变成空白。
- * 窄屏（<1024px）下汇总表切换为卡片流，沿用全站唯一的 1023px 断点。
+ * **筛选是显式的**：月份区间、账户勾选、标签勾选都先落在草稿上，点【查询】才生效——
+ * 与日报表、账目明细页同一取舍（本页有三维条件，边改边查会让每一次勾选都触发一次全量聚合）。
+ * 页面不做「至少勾一个账户」之外的其他校验；区间需完整、起止不倒置、最多 36 个月，
+ * 后端会再校验一遍，前端先拦是为了不把一个必然 400 的请求发出去。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
+import CategoryPieChart from '@/components/CategoryPieChart.vue'
 import TrendChart from '@/components/TrendChart.vue'
+import { UNTAGGED_LABEL } from '@/components/categoryPie'
 import { formatAmount, formatSigned, formatUnsigned, signedCellClass } from '@/components/entryFormat'
 import type { TrendSeriesSpec } from '@/components/trendChart'
 import { useAccountSetsStore } from '@/stores/accountSets'
-import { useCategoryTotalsStore, type EntryCategoryTotal } from '@/stores/categoryTotals'
-import { useDailyFlowsStore } from '@/stores/dailyFlows'
+import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
+import type { EntryCategoryTotal } from '@/stores/categoryTotals'
+import { useCurrenciesStore } from '@/stores/currencies'
+// 标签合计的形状直接取日报表那一份：月报表与日报表的标签维度是同一个契约（见 `stores/monthlyReport.ts`）
+import type { ReportTagTotal } from '@/stores/dailyReport'
+import { useMonthlyReportStore } from '@/stores/monthlyReport'
+import { useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
-const dailyFlows = useDailyFlowsStore()
-const categoryTotals = useCategoryTotalsStore()
+const accountsStore = useAccountsStore()
+const currenciesStore = useCurrenciesStore()
+const tagsStore = useTagsStore()
+const monthlyReport = useMonthlyReportStore()
 
-/** 是否已选定账套；未选定时页面只提示、不请求（三块数据都按账套隔离）。 */
+/** 后端约定的月份文本格式。 */
+const MONTH_PATTERN = /^(\d{4})-(\d{2})$/
+
+/**
+ * 区间上限（月）。
+ *
+ * 与后端 `MAX_REPORT_MONTHS` 保持一致：后端卡 36 个月是为了不让一次查询扫过无限长的历史；
+ * 前端先拦一遍只是省掉一次必然返回 400 的往返，**真正生效的仍是后端那道校验**。
+ */
+const MAX_REPORT_MONTHS = 36
+
+/** 默认区间长度（月，含当月）。 */
+const DEFAULT_REPORT_MONTHS = 12
+
+/** 是否已选定账套；未选定时页面只提示、不请求（月报表按账套隔离）。 */
 const hasAccountSet = computed(() => accountSets.currentId !== null)
 
 /** 补零到两位。 */
@@ -61,248 +86,407 @@ function currentMonthLocal(): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}`
 }
 
-/** 当前查看的月份（`yyyy-MM`）。`<input type="month">` 的原生取值格式即此。 */
-const selectedMonth = ref(currentMonthLocal())
-
-/** 两块数据各自的失败文案；无失败时为空串。 */
-const flowError = ref('')
-const categoryError = ref('')
-
-/** 月份文案（`2026年10月`）；格式异常时原样回显。 */
-const periodLabel = computed(() => {
-  const [year, monthPart] = selectedMonth.value.split('-')
-  if (year === undefined || monthPart === undefined) {
-    return selectedMonth.value
-  }
-
-  return `${year}年${Number(monthPart)}月`
-})
+/**
+ * 浏览器本地「当前月往前推 `offset` 个月」的月份（`yyyy-MM`）。
+ *
+ * 逐月构造 `new Date(year, month - offset, 1)` 而不是对同一个 Date 反复 `setMonth`：
+ * 前者每次都从原始年月出发，跨年与「31 号减一个月」都由平台处理，不会把日期漂移累积进结果。
+ */
+function monthsAgoLocal(offset: number): string {
+  const now = new Date()
+  const at = new Date(now.getFullYear(), now.getMonth() - offset, 1)
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}`
+}
 
 /**
- * 所选月份的天数；月份非法时为 0（此时不画图）。
+ * 把 `yyyy-MM` 解析成「从公元 0 年起的月序号」；格式或值非法时返回 `null`。
  *
- * `new Date(y, m, 0)` 取的是「第 m 个月的第 0 天」，即上一个月的最后一天——
- * 传入 1 起始的月份号刚好得到该月天数，二月与闰年都由平台处理，不写查表。
+ * 月序号 = 年 × 12 + (月 − 1)，于是「两个月份隔了几个月」只是两个整数的差，
+ * 不必引入任何日期算术（也就不必担心时区与夏令时）。
  */
-const daysInMonth = computed(() => {
-  const [yearPart, monthPart] = selectedMonth.value.split('-')
-  const year = Number(yearPart)
-  const month = Number(monthPart)
-  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+function monthIndex(value: string): number | null {
+  const matched = MONTH_PATTERN.exec(value)
+  if (matched === null) {
+    return null
+  }
+
+  const year = Number(matched[1])
+  const month = Number(matched[2])
+  if (!Number.isInteger(year) || month < 1 || month > 12) {
+    return null
+  }
+
+  return year * 12 + (month - 1)
+}
+
+/** 月序号还原成 `yyyy-MM`。 */
+function monthText(index: number): string {
+  const year = Math.floor(index / 12)
+  const month = (index % 12) + 1
+  return `${year}-${pad(month)}`
+}
+
+/**
+ * 两个月份之间的月数（闭区间，含起止两端）。
+ *
+ * @returns 月数；任一月份非法或结束早于开始时为 0。
+ */
+function monthCountBetween(from: string, to: string): number {
+  const start = monthIndex(from)
+  const end = monthIndex(to)
+  if (start === null || end === null) {
     return 0
   }
 
-  return new Date(year, month, 0).getDate()
-})
-
-/** 按日接口的响应；未查过时为 `null`。 */
-const flow = computed(() => dailyFlows.daily)
-
-/**
- * 月度汇总：由后端给出的按日数据相加。
- *
- * 与首页「收支」面板的合计同一算法（#75）：区间净额 = 收入合计 − 支出合计，
- * 不逐日累加 `netTotal`——两者数学上相等，但前者少一层可以把符号弄反的机会。
- */
-const totals = computed(() => {
-  let income = 0
-  let expense = 0
-  for (const point of flow.value?.days ?? []) {
-    income += point.incomeTotal
-    expense += point.expenseTotal
-  }
-
-  return { income, expense, net: income - expense }
-})
-
-/** 一个月里的某一天（`M月D日`）；`<input type="month">` 的月份部分用于拼横轴文案。 */
-function dayLabel(monthPart: string, day: number): string {
-  return `${Number(monthPart)}月${day}日`
-}
-
-/** 折线图的呈现数据；没有可画的数据时为 `null`。 */
-interface ChartView {
-  xLabels: string[]
-  series: TrendSeriesSpec[]
-  ariaLabel: string
+  return end - start + 1
 }
 
 /**
- * 按日折线：把后端「只含有发生额的日期」补齐成整月每一天。
+ * 枚举区间内的每一个月（`yyyy-MM`，升序）。
  *
- * 补 0 的理由见文件头：数据源是实时的，空白日就是真实的 0。
- * 隐藏日（如 2 月 30 日）不会出现——`daysInMonth` 已经按真实月长算好。
+ * 月数超过上限或区间非法时返回空数组——调用方据此不再画图。
  */
-const chart = computed<ChartView | null>(() => {
-  const data = flow.value
-  if (data === null || data.currencyCode === null || data.days.length === 0) {
-    return null
+function enumerateMonths(from: string, to: string): string[] {
+  const count = monthCountBetween(from, to)
+  const start = monthIndex(from)
+  if (start === null || count <= 0 || count > MAX_REPORT_MONTHS) {
+    return []
   }
 
-  const count = daysInMonth.value
-  const [yearPart, monthPart] = selectedMonth.value.split('-')
-  if (count <= 0 || monthPart === undefined) {
-    return null
+  const months: string[] = []
+  for (let offset = 0; offset < count; offset += 1) {
+    months.push(monthText(start + offset))
   }
 
-  const byDate = new Map(data.days.map((point) => [point.date, point]))
-  const xLabels: string[] = []
-  const incomeValues: number[] = []
-  const expenseValues: number[] = []
+  return months
+}
 
-  for (let day = 1; day <= count; day += 1) {
-    const date = `${yearPart}-${pad(day)}`
-    const point = byDate.get(date)
-    xLabels.push(dayLabel(monthPart, day))
-    incomeValues.push(point?.incomeTotal ?? 0)
-    expenseValues.push(point?.expenseTotal ?? 0)
+/** 起始月份草稿；默认当前月往前推 11 个月（含当月共 12 个月）。 */
+const fromMonth = ref(monthsAgoLocal(DEFAULT_REPORT_MONTHS - 1))
+/** 结束月份草稿；默认当前月（浏览器本地）。 */
+const toMonth = ref(currentMonthLocal())
+/** 已勾选的账户主键；候选就绪后默认全选。 */
+const selectedAccountIds = ref<number[]>([])
+/** 已勾选的标签主键；空数组即「不限标签」。 */
+const selectedTagIds = ref<number[]>([])
+
+/** 前端校验文案；为空串表示条件可用。 */
+const filterError = ref('')
+/** 请求或候选加载的失败文案；为空串表示没有失败。 */
+const errorMessage = ref('')
+
+/** 最近一次查询结果；`null` 表示还没查过。 */
+const report = computed(() => monthlyReport.report)
+
+/** 当前查看的区间文案；未查过时为占位文案。 */
+const periodLabel = computed(() => {
+  const data = report.value
+  if (data === null) {
+    return '所选区间'
   }
 
-  return {
-    xLabels,
-    series: [
-      { key: 'income', label: '收入', colorToken: '--color-income', values: incomeValues },
-      { key: 'expense', label: '支出', colorToken: '--color-expense', values: expenseValues },
-    ],
-    ariaLabel:
-      `${periodLabel.value}每日收入与支出：收入合计 ${formatAmount(totals.value.income)}，` +
-      `支出合计 ${formatAmount(totals.value.expense)}，` +
-      `净额 ${formatSigned(totals.value.net)}，币种 ${data.currencyCode}。`,
-  }
+  return data.from === data.to ? data.from : `${data.from} 至 ${data.to}`
 })
 
-/** 分类汇总表的一行：同一分类的收入、支出与净额。 */
-interface SummaryRow {
-  /** 行标识：分类主键（未分类用固定串）。 */
-  key: string
-  /** 分类名称；未分类为「未分类」。 */
-  name: string
-  /** 该分类的收入合计，恒为非负；没有收入时为 0。 */
+/** 金额所属币种；未查过或没有可用币种时为 `null`。 */
+const currencyCode = computed(() => report.value?.currencyCode ?? null)
+
+/** 区间内是否至少有一笔收入或支出。 */
+const hasData = computed(() => (report.value?.months.length ?? 0) > 0)
+
+/**
+ * 可选的账户候选：当前账套内**系统默认币种**下的资金 / 负债账户，含已停用。
+ *
+ * 按默认币种过滤的理由与后端逐条一致：报表口径固定为默认币种，其他币种账户上的收支
+ * 根本不进这次聚合。与账目明细页不同——那里还能按账户选币种外账户看各自明细，
+ * 这里若列出来，勾选后只会得到一片空白，看起来像「这个账户没有收支」。
+ *
+ * 含已停用账户的理由同明细页：停用是「不再用于新记账」，不是「历史上没有发生过」。
+ */
+const moneyAccountOptions = computed(() => {
+  const code = currenciesStore.defaultCode
+  if (code === null) {
+    return []
+  }
+
+  return accountsStore.accounts.filter(
+    (account) => MONEY_ACCOUNT_TYPES.includes(account.type) && account.currencyCode === code,
+  )
+})
+
+/** 标签候选：当前账套内的标签，含已停用（理由同上）。 */
+const tagOptions = computed(() => tagsStore.tags)
+
+/**
+ * 月份区间的校验文案。
+ *
+ * 三种情形分开说：没选完整、起止倒置、超过上限——同一个「条件不合法」下面藏着三种
+ * 不同的改法，笼统写一句会让人不知道下一步点哪里。
+ */
+const rangeError = computed(() => {
+  if (fromMonth.value === '' || toMonth.value === '') {
+    return '请选择完整的起始与结束月份。'
+  }
+
+  const count = monthCountBetween(fromMonth.value, toMonth.value)
+  if (count <= 0) {
+    return '结束月份不能早于起始月份。'
+  }
+
+  if (count > MAX_REPORT_MONTHS) {
+    return `月份区间最多 ${MAX_REPORT_MONTHS} 个月，请缩小范围。`
+  }
+
+  return ''
+})
+
+/** 按月表格的一行：区间内的某个月（没有发生额的月份已补 0）。 */
+interface MonthlyRow {
+  /** 月份（`yyyy-MM`）。 */
+  month: string
+  /** 当月收入合计，恒为非负。 */
   income: number
-  /** 该分类的支出合计，恒为非负；没有支出时为 0。 */
+  /** 当月支出合计，恒为非负。 */
   expense: number
   /** 净额 = 收入 − 支出（带符号）。 */
   net: number
 }
 
 /**
- * 把分类合计的收入侧与支出侧按分类主键合并成一张表。
+ * 按月表格的行：区间内**每个月**一行，没有发生额的月份补 0。
  *
- * **不能直接拼接两个列表**：同一个分类可能既有收入又有支出（如「退款」），
- * 分开列会让人以为它们是两类东西。`categoryId = null` 是「未分类」这一合法归集结果，
- * 用固定 key 合并，不与任何真实分类冲突。
- *
- * 排序按两侧合计（进出总额）降序：月报表回答的是「哪一类动得最多」，
- * 只按收入或只按支出排都会把另一半的动静藏起来；同额按名称升序保证行序稳定。
+ * 补零的理由见文件头；`byMonth` 只用来取有发生额的那个月，其余月份落到 `?? 0` 分支。
+ * 净额在这里现算而不是取后端的 `netTotal`：表格的「合计」行也要用收入与支出两个合计相减，
+ * 两处用同一个算式，就不会出现「逐行净额之和」与「合计净额」对不上的口子。
  */
-const summaryRows = computed<SummaryRow[]>(() => {
-  const data = categoryTotals.totals
+const monthlyRows = computed<MonthlyRow[]>(() => {
+  const data = report.value
   if (data === null) {
     return []
   }
 
-  const rows = new Map<string, SummaryRow>()
+  const byMonth = new Map(data.months.map((point) => [point.month, point]))
 
-  function accumulate(item: EntryCategoryTotal, side: 'income' | 'expense'): void {
-    const key = item.categoryId === null ? 'uncategorized' : `category-${item.categoryId}`
-    const row = rows.get(key) ?? {
-      key,
-      name: item.categoryName ?? '未分类',
-      income: 0,
-      expense: 0,
-      net: 0,
-    }
+  return enumerateMonths(data.from, data.to).map((month) => {
+    const point = byMonth.get(month)
+    const income = point?.incomeTotal ?? 0
+    const expense = point?.expenseTotal ?? 0
 
-    if (side === 'income') {
-      row.income += item.amount
-    } else {
-      row.expense += item.amount
-    }
-
-    rows.set(key, row)
-  }
-
-  for (const item of data.income) {
-    accumulate(item, 'income')
-  }
-
-  for (const item of data.expense) {
-    accumulate(item, 'expense')
-  }
-
-  return [...rows.values()]
-    .map((row) => ({ ...row, net: row.income - row.expense }))
-    .sort(
-      (left, right) =>
-        right.income + right.expense - (left.income + left.expense) ||
-        left.name.localeCompare(right.name, 'zh-CN'),
-    )
+    return { month, income, expense, net: income - expense }
+  })
 })
-
-/** 分类汇总表的币种；未查过或没有可用币种时为 `null`。 */
-const categoryCurrencyCode = computed(() => categoryTotals.totals?.currencyCode ?? null)
 
 /**
- * 拉取按日收支与分类汇总。
+ * 区间合计：由按月数据相加。
  *
- * 两个请求**并发发出、各自记账自己的失败**：串行会让下面一块白等上面的网络往返，
- * 而 `Promise.all` 的「一票否决」语义会让其中一次失败把另一块已有数据也清成错误
- * （同首页四块面板的取舍）。
+ * 净额用「收入合计 − 支出合计」而不是逐月累加净额：两者数学上相等，
+ * 但前者少一层可以把符号弄反的机会（与日报表、首页同一算法）。
  */
-async function load(): Promise<void> {
-  if (!hasAccountSet.value || selectedMonth.value === '') {
-    return
+const totals = computed(() => {
+  let income = 0
+  let expense = 0
+  for (const row of monthlyRows.value) {
+    income += row.income
+    expense += row.expense
   }
 
-  flowError.value = ''
-  categoryError.value = ''
-  // 先清空再取数：新月份的结果回来之前，界面上不能留着上个月的数字配着新月份的标题；
-  // 失败时也不至于把旧数据摆在一个写着「加载失败」的页面里
-  dailyFlows.clear()
-  categoryTotals.clear()
-
-  await Promise.all([
-    dailyFlows.loadDaily(selectedMonth.value).catch((error: unknown) => {
-      flowError.value = error instanceof ApiError ? error.message : '加载按日收支失败'
-    }),
-    categoryTotals.loadTotals(selectedMonth.value).catch((error: unknown) => {
-      categoryError.value = error instanceof ApiError ? error.message : '加载分类汇总失败'
-    }),
-  ])
-}
-
-// 月份变化即重查；清空输入（原生 month 控件允许）时回到当前月，而不是带着空月份请求。
-watch(selectedMonth, (value) => {
-  if (value === '') {
-    selectedMonth.value = currentMonthLocal()
-    return
-  }
-
-  void load()
+  return { income, expense, net: income - expense }
 })
 
-// 账套切换：两块数据都按账套隔离（且按用户分行），必须清空后重查；
-// 未选择账套时清空，避免退出登录后仍残留上一个账套的报表。
+/** 折线图的呈现数据；没有可画的数据时为 `null`。 */
+interface ChartView {
+  xLabels: string[]
+  series: TrendSeriesSpec[]
+  description: string
+}
+
+/**
+ * 按月折线：横轴是区间内的每一个月（已补零）。
+ *
+ * 横轴文案直接取 `yyyy-MM`：跨年对比时年份本身就是要读的信息，而 36 个刻度由
+ * ECharts 自动抽稀，不会互相压叠。读屏描述把三个合计念全——`role="img"` 的图需要一个概述，
+ * 逐月数值由下方表格承担。
+ */
+const chart = computed<ChartView | null>(() => {
+  const rows = monthlyRows.value
+  if (rows.length === 0) {
+    return null
+  }
+
+  const code = currencyCode.value
+  const suffix = code === null ? '' : `，币种 ${code}`
+
+  return {
+    xLabels: rows.map((row) => row.month),
+    series: [
+      { key: 'income', label: '收入', colorToken: '--color-income', values: rows.map((row) => row.income) },
+      { key: 'expense', label: '支出', colorToken: '--color-expense', values: rows.map((row) => row.expense) },
+    ],
+    description:
+      `${periodLabel.value}每月收入与支出：收入合计 ${formatAmount(totals.value.income)}，` +
+      `支出合计 ${formatAmount(totals.value.expense)}，净额 ${formatSigned(totals.value.net)}${suffix}。`,
+  }
+})
+
+/** 分类饼图的输入：延迟到结果回来再取值，未查过时为空数组。 */
+const categoryIncome = computed(() => report.value?.categories.income ?? [])
+const categoryExpense = computed(() => report.value?.categories.expense ?? [])
+
+/**
+ * 把标签合计折成饼图能吃的形状。
+ *
+ * **不是把标签当分类**：两者在饼图里都只是「一个可空主键 + 名称 + 金额」，
+ * `categoryPie.ts` 已经把「空值分项叫什么」参数化成了 `nullLabel`，形状与折叠规则完全复用。
+ * 这个适配层因此只做字段改名，并把标签维度下的 `null` 解读为「未打标签」（由 `nullLabel` 呈现）。
+ */
+function toPieItems(items: readonly ReportTagTotal[]): EntryCategoryTotal[] {
+  return items.map((item) => ({
+    categoryId: item.tagId,
+    categoryName: item.tagName,
+    amount: item.amount,
+  }))
+}
+
+const tagIncome = computed(() => toPieItems(report.value?.tags.income ?? []))
+const tagExpense = computed(() => toPieItems(report.value?.tags.expense ?? []))
+
+/**
+ * 拉取三份筛选候选：账户、币种（取系统默认）、标签。
+ *
+ * 三者是页面能不能查的前置条件，故用一次 `Promise.all` 一并等待；任何一份失败都返回
+ * `false`，调用方据此不发起查询——候选没就绪时发出的请求必然是一个猜出来的条件。
+ */
+async function loadFilters(): Promise<boolean> {
+  try {
+    await Promise.all([accountsStore.list(true), currenciesStore.loadActive(), tagsStore.list(true)])
+    return true
+  } catch (error) {
+    errorMessage.value = error instanceof ApiError ? error.message : '加载筛选条件失败'
+    return false
+  }
+}
+
+/** 账户全选。 */
+function selectAllAccounts(): void {
+  selectedAccountIds.value = moneyAccountOptions.value.map((account) => account.id)
+}
+
+/** 账户全不选。 */
+function clearAccounts(): void {
+  selectedAccountIds.value = []
+}
+
+/** 标签改为「不限」。 */
+function clearTags(): void {
+  selectedTagIds.value = []
+}
+
+/**
+ * 按草稿条件查询。
+ *
+ * 顺序是「先校验、再清空、后请求」：
+ * - 校验不过**不清空**——已经查出来的结果仍然对应当前页面上的条件说明，清掉只是白丢一份数据；
+ * - 请求前清空 store：新区间的结果回来之前，界面上不能留着上一个区间的数字配着新区间的标题，
+ *   失败时也不至于把旧数据摆在一个写着「加载失败」的页面里。
+ */
+async function apply(): Promise<void> {
+  if (!hasAccountSet.value) {
+    return
+  }
+
+  if (rangeError.value !== '') {
+    filterError.value = rangeError.value
+    return
+  }
+
+  if (selectedAccountIds.value.length === 0) {
+    filterError.value = '请至少选择一个账户。'
+    return
+  }
+
+  filterError.value = ''
+  errorMessage.value = ''
+  monthlyReport.clear()
+
+  try {
+    await monthlyReport.loadReport({
+      from: fromMonth.value,
+      to: toMonth.value,
+      accountIds: selectedAccountIds.value,
+      tagIds: selectedTagIds.value,
+    })
+  } catch (error) {
+    errorMessage.value = error instanceof ApiError ? error.message : '加载月报表失败'
+  }
+}
+
+/**
+ * 复位为「过去 12 个月（含当月）+ 账户全选 + 不限标签」并立即查询。
+ *
+ * 这是【重置】按钮的行为，也是每次进入页面与切换账套后的初始视图；
+ * **筛选条件不保存**：月报表的区间是一次性的读法，下次进入就是新的近 12 个月。
+ */
+function resetToDefault(): void {
+  fromMonth.value = monthsAgoLocal(DEFAULT_REPORT_MONTHS - 1)
+  toMonth.value = currentMonthLocal()
+  selectedAccountIds.value = moneyAccountOptions.value.map((account) => account.id)
+  selectedTagIds.value = []
+  void apply()
+}
+
+/**
+ * 账套切换（含首次挂载）后的取数流程。
+ *
+ * 三件事都要重来：候选（账户与标签都按账套隔离）、勾选（旧账套的主键在新账套里指向别的对象）、
+ * 结果（按账套隔离并进一步按用户分行）。未选择账套时清空结果，避免退出登录后仍残留上一份报表。
+ */
+async function switchAccountSet(currentId: number | null): Promise<void> {
+  monthlyReport.clear()
+  errorMessage.value = ''
+  filterError.value = ''
+  selectedAccountIds.value = []
+  selectedTagIds.value = []
+
+  if (currentId === null) {
+    return
+  }
+
+  const ready = await loadFilters()
+  if (!ready) {
+    return
+  }
+
+  selectedAccountIds.value = moneyAccountOptions.value.map((account) => account.id)
+  await apply()
+}
+
+// 账套切换即重查；`watch` 只在值真的变化时触发，首次取数由 `onMounted` 负责。
 watch(
   () => accountSets.currentId,
   (currentId) => {
-    dailyFlows.clear()
-    categoryTotals.clear()
-    flowError.value = ''
-    categoryError.value = ''
+    void switchAccountSet(currentId)
+  },
+)
 
-    if (currentId === null) {
-      return
-    }
-
-    void load()
+/**
+ * 默认币种变化（管理员改了默认币种）时，账户候选集合会变。
+ *
+ * 已在勾选里的账户未必仍属于新币种，静默保留会让一次查询悄悄漏掉一半账户；
+ * 这里只做「把仍可选的账户留下、若全部落空则回到全选」的收敛，**不自动重查**——
+ * 用户可能已经改好了月份正在准备点【查询】。
+ */
+watch(
+  () => currenciesStore.defaultCode,
+  () => {
+    const available = new Set(moneyAccountOptions.value.map((account) => account.id))
+    const kept = selectedAccountIds.value.filter((id) => available.has(id))
+    selectedAccountIds.value =
+      kept.length > 0 ? kept : moneyAccountOptions.value.map((account) => account.id)
   },
 )
 
 onMounted(() => {
-  if (hasAccountSet.value) {
-    void load()
-  }
+  void switchAccountSet(accountSets.currentId)
 })
 </script>
 
@@ -312,145 +496,345 @@ onMounted(() => {
       <div>
         <h1 class="title">月报表</h1>
         <p class="subtitle">
-          按所选月份的账目明细实时汇总：月度合计、每日收支走势与分类汇总。
-          只统计系统默认币种与资金 / 负债账户（含公共账户与本人在本账套的个人账户），
-          转账与期初余额不计入。
+          按所选月份区间、账户与标签，实时汇总当前账套的收支明细：按分类与按标签各出收入 / 支出
+          构成饼图，按月给出收入与支出走势，并逐月列出收入、支出与净额及区间合计。
+          只统计系统默认币种下公共账户与本人个人账户中的资金 / 负债账户，转账与期初余额不计入。
+          一笔交易挂多个标签时，其金额会在每个标签下各计一次，故标签金额之和可能大于收支合计。
         </p>
       </div>
-      <label class="month-field">
-        <span class="month-label">月份</span>
-        <input v-model="selectedMonth" type="month" :disabled="!hasAccountSet" />
-      </label>
     </header>
 
     <p v-if="!hasAccountSet" class="hint">
-      请先在右上角选择账套，月报表展示的是当前账套里的收支。
+      当前未选择账套，请先点击右上角的【切换】选择账套后再查看月报表。
     </p>
 
     <template v-else>
       <section class="panel">
-        <div>
-          <h2 class="panel-title">{{ periodLabel }}收支走势</h2>
-          <p class="panel-note">
-            按{{ periodLabel }}账目明细的发生额实时汇总，含尚未结算的日期。
-            折线横轴是整月的每一天：当天没有收入与支出的日期补 0 呈现
-            （实时数据下空白日就是 0，与首页结算图表的「缺日不补零」不同）。
+        <div class="filter-row">
+          <label class="field">
+            <span class="label">起始月份</span>
+            <input
+              v-model="fromMonth"
+              type="month"
+              :max="toMonth || undefined"
+              :disabled="monthlyReport.loading"
+            />
+          </label>
+
+          <label class="field">
+            <span class="label">结束月份</span>
+            <input
+              v-model="toMonth"
+              type="month"
+              :min="fromMonth || undefined"
+              :disabled="monthlyReport.loading"
+            />
+          </label>
+        </div>
+
+        <p class="panel-note">
+          月份区间为闭区间（含起止两个月整月），默认过去 {{ DEFAULT_REPORT_MONTHS }} 个月（含当月），
+          最多 {{ MAX_REPORT_MONTHS }} 个月；月份按<strong>服务器本地时区</strong>切分，与账目明细页同一口径。
+          当月尚未结束，本月的数字是截至今天的已发生额。
+        </p>
+      </section>
+
+      <section class="picker">
+        <div class="picker-head">
+          <span class="label">账户（可多选）</span>
+          <span class="picker-count">
+            已选 {{ selectedAccountIds.length }} / {{ moneyAccountOptions.length }}
+          </span>
+          <div class="picker-actions">
+            <button
+              type="button"
+              class="ghost"
+              :disabled="moneyAccountOptions.length === 0 || monthlyReport.loading"
+              @click="selectAllAccounts"
+            >
+              全选
+            </button>
+            <button
+              type="button"
+              class="ghost"
+              :disabled="selectedAccountIds.length === 0 || monthlyReport.loading"
+              @click="clearAccounts"
+            >
+              全不选
+            </button>
+          </div>
+        </div>
+
+        <div class="picker-list">
+          <label v-for="account in moneyAccountOptions" :key="account.id" class="picker-item">
+            <input v-model="selectedAccountIds" type="checkbox" :value="account.id" />
+            <span class="picker-name">{{ account.name }}</span>
+            <!-- 已停用账户照常可选：历史明细仍挂在它上面，且其明细只会出现在它被选中时 -->
+            <span v-if="!account.isActive" class="badge badge-inactive">已停用</span>
+          </label>
+          <p v-if="moneyAccountOptions.length === 0" class="picker-empty">
+            当前账套内没有可统计的资金 / 负债账户。
           </p>
         </div>
 
-        <p v-if="flowError !== ''" class="error">{{ flowError }}</p>
-        <p v-else-if="flow === null" class="hint">加载中…</p>
-        <p v-else-if="flow.currencyCode === null" class="hint">
-          还没有可用的币种，请先在管理端添加币种后记账。
+        <p class="picker-hint">
+          只列出系统默认币种（{{ currenciesStore.defaultCode ?? '—' }}）下的资金 / 负债账户：
+          报表口径固定为默认币种，其他币种的账户不会被计入。账本账户与往来账户也不在列表中——
+          前者是系统内部账户，后者记的是「谁欠谁」而不是「钱放在哪」。
         </p>
-        <p v-else-if="chart === null" class="hint">{{ periodLabel }}还没有收入与支出明细。</p>
+      </section>
+
+      <section class="picker">
+        <div class="picker-head">
+          <span class="label">标签（可多选，不选即不限）</span>
+          <span class="picker-count">已选 {{ selectedTagIds.length }} / {{ tagOptions.length }}</span>
+          <div class="picker-actions">
+            <button
+              type="button"
+              class="ghost"
+              :disabled="selectedTagIds.length === 0 || monthlyReport.loading"
+              @click="clearTags"
+            >
+              不限
+            </button>
+          </div>
+        </div>
+
+        <div class="picker-list">
+          <label v-for="tag in tagOptions" :key="tag.id" class="picker-item">
+            <input v-model="selectedTagIds" type="checkbox" :value="tag.id" />
+            <span class="picker-name">{{ tag.name }}</span>
+            <!-- 已停用标签照常可选：停用是「不再供新记账选择」，不是「历史上从未用过」 -->
+            <span v-if="!tag.isActive" class="badge badge-inactive">已停用</span>
+          </label>
+          <p v-if="tagOptions.length === 0" class="picker-empty">当前账套内还没有标签。</p>
+        </div>
+
+        <p class="picker-hint">
+          不勾选任何标签即<strong>不限标签</strong>；勾选多个时是<strong>任一命中</strong>。
+          标签与账户是<strong>且</strong>的关系：两个维度各自收窄。筛选只影响统计范围，
+          不影响金额的记账方式——它挂在整笔交易上，故该笔交易的两条明细同进同出。
+        </p>
+      </section>
+
+      <div class="actions">
+        <button type="button" class="submit" :disabled="monthlyReport.loading" @click="apply()">
+          {{ monthlyReport.loading ? '查询中…' : '查询' }}
+        </button>
+        <button type="button" class="ghost" :disabled="monthlyReport.loading" @click="resetToDefault">
+          重置
+        </button>
+        <span class="actions-note">条件改动后点【查询】生效；月份区间与勾选不会保存。</span>
+      </div>
+
+      <p v-if="filterError !== ''" class="error">{{ filterError }}</p>
+      <p v-if="errorMessage !== ''" class="error">{{ errorMessage }}</p>
+
+      <template v-if="report !== null">
+        <p v-if="currencyCode === null" class="hint">
+          还没有可用的币种，请先在管理端添加币种并记账后再查看月报表。
+        </p>
+        <p v-else-if="!hasData" class="hint">{{ periodLabel }}内还没有收入与支出明细。</p>
 
         <template v-else>
-          <div class="stats">
-            <div class="stat">
-              <span class="stat-label">收入</span>
-              <strong class="stat-value income">{{ formatAmount(totals.income) }}</strong>
+          <section class="panel">
+            <div>
+              <h2 class="panel-title">{{ periodLabel }}分类构成</h2>
+              <p class="panel-note">
+                收入与支出各占一张饼图，百分比以本侧合计为分母。按交易头上的那一个分类归集；
+                「未分类」是合法归集结果，单独成扇区，金额小的其余分类合并为「其他」。
+              </p>
             </div>
-            <div class="stat">
-              <span class="stat-label">支出</span>
-              <strong class="stat-value expense">{{ formatAmount(totals.expense) }}</strong>
-            </div>
-            <div class="stat">
-              <span class="stat-label">净额</span>
-              <strong class="stat-value" :class="signedCellClass(totals.net, 'net')">
-                {{ formatSigned(totals.net) }}
-              </strong>
-            </div>
-            <p class="stat-note">
-              {{ periodLabel }}合计，币种 {{ flow.currencyCode }}；按账目明细的发生额实时汇总。
-            </p>
-          </div>
 
-          <div class="legend">
-            <span v-for="item in chart.series" :key="item.key" class="legend-item">
-              <i class="swatch" :style="{ backgroundColor: `var(${item.colorToken})` }" />
-              {{ item.label }}
-            </span>
-            <span class="legend-meta">{{ periodLabel }} · 共 {{ daysInMonth }} 天</span>
-          </div>
+            <div class="pie-grid">
+              <CategoryPieChart
+                title="收入分类构成"
+                :items="categoryIncome"
+                :currency-code="currencyCode"
+                :period="periodLabel"
+                empty-text="区间内没有收入。"
+              />
+              <CategoryPieChart
+                title="支出分类构成"
+                :items="categoryExpense"
+                :currency-code="currencyCode"
+                :period="periodLabel"
+                empty-text="区间内没有支出。"
+              />
+            </div>
+          </section>
 
-          <div class="chart">
-            <TrendChart
-              :series="chart.series"
-              :x-labels="chart.xLabels"
-              :description="chart.ariaLabel"
-            />
-          </div>
+          <section class="panel">
+            <div>
+              <h2 class="panel-title">{{ periodLabel }}标签构成</h2>
+              <p class="panel-note">
+                与上方分类构成同一口径，只是按标签归集。<strong
+                  >一笔交易挂多个标签时，其金额在每个标签下各计一次</strong
+                >（金额不摊分），故各标签金额之和可能大于区间收支合计；
+                没有标签的交易归入「{{ UNTAGGED_LABEL }}」，它同样是合法的归集结果。
+              </p>
+            </div>
+
+            <div class="pie-grid">
+              <CategoryPieChart
+                title="收入标签构成"
+                :items="tagIncome"
+                :currency-code="currencyCode"
+                :period="periodLabel"
+                :null-label="UNTAGGED_LABEL"
+                empty-text="区间内没有收入。"
+              />
+              <CategoryPieChart
+                title="支出标签构成"
+                :items="tagExpense"
+                :currency-code="currencyCode"
+                :period="periodLabel"
+                :null-label="UNTAGGED_LABEL"
+                empty-text="区间内没有支出。"
+              />
+            </div>
+          </section>
+
+          <section class="panel">
+            <div>
+              <h2 class="panel-title">{{ periodLabel }}收支走势</h2>
+              <p class="panel-note">
+                按月份逐月汇总，横轴是区间内的每一个月：某个月没有收入与支出的补 0 呈现
+                （实时数据下空白月就是 0，与首页结算图表的「缺日不补零」不同）。
+              </p>
+            </div>
+
+            <div class="stats">
+              <div class="stat">
+                <span class="stat-label">收入</span>
+                <strong class="stat-value income">{{ formatAmount(totals.income) }}</strong>
+              </div>
+              <div class="stat">
+                <span class="stat-label">支出</span>
+                <strong class="stat-value expense">{{ formatAmount(totals.expense) }}</strong>
+              </div>
+              <div class="stat">
+                <span class="stat-label">净额</span>
+                <strong class="stat-value" :class="signedCellClass(totals.net, 'net')">
+                  {{ formatSigned(totals.net) }}
+                </strong>
+              </div>
+              <p class="stat-note">
+                区间合计，币种 {{ currencyCode }}；按账目明细的发生额实时汇总。
+              </p>
+            </div>
+
+            <template v-if="chart !== null">
+              <div class="legend">
+                <span v-for="item in chart.series" :key="item.key" class="legend-item">
+                  <i class="swatch" :style="{ backgroundColor: `var(${item.colorToken})` }" />
+                  {{ item.label }}
+                </span>
+                <span class="legend-meta">{{ periodLabel }} · 共 {{ monthlyRows.length }} 个月</span>
+              </div>
+
+              <div class="chart">
+                <TrendChart
+                  :series="chart.series"
+                  :x-labels="chart.xLabels"
+                  :description="chart.description"
+                />
+              </div>
+            </template>
+          </section>
+
+          <section class="panel">
+            <div>
+              <h2 class="panel-title">{{ periodLabel }}按月明细</h2>
+              <p class="panel-note">
+                区间内每个月各占一行，没有发生额的月份收入与支出两列显示「—」；
+                底部合计行由收入与支出分别相加，净额 = 收入合计 − 支出合计。
+              </p>
+            </div>
+
+            <!--
+              宽窄两份呈现并存，由 1023px 断点切换（全站唯一的断点）：
+              四列在手机上会把月份与金额挤在一起，故窄屏改成「月份 + 净额」在上、
+              「收入 / 支出」在下的卡片。`display: none` 是双呈现手段，不是死代码。
+            -->
+            <table class="monthly-table">
+              <thead>
+                <tr>
+                  <th scope="col">月份</th>
+                  <th scope="col" class="amount">收入</th>
+                  <th scope="col" class="amount">支出</th>
+                  <th scope="col" class="amount">净额</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in monthlyRows" :key="row.month">
+                  <td class="month">{{ row.month }}</td>
+                  <td class="amount income">
+                    {{ row.income === 0 ? '—' : formatUnsigned(row.income) }}
+                  </td>
+                  <td class="amount expense">
+                    {{ row.expense === 0 ? '—' : formatUnsigned(row.expense) }}
+                  </td>
+                  <td class="amount" :class="signedCellClass(row.net, 'net')">
+                    {{ formatSigned(row.net) }}
+                  </td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td class="total-label">合计</td>
+                  <td class="amount income">
+                    {{ totals.income === 0 ? '—' : formatUnsigned(totals.income) }}
+                  </td>
+                  <td class="amount expense">
+                    {{ totals.expense === 0 ? '—' : formatUnsigned(totals.expense) }}
+                  </td>
+                  <td class="amount" :class="signedCellClass(totals.net, 'net')">
+                    {{ formatSigned(totals.net) }}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+
+            <ul class="cards">
+              <li v-for="row in monthlyRows" :key="row.month" class="card">
+                <div class="card-head">
+                  <span class="card-month">{{ row.month }}</span>
+                  <strong class="card-net" :class="signedCellClass(row.net, 'net')">
+                    {{ formatSigned(row.net) }}
+                  </strong>
+                </div>
+                <div class="card-meta">
+                  <span class="income">
+                    收入 {{ row.income === 0 ? '—' : formatUnsigned(row.income) }}
+                  </span>
+                  <span class="expense">
+                    支出 {{ row.expense === 0 ? '—' : formatUnsigned(row.expense) }}
+                  </span>
+                </div>
+              </li>
+              <li class="card card-total">
+                <div class="card-head">
+                  <span class="card-month">合计</span>
+                  <strong class="card-net" :class="signedCellClass(totals.net, 'net')">
+                    {{ formatSigned(totals.net) }}
+                  </strong>
+                </div>
+                <div class="card-meta">
+                  <span class="income">
+                    收入 {{ totals.income === 0 ? '—' : formatUnsigned(totals.income) }}
+                  </span>
+                  <span class="expense">
+                    支出 {{ totals.expense === 0 ? '—' : formatUnsigned(totals.expense) }}
+                  </span>
+                </div>
+              </li>
+            </ul>
+          </section>
         </template>
-      </section>
+      </template>
 
-      <section class="panel">
-        <div>
-          <h2 class="panel-title">{{ periodLabel }}分类汇总</h2>
-          <p class="panel-note">
-            与上方走势同一口径；收入与支出按分类合并成一行，净额 = 收入 − 支出。
-            「未分类」是合法归集结果，单独成行。金额单位：{{ categoryCurrencyCode ?? '—' }}。
-          </p>
-        </div>
-
-        <p v-if="categoryError !== ''" class="error">{{ categoryError }}</p>
-        <p v-else-if="categoryTotals.totals === null" class="hint">加载中…</p>
-        <p v-else-if="categoryCurrencyCode === null" class="hint">
-          还没有可用的币种，请先在管理端添加币种后记账。
-        </p>
-        <p v-else-if="summaryRows.length === 0" class="hint">
-          {{ periodLabel }}还没有收入与支出明细。
-        </p>
-
-        <!--
-          宽窄两份呈现并存，由 1023px 断点切换（全站唯一的断点）：
-          4 列在手机上仍会把分类名压得只剩一两个字，故窄屏改成「分类 + 净额」在上、
-          「收入 / 支出」在下的卡片。`display: none` 是双呈现手段，不是死代码。
-        -->
-        <table v-else class="summary-table">
-          <thead>
-            <tr>
-              <th scope="col">分类</th>
-              <th scope="col" class="amount">收入</th>
-              <th scope="col" class="amount">支出</th>
-              <th scope="col" class="amount">净额</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="row in summaryRows" :key="row.key">
-              <td class="category">{{ row.name }}</td>
-              <td class="amount income">
-                {{ row.income === 0 ? '—' : formatUnsigned(row.income) }}
-              </td>
-              <td class="amount expense">
-                {{ row.expense === 0 ? '—' : formatUnsigned(row.expense) }}
-              </td>
-              <td class="amount" :class="signedCellClass(row.net, 'net')">
-                {{ formatSigned(row.net) }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-
-        <ul v-if="summaryRows.length > 0" class="cards">
-          <li v-for="row in summaryRows" :key="row.key" class="card">
-            <div class="card-head">
-              <span class="card-name">{{ row.name }}</span>
-              <strong class="card-net" :class="signedCellClass(row.net, 'net')">
-                {{ formatSigned(row.net) }}
-              </strong>
-            </div>
-            <div class="card-meta">
-              <span class="income">
-                收入 {{ row.income === 0 ? '—' : formatUnsigned(row.income) }}
-              </span>
-              <span class="expense">
-                支出 {{ row.expense === 0 ? '—' : formatUnsigned(row.expense) }}
-              </span>
-            </div>
-          </li>
-        </ul>
-      </section>
+      <p v-else-if="monthlyReport.loading" class="hint">加载中…</p>
     </template>
   </main>
 </template>
@@ -484,42 +868,6 @@ onMounted(() => {
   opacity: 0.75;
 }
 
-/* 月份选择：与明细页的日期字段同源（同一套描边、圆角、聚焦环） */
-.month-field {
-  display: flex;
-  flex: none;
-  flex-direction: column;
-  gap: 0.35rem;
-  min-width: 9rem;
-}
-
-.month-label {
-  font-size: 12.5px;
-  opacity: 0.75;
-}
-
-.month-field input {
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--color-border-hover);
-  border-radius: var(--radius-control);
-  background: var(--color-background);
-  color: inherit;
-  font-size: 13px;
-  font-family: inherit;
-  box-shadow: var(--shadow-control);
-}
-
-.month-field input:focus {
-  outline: 2px solid var(--color-accent-soft);
-  outline-offset: 1px;
-  border-color: var(--color-accent);
-}
-
-.month-field input:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 .hint {
   padding: 1rem 1.25rem;
   border: 1px solid var(--color-border-hover);
@@ -539,7 +887,7 @@ onMounted(() => {
   line-height: 1.7;
 }
 
-/* 面板：与首页走势图 / 明细页筛选区同一套描边 + 卡片阴影 */
+/* 面板：与日报表 / 首页走势图同一套描边 + 卡片阴影 */
 .panel {
   display: flex;
   flex-direction: column;
@@ -563,6 +911,187 @@ onMounted(() => {
   font-size: 12.5px;
   line-height: 1.7;
   opacity: 0.7;
+}
+
+/* 月份字段与操作按钮同处一行，窄屏下自动折行 */
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 9rem;
+}
+
+.label {
+  font-size: 12.5px;
+  opacity: 0.75;
+}
+
+.field input {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--color-border-hover);
+  border-radius: var(--radius-control);
+  background: var(--color-background);
+  color: inherit;
+  font-size: 13px;
+  font-family: inherit;
+  box-shadow: var(--shadow-control);
+}
+
+.field input:focus {
+  outline: 2px solid var(--color-accent-soft);
+  outline-offset: 1px;
+  border-color: var(--color-accent);
+}
+
+.field input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 账户 / 标签多选面板：受边框约束的独立区域，与结果区区分开（与明细页同构） */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  background: var(--color-background-soft);
+  box-shadow: var(--shadow-card);
+}
+
+.picker-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.picker-count {
+  font-size: 12.5px;
+  opacity: 0.7;
+}
+
+/* 全选 / 全不选 / 不限靠右固定，与左侧说明拉开 */
+.picker-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+/* 候选多时只在本区域内滚动，不把页面撑长 */
+.picker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  max-height: 10rem;
+  overflow-y: auto;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  background: var(--color-background-mute);
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.picker-name {
+  white-space: nowrap;
+}
+
+.picker-empty {
+  font-size: 13px;
+  opacity: 0.6;
+}
+
+.picker-hint {
+  font-size: 12.5px;
+  line-height: 1.7;
+  opacity: 0.7;
+}
+
+/* 操作行：查询是页面的主操作，说明跟在按钮之后 */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.actions-note {
+  font-size: 12.5px;
+  opacity: 0.7;
+}
+
+.ghost,
+.submit {
+  padding: 0.3rem 0.7rem;
+  border-radius: var(--radius-control);
+  background: none;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.3s,
+    border-color 0.3s;
+}
+
+.ghost {
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent-strong);
+}
+
+/* 实心主色按钮：与明细页的【查询】同源 */
+.submit {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+@media (hover: hover) {
+  .ghost:not(:disabled):hover {
+    background-color: var(--color-accent-soft);
+  }
+
+  .submit:not(:disabled):hover {
+    border-color: var(--color-accent-strong);
+    background: var(--color-accent-strong);
+  }
+}
+
+.ghost:disabled,
+.submit:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/*
+ * 两张饼图并排：每列至少 220px，容器不足时自动折成一列。
+ * 用 `auto-fit` 而不是再写一个断点——与首页同一写法，同一套宽度规则对两种容器都成立。
+ */
+.pie-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
 }
 
 /* 概览数字：三个并排，窄屏自动折行；口径小字独占一行 */
@@ -626,22 +1155,22 @@ onMounted(() => {
   height: 220px;
 }
 
-/* 分类汇总表：金额列右对齐、等宽数字；行之间只用一条细线分隔 */
-.summary-table {
+/* 按月明细表：金额列右对齐、等宽数字；行之间只用一条细线分隔 */
+.monthly-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
 }
 
-.summary-table th,
-.summary-table td {
+.monthly-table th,
+.monthly-table td {
   padding: 0.5rem 0.6rem;
   border-bottom: 1px solid var(--color-border);
   text-align: left;
   line-height: 1.6;
 }
 
-.summary-table th {
+.monthly-table th {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--color-heading);
@@ -649,12 +1178,32 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.summary-table tbody tr:last-child td {
+.monthly-table tbody tr:last-child td {
   border-bottom: none;
 }
 
-.category {
-  font-weight: 500;
+/* 合计行：用上边框与底色把它和逐月行分开，读作「汇总」而不是「又一个月」 */
+.monthly-table tfoot td {
+  padding: 0.6rem 0.6rem;
+  border-top: 1px solid var(--color-border-hover);
+  background: var(--color-background-mute);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.monthly-table tfoot tr:last-child td {
+  border-bottom: none;
+}
+
+.month,
+.total-label {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.total-label {
+  font-weight: 600;
+  opacity: 0.85;
 }
 
 .amount {
@@ -663,6 +1212,7 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+/* 收支语义色：收支两列按颜色区分方向，净额列正负都着色（与明细页同一套词汇） */
 .income {
   color: var(--color-income);
 }
@@ -695,22 +1245,28 @@ onMounted(() => {
   background: var(--color-background);
 }
 
+/* 合计卡与表格的合计行同源：加一层底色，读作「汇总」而不是「又一个月」 */
+.card-total {
+  background: var(--color-background-mute);
+  font-weight: 600;
+}
+
 .card-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.6rem;
 }
 
-.card-name {
+.card-month {
+  font-size: 13px;
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .card-net {
   flex: none;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -719,29 +1275,36 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 0.25rem 1rem;
   font-size: 12.5px;
-  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
 }
 
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.badge-inactive {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+}
+
+/* 全站唯一的断点：此处切换「表格 / 卡片」两份呈现 */
 @media (max-width: 1023px) {
-  .head {
-    flex-direction: column;
-  }
-
-  .month-field {
-    width: 100%;
-  }
-
-  .chart {
-    height: 180px;
-  }
-
-  /* 表格与卡片流是同一份数据的双呈现：窄屏只留卡片 */
-  .summary-table {
+  .monthly-table {
     display: none;
   }
 
   .cards {
     display: flex;
+  }
+
+  .chart {
+    height: 180px;
   }
 }
 </style>

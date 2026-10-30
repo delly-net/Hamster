@@ -30,10 +30,10 @@ export const menuItems: MenuItem[] = [
   { label: '标签管理', routeName: 'tags' },
   // 查账入口，与账户管理同属面向所有登录用户的日常功能
   { label: '账目明细', routeName: 'entries' },
-  // 月报表是「查账」的另一读法（按月看整体，而不是逐笔看明细），故紧随账目明细；
+  // 月报表是「查账」的按月读法（月份区间自选、默认近 12 个月，而不是逐笔看明细），故紧随账目明细；
   // 同样面向所有登录用户、不设 adminOnly
   { label: '月报表', routeName: 'reports' },
-  // 日报表是「查账」的第三层读法（区间自选 + 账户 / 标签筛选），与月报表同属报表页，故紧随其后；
+  // 日报表与月报表是同一套能力的按日读法（区间自选 + 账户 / 标签筛选，只是粒度换成天），故紧随其后；
   // 同样面向所有登录用户、不设 adminOnly
   { label: '日报表', routeName: 'daily-reports' },
   { label: '接口调试', routeName: 'openapi', adminOnly: true },

@@ -315,6 +315,58 @@ public interface IEntryQueryService
         IReadOnlyCollection<int>? accountIds,
         IReadOnlyCollection<int>? tagIds,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 按任意月份区间聚合「按月 / 按分类 / 按标签」三份收入与支出合计，供「月报表」页使用。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只聚合该账套内的交易。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只统计该币种的账户；月报表传的是系统默认币种。</param>
+    /// <param name="fromUtc">起始时刻（UTC，**含端点**：起始月 1 日 0 点）。</param>
+    /// <param name="toUtc">结束时刻（UTC，**不含端点**：结束月次月 1 日 0 点）。</param>
+    /// <param name="timeZone">
+    /// 服务器本地时区（由 <see cref="LocalDay.ResolveTimeZone"/> 解析并缓存）。
+    /// 月份的划分口径跟着部署所在地走，故由调用方传入而不是在服务里每次重查。
+    /// </param>
+    /// <param name="accountIds">
+    /// 账户筛选：与「本币种 + 公共 / 本人个人 + 钱账户」的可见集合**求交**；
+    /// 省略或空集合即不限账户。不可见 / 非本币种 / 往来账户被静默剔除（不报错）。
+    /// </param>
+    /// <param name="tagIds">标签筛选：去重后**任一命中**；省略或空集合即不限标签。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>三份聚合：按月收支、按分类合计、按标签合计。</returns>
+    /// <remarks>
+    /// **与 <see cref="ListDailyReportAsync"/> 同一内核、只换时间粒度**：两者共用
+    /// 「解析目标账户 → 取主方向候选行 → 精确时间窗过滤」与「按分类折合计」的实现，
+    /// 差别只在把主方向行按**服务器本地年月**折成 <c>yyyy-MM</c> 而不是按日折成 <c>yyyy-MM-dd</c>。
+    /// 若另起一套查询，可见性、币种与边界口径迟早会漂移。
+    /// <para>
+    /// **不得在 SQL 侧按月 <c>GROUP BY</c>**：本地月的划分依赖服务器时区，SQL 的日期函数各有各的
+    /// 时区约定；与按日聚合一样，先取回区间内交易笔数级别的候选行，再由
+    /// <see cref="LocalDay.DateOf"/> 在 C# 侧折算。
+    /// </para>
+    /// <para>
+    /// **口径与 <see cref="ListDailyReportAsync"/> 逐条相同**：只统计收入与支出两类交易（各取「主账户」
+    /// 那一条明细）；账户范围是「公共账户 + 当前用户本人的个人账户」的资金 / 负债账户，且只取
+    /// <paramref name="currencyCode"/> 这一种币种；管理员**不**把他人的个人账户算进来。
+    /// 标签是「多值」维度，一笔交易挂多个标签时其金额在**每个标签下各计一次**（不摊分）。
+    /// </para>
+    /// <para>
+    /// **按月结果只含有发生额的月份**（缺月不补零），补零是呈现层的决定。
+    /// </para>
+    /// </remarks>
+    Task<EntryMonthlyReport> ListMonthlyReportAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>历史摘要的一条候选。</summary>
@@ -410,6 +462,36 @@ public sealed record EntryDailyReport(
     IReadOnlyList<EntryDailyFlow> Days,
     EntryCategoryTotals Categories,
     EntryTagTotals Tags);
+
+/// <summary>月报表的三份聚合：按月、按分类、按标签。</summary>
+/// <param name="Months">按月份升序的按月收支；**只含至少有一笔收支的月份**。</param>
+/// <param name="Categories">按分类的收入与支出合计。</param>
+/// <param name="Tags">按标签的收入与支出合计。</param>
+/// <remarks>
+/// 三份结果由**同一次查询**派生（见 <see cref="IEntryQueryService.ListMonthlyReportAsync"/>），
+/// 因此口径天然一致：折线、饼图与表格不会出现「一处有一处没有」。
+/// 无任何发生额时三份都是空集合（不是 <c>null</c>），前端据此呈现空态。
+/// </remarks>
+public sealed record EntryMonthlyReport(
+    IReadOnlyList<EntryMonthlyFlow> Months,
+    EntryCategoryTotals Categories,
+    EntryTagTotals Tags);
+
+/// <summary>某个月份的收入、支出与净额。</summary>
+/// <param name="Month">月份（<c>yyyy-MM</c>，**服务器本地月份**）。</param>
+/// <param name="IncomeTotal">当月收入合计，**恒为非负**。</param>
+/// <param name="ExpenseTotal">当月支出合计，**恒为非负**。</param>
+/// <param name="NetTotal">净额 = <paramref name="IncomeTotal"/> − <paramref name="ExpenseTotal"/>（**带符号**）。</param>
+/// <remarks>
+/// 与 <see cref="EntryDailyFlow"/> 同一取舍：两个发生额都是正数，符号只体现在
+/// <paramref name="NetTotal"/> 上（接口层把「花了 500」写成 500，读接口的人不必先取反）。
+/// **当月尚未结束时如实给出截至今天的发生额**，不按整月折算、不预测。
+/// </remarks>
+public sealed record EntryMonthlyFlow(
+    string Month,
+    decimal IncomeTotal,
+    decimal ExpenseTotal,
+    decimal NetTotal);
 
 /// <summary>明细行（已解析出账户名与对手方，供端点直接映射为 DTO）。</summary>
 /// <param name="Id">明细主键。</param>

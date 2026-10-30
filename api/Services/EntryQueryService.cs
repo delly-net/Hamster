@@ -465,6 +465,114 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         IReadOnlyCollection<int>? tagIds,
         CancellationToken cancellationToken = default)
     {
+        var primary = await LoadPrimaryReportRowsAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            currencyCode,
+            fromUtc,
+            toUtc,
+            accountIds,
+            tagIds,
+            cancellationToken);
+
+        if (primary.Count == 0)
+        {
+            return EmptyDailyReport();
+        }
+
+        var totalsByDay = new Dictionary<DateTime, (decimal Income, decimal Expense)>();
+        foreach (var row in primary)
+        {
+            var day = LocalDay.DateOf(row.OccurredAt, timeZone);
+            var current = totalsByDay.GetValueOrDefault(day);
+            totalsByDay[day] = row.Type == TransactionType.Income
+                ? (current.Income + row.Amount, current.Expense)
+                : (current.Income, current.Expense + row.Amount);
+        }
+
+        return new EntryDailyReport(
+            ToDailyFlows(totalsByDay),
+            await BuildCategoryTotalsAsync(primary, cancellationToken),
+            await BuildTagTotalsAsync(primary, cancellationToken));
+    }
+
+    /// <inheritdoc />
+    public async Task<EntryMonthlyReport> ListMonthlyReportAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default)
+    {
+        var primary = await LoadPrimaryReportRowsAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            currencyCode,
+            fromUtc,
+            toUtc,
+            accountIds,
+            tagIds,
+            cancellationToken);
+
+        if (primary.Count == 0)
+        {
+            return EmptyMonthlyReport();
+        }
+
+        var totalsByMonth = new Dictionary<DateTime, (decimal Income, decimal Expense)>();
+        foreach (var row in primary)
+        {
+            // 本地日由 LocalDay 统一折算，再用它的年月拼出「本月 1 日」当作分组键：
+            // 月是日的粗粒度，两处口径因此不可能分叉（SQL 的日期函数各有各的时区约定，不参与）。
+            var day = LocalDay.DateOf(row.OccurredAt, timeZone);
+            var month = new DateTime(day.Year, day.Month, 1);
+            var current = totalsByMonth.GetValueOrDefault(month);
+            totalsByMonth[month] = row.Type == TransactionType.Income
+                ? (current.Income + row.Amount, current.Expense)
+                : (current.Income, current.Expense + row.Amount);
+        }
+
+        return new EntryMonthlyReport(
+            ToMonthlyFlows(totalsByMonth),
+            await BuildCategoryTotalsAsync(primary, cancellationToken),
+            await BuildTagTotalsAsync(primary, cancellationToken));
+    }
+
+    /// <summary>
+    /// 取回「真正落在区间内、且是主账户那一条」的候选明细行。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只统计该币种的账户。</param>
+    /// <param name="fromUtc">起始时刻（UTC，含）。</param>
+    /// <param name="toUtc">结束时刻（UTC，不含）。</param>
+    /// <param name="accountIds">账户筛选；省略或空集合即不限。</param>
+    /// <param name="tagIds">标签筛选；省略或空集合即不限。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>主方向且落在区间内的明细行；无可统计账户或没有符合的行时为空列表。</returns>
+    /// <remarks>
+    /// 日报表与月报表共用这一份取数：可见性、币种、标签筛选与时间窗边界只能有一份实现，
+    /// 否则两页的「同一段时间」迟早会算出不同的数字。
+    /// </remarks>
+    private async Task<List<ReportFlowRow>> LoadPrimaryReportRowsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken)
+    {
         // 目标账户：先取「本币种 + 公共 / 本人个人 + 钱账户」，再与请求的账户主键**求交**。
         // 求交而不是报错：不可见账户、其他币种账户、往来账户都被静默剔除，交集为空就是
         // 「这些账户上没有任何可统计的收支」，返回空结果而不是 400——与 QueryAsync 同一取舍，
@@ -484,7 +592,7 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         if (targetIds.Length == 0)
         {
-            return EmptyDailyReport();
+            return [];
         }
 
         var tagFilter = tagIds is null || tagIds.Count == 0
@@ -531,22 +639,25 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             primary.Add(row);
         }
 
-        if (primary.Count == 0)
-        {
-            return EmptyDailyReport();
-        }
+        return primary;
+    }
 
-        var totalsByDay = new Dictionary<DateTime, (decimal Income, decimal Expense)>();
+    /// <summary>
+    /// 由主方向明细行聚合出「按分类」的收入与支出合计。
+    /// </summary>
+    /// <param name="rows">已收窄为「主账户那一条、落在区间内」的明细行。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>收入侧与支出侧各一份分类合计，按金额降序。</returns>
+    /// <remarks>
+    /// 日报表与月报表共用：分类维度的归集规则（一个分类、缺失并入「未分类」）只此一份。
+    /// </remarks>
+    private async Task<EntryCategoryTotals> BuildCategoryTotalsAsync(
+        IReadOnlyList<ReportFlowRow> rows,
+        CancellationToken cancellationToken)
+    {
         var categoryTotals = new Dictionary<(TransactionType Type, int? CategoryId), decimal>();
-
-        foreach (var row in primary)
+        foreach (var row in rows)
         {
-            var day = LocalDay.DateOf(row.OccurredAt, timeZone);
-            var current = totalsByDay.GetValueOrDefault(day);
-            totalsByDay[day] = row.Type == TransactionType.Income
-                ? (current.Income + row.Amount, current.Expense)
-                : (current.Income, current.Expense + row.Amount);
-
             var categoryKey = (row.Type, row.CategoryId);
             categoryTotals[categoryKey] = categoryTotals.GetValueOrDefault(categoryKey) + row.Amount;
         }
@@ -568,14 +679,9 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             resolvedCategories[resolvedKey] = resolvedCategories.GetValueOrDefault(resolvedKey) + amount;
         }
 
-        var tags = await BuildTagTotalsAsync(primary, cancellationToken);
-
-        return new EntryDailyReport(
-            ToDailyFlows(totalsByDay),
-            new EntryCategoryTotals(
-                ToCategoryTotals(TransactionType.Income, resolvedCategories, categoryNames),
-                ToCategoryTotals(TransactionType.Expense, resolvedCategories, categoryNames)),
-            tags);
+        return new EntryCategoryTotals(
+            ToCategoryTotals(TransactionType.Income, resolvedCategories, categoryNames),
+            ToCategoryTotals(TransactionType.Expense, resolvedCategories, categoryNames));
     }
 
     /// <summary>
@@ -589,6 +695,21 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
             .OrderBy(pair => pair.Key)
             .Select(pair => new EntryDailyFlow(
                 pair.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                pair.Value.Income,
+                pair.Value.Expense,
+                pair.Value.Income - pair.Value.Expense))];
+
+    /// <summary>
+    /// 把内存里的按月合计整理成按月份升序的对外列表。
+    /// </summary>
+    /// <param name="totalsByMonth">本地月（该月 1 日）→ （收入合计, 支出合计）。</param>
+    /// <returns>按月份升序的按月收支；两侧金额恒为正，净额才带符号。</returns>
+    private static EntryMonthlyFlow[] ToMonthlyFlows(
+        IReadOnlyDictionary<DateTime, (decimal Income, decimal Expense)> totalsByMonth) =>
+        [.. totalsByMonth
+            .OrderBy(pair => pair.Key)
+            .Select(pair => new EntryMonthlyFlow(
+                pair.Key.ToString("yyyy-MM", CultureInfo.InvariantCulture),
                 pair.Value.Income,
                 pair.Value.Expense,
                 pair.Value.Income - pair.Value.Expense))];
@@ -707,6 +828,11 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
     /// <summary>空日报表（无目标账户、无任何发生额时直接给出，不必再查库）。</summary>
     /// <returns>三份聚合都为空的日报表结果。</returns>
     private static EntryDailyReport EmptyDailyReport() =>
+        new([], new EntryCategoryTotals([], []), new EntryTagTotals([], []));
+
+    /// <summary>空月报表（无目标账户、无任何发生额时直接给出，不必再查库）。</summary>
+    /// <returns>三份聚合都为空的月报表结果。</returns>
+    private static EntryMonthlyReport EmptyMonthlyReport() =>
         new([], new EntryCategoryTotals([], []), new EntryTagTotals([], []));
 
     /// <summary>

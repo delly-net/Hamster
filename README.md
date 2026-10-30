@@ -774,9 +774,13 @@ which is an aggregation-shaped question rather than another parameter set on `GE
 
 **Only days that actually had income or expense come back; nothing is zero-filled.** Which days had
 movement is a book fact; whether a whole-month line should draw the blanks as 0 is a presentation
-decision — the report reads live data, where a blank day really is 0, so the front end fills the gaps.
+decision — this endpoint reads live data, where a blank day really is 0, so the caller fills the gaps.
 This is **deliberately the opposite** of the settlement charts' "never fill a missing day": there a
 blank means "not settled yet", and filling it would draw "not counted" as "zero".
+
+**Neither report page calls this endpoint any more.** `/reports` and `/daily-reports` each have an
+aggregate endpoint that derives all three views in one fetch (see "Monthly report" and "Daily report"
+below); this one is kept unchanged for callers that only need the per-day totals.
 
 **The filters match `GET /api/entries/category-totals` line for line** (same visibility resolution,
 same default currency, same primary-direction rule): only the system default currency, **public
@@ -827,6 +831,37 @@ means "no longer offered when recording", not "never used").
 
 Failure contract: 400 without the account-set header, 401 when not signed in, 403 when the account set
 is unknown or not yours.
+
+###### Monthly report (arbitrary month range)
+
+The `/reports` page is the same four questions as the daily report, asked at **month** granularity: a
+month range, account and tag filters, then category pies, tag pies, a month-by-month line and a table
+with a range total. It shares the daily report's aggregation kernel — candidate rows, category totals
+and tag totals each exist once — and differs only in (a) the grouping key (`new DateTime(day.Year,
+day.Month, 1)` over the same `LocalDay.DateOf` conversion) and (b) the range limits:
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/entries/monthly-report?from=YYYY-MM&to=YYYY-MM&accountIds=&tagIds=` | Bearer | Three aggregations over one month range of the current account set: `{ currencyCode, from, to, months, categories, tags }`. `months` is `{ month, incomeTotal, expenseTotal, netTotal }` (`YYYY-MM`) ascending by **server-local month** and contains **only months with movement** (the front end zero-fills). `categories` and `tags` have the same shape as in `daily-report`. `from` defaults to the server-local current month **minus 11 months**, `to` to the server-local current month, so the default window is twelve months **including the partial current one** (no pro-rating, no forecast). **Closed interval** (both whole months), converted to UTC with the server's local time zone, half-open `[from's 1st 00:00, month after to's 1st 00:00)`. `accountIds` / `tagIds` behave exactly as on `daily-report`. With no usable currency the response is `currencyCode = null` and three empty collections, not a 404. A malformed month, `from` later than `to`, or a span over **36 months** is a 400 as a field-level error on `from` / `to` |
+
+**Grouping by month happens in C#, not in SQL.** The grouping key is the *server-local* month while
+the rows store UTC; `GROUP BY` could only key on the UTC month or on the database's own zone, either
+of which is off by a few hours at month boundaries. The candidate rows are therefore fetched with the
+same ±1 second prefilter and bucketed with the same `LocalDay.DateOf` conversion the daily report
+uses, then folded to months.
+
+**A fixed twelve-month default, not "year to date".** Year-to-date would show one month in January
+and twelve in December — the same page with a twelvefold difference in view depending on when it is
+opened. A rolling twelve months puts year-over-year and month-over-month inside one request.
+
+**36 months is enforced on both sides**, for the same reason daily report enforces 366 days: the front
+end saves a round trip that is certain to fail, the back end is the actual admission control. Every
+other rule — tag double-counting, `null` buckets, the visibility/currency/type contract, inclusive
+`incomeTotal` / `expenseTotal` with a signed net — is identical to `daily-report` and is not restated
+here.
+
+Failure contract: identical to `daily-report` (400 without the account-set header, 401 when not
+signed in, 403 when the account set is unknown or not yours).
 
 ###### Historical summary candidates
 

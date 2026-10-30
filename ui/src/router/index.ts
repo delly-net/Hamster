@@ -89,8 +89,9 @@ const router = createRouter({
     {
       path: '/reports',
       name: 'reports',
-      // 月报表（选定月份后实时汇总按日收支与分类构成），面向所有登录用户，故不设 requiresAdmin。
-      // 与 /entries 分开成两页：明细页回答「某一笔是什么」，报表页回答「这个月整体如何」，
+      // 月报表（自选月份区间 + 账户 / 标签筛选后实时汇总分类、标签、按月走势与逐月明细），
+      // 面向所有登录用户，故不设 requiresAdmin。与 /entries 分开成两页：
+      // 明细页回答「某一笔是什么」，报表页回答「这几个月整体如何」，
       // 两者的筛选器与行粒度都不同，挤在一页会互相拖累
       component: () => import('../views/ReportView.vue'),
       meta: { requiresAuth: true },
@@ -99,9 +100,9 @@ const router = createRouter({
       path: '/daily-reports',
       name: 'daily-reports',
       // 日报表（任意日期区间 + 账户 / 标签筛选后实时汇总分类、标签、按日走势与逐日明细），
-      // 面向所有登录用户，故不设 requiresAdmin。与 /reports 分开成两页：
-      // 月报表只回答「某个自然月整体如何」，日报表的区间由用户自选、还带账户与标签筛选，
-      // 两者共享同一套「只计收支、默认币种、资金/负债账户」口径，但读法不同
+      // 面向所有登录用户，故不设 requiresAdmin。与 /reports 是**同一套能力的两种粒度**：
+      // 月报表按月看（默认近 12 个月，适合跨年对比），日报表按日看（区间自选，适合查某几天）；
+      // 两者共享同一套「只计收支、默认币种、资金/负债账户」口径，唯一差别是时间粒度与区间上限
       component: () => import('../views/DailyReportView.vue'),
       meta: { requiresAuth: true },
     },
