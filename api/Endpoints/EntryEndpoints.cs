@@ -58,6 +58,13 @@ public sealed class EntryEndpoints : IEndpoint
     /// </remarks>
     private const int MAX_REPORT_DAYS = 366;
 
+    /// <summary>日报表默认的日期跨度（天，闭区间计数）：截至今天，往前推共 30 天。</summary>
+    /// <remarks>
+    /// 只在**省略参数**时使用；与前端日报表页「今天往前 29 天 ~ 今天」的初始区间保持一致。
+    /// 不用「当月 1 日 ~ 今天」是因为月初第一天会让默认视图只剩一天数据。
+    /// </remarks>
+    private const int DEFAULT_REPORT_DAYS = 30;
+
     /// <summary>月报表默认的月份跨度（月，闭区间计数）：从当前月往前推，含当月。</summary>
     /// <remarks>
     /// 只在**省略参数**时使用；与前端「默认过去 12 个月」保持一致。
@@ -498,10 +505,10 @@ public sealed class EntryEndpoints : IEndpoint
                 var hasFrom = TryParseLocalDate(from, out var fromDay, errors, "from");
                 var hasTo = TryParseLocalDate(to, out var toDay, errors, "to");
 
-                // 省略即默认「服务器本地当月 1 日 ~ 今天」：与账目明细页的初始区间同一读法，
-                // 也避免把当月尚未到来的日子摊进按日表格。
+                // 省略即默认「服务器本地今天往前 29 天 ~ 今天」（闭区间共 30 天）：
+                // 与日报表页面的初始区间同一读法，避免月初只剩一天数据、也避免把当月尚未到来的日子摊进按日表格。
                 var now = DateTime.Now;
-                var effectiveFrom = hasFrom ? fromDay : new DateTime(now.Year, now.Month, 1);
+                var effectiveFrom = hasFrom ? fromDay : now.Date.AddDays(-(DEFAULT_REPORT_DAYS - 1));
                 var effectiveTo = hasTo ? toDay : now.Date;
 
                 if (errors.Count == 0)
@@ -583,7 +590,7 @@ public sealed class EntryEndpoints : IEndpoint
                 "`days` **只含至少有一笔收支的日期**（按服务器本地日期升序）：补零是呈现层的决定，" +
                 "日报表的数据源是实时的，空白日就是真实的 0。" +
                 "`from` / `to` 为 **yyyy-MM-dd** 的服务器本地日期，**闭区间**（含结束当天）；" +
-                "省略 `from` 取服务器本地当月 1 日、省略 `to` 取服务器本地今天。" +
+                "省略 `from` 取服务器本地今天往前 29 天、省略 `to` 取服务器本地今天（默认共 30 天）。" +
                 "日期格式非法返回 400 并在 `errors.from` / `errors.to` 给出字段级错误；" +
                 "`from` 晚于 `to`、或区间超过 366 天返回 400 并在 `errors.to` 说明原因。" +
                 "没有可用币种时返回 `currencyCode = null` 与三份空集合，而不是 404。" +
@@ -1279,7 +1286,7 @@ public sealed record EntryDailyFlowDto(
 /// <param name="Tags">按标签的收入与支出合计。</param>
 /// <remarks>
 /// 回带 <paramref name="CurrencyCode"/>、<paramref name="From"/> 与 <paramref name="To"/> 的理由同
-/// <see cref="EntryDailyFlowsResponse"/>：它们都可能由**服务端**决定（省略参数时取当月 1 日 ~ 今天），
+/// <see cref="EntryDailyFlowsResponse"/>：它们都可能由**服务端**决定（省略参数时取最近 30 天），
 /// 调用方不把它们带回来就只能自己再猜一次。
 /// </remarks>
 public sealed record EntryDailyReportResponse(

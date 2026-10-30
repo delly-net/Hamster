@@ -75,7 +75,7 @@ export interface DailyReport {
 
 /** 一次日报表查询的条件。 */
 export interface DailyReportQuery {
-  /** 起始日期（`yyyy-MM-dd`）；省略时后端取服务器本地当月 1 日。 */
+  /** 起始日期（`yyyy-MM-dd`）；省略时后端取服务器本地今天往前 29 天。 */
   from?: string
   /** 结束日期（`yyyy-MM-dd`）；省略时后端取服务器本地今天。 */
   to?: string
@@ -96,7 +96,7 @@ export const useDailyReportStore = defineStore('dailyReport', () => {
   /**
    * 读取一段日期区间的日报表聚合。
    *
-   * @param query 日期区间与账户 / 标签筛选；全部省略时后端取服务器本地「当月 1 日 ~ 今天」。
+   * @param query 日期区间与账户 / 标签筛选；全部省略时后端取服务器本地「近 30 天（今天往前 29 天至今天）」。
    * @returns 该区间的三份聚合（没有任何收支时 `days` 与两侧列表都是空数组）。
    * @throws 未选择账套时后端返回 400；日期非法或区间过长返回 400；令牌失效或网络异常时抛出 `ApiError`。
    */

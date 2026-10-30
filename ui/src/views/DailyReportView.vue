@@ -76,10 +76,16 @@ function todayLocal(): string {
   return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
 }
 
-/** 浏览器本地的「本月 1 日」。 */
-function monthStartLocal(): string {
+/**
+ * 浏览器本地的「近 30 天起点」：今天往前 29 天（与今天一起构成闭区间 30 天）。
+ *
+ * 用 `new Date(y, m, d - 29)` 让平台处理跨月、跨年与闰年，而不是对毫秒数做减法——
+ * 后者在夏令时切换日会把一天算成 23 或 25 小时，起始日可能偏一天。
+ */
+function defaultFromLocal(): string {
   const now = new Date()
-  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29)
+  return `${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`
 }
 
 /** 把 `yyyy-MM-dd` 按**本地时间**解析成 Date；格式或值非法时返回 `null`。 */
@@ -141,8 +147,8 @@ function enumerateDays(from: string, to: string): string[] {
   return days
 }
 
-/** 起始日期草稿；默认本月 1 日（浏览器本地）。 */
-const fromDate = ref(monthStartLocal())
+/** 起始日期草稿；默认今天往前 29 天（浏览器本地），与今天构成近 30 天。 */
+const fromDate = ref(defaultFromLocal())
 /** 结束日期草稿；默认今天（浏览器本地）。 */
 const toDate = ref(todayLocal())
 /** 已勾选的账户主键；候选就绪后默认全选。 */
@@ -400,13 +406,13 @@ async function apply(): Promise<void> {
 }
 
 /**
- * 复位为「本月 1 日至今天 + 账户全选 + 不限标签」并立即查询。
+ * 复位为「近 30 天（今天往前 29 天至今天）+ 账户全选 + 不限标签」并立即查询。
  *
  * 这是【重置】按钮的行为，也是每次进入页面与切换账套后的初始视图；
- * **筛选条件不保存**：日报表的区间是一次性的读法，下次进入就是新的当月。
+ * **筛选条件不保存**：日报表的区间是一次性的读法，下次进入就是新的近 30 天。
  */
 function resetToDefault(): void {
-  fromDate.value = monthStartLocal()
+  fromDate.value = defaultFromLocal()
   toDate.value = todayLocal()
   selectedAccountIds.value = moneyAccountOptions.value.map((account) => account.id)
   selectedTagIds.value = []
@@ -512,7 +518,8 @@ onMounted(() => {
         </div>
 
         <p class="panel-note">
-          日期区间为闭区间（含起止当天），默认本月 1 日至今天，最多 {{ MAX_REPORT_DAYS }} 天；
+          日期区间为闭区间（含起止当天），默认近 30 天（今天往前 29 天至今天），最多
+          {{ MAX_REPORT_DAYS }} 天；
           日期按<strong>服务器本地时区</strong>切分，与账目明细页同一口径。
         </p>
       </section>
