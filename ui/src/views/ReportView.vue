@@ -31,6 +31,10 @@
  * 与日报表、账目明细页同一取舍（本页有三维条件，边改边查会让每一次勾选都触发一次全量聚合）。
  * 页面不做「至少勾一个账户」之外的其他校验；区间需完整、起止不倒置、最多 36 个月，
  * 后端会再校验一遍，前端先拦是为了不把一个必然 400 的请求发出去。
+ *
+ * **账户与标签的勾选会按「你 + 当前账套」保存到个人账套配置**（`hamster_account_set_preference`
+ * 的月报表那一组列），本次进入时自动恢复并按它查询；**月份区间不保存**——区间是「我这次想看哪一段」，
+ * 账户与标签才是「我平时怎么看账」。与日报表各存一份：两页的勾选互不影响。
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
@@ -39,6 +43,7 @@ import TrendChart from '@/components/TrendChart.vue'
 import { UNTAGGED_LABEL } from '@/components/categoryPie'
 import { formatAmount, formatSigned, formatUnsigned, signedCellClass } from '@/components/entryFormat'
 import type { TrendSeriesSpec } from '@/components/trendChart'
+import { useAccountSetPreferencesStore, type ReportFilterPreference } from '@/stores/accountSetPreferences'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import type { EntryCategoryTotal } from '@/stores/categoryTotals'
@@ -50,6 +55,7 @@ import { useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
+const preferences = useAccountSetPreferencesStore()
 const currenciesStore = useCurrenciesStore()
 const tagsStore = useTagsStore()
 const monthlyReport = useMonthlyReportStore()
@@ -174,6 +180,11 @@ const selectedTagIds = ref<number[]>([])
 const filterError = ref('')
 /** 请求或候选加载的失败文案；为空串表示没有失败。 */
 const errorMessage = ref('')
+/**
+ * 个人筛选设置的补充说明（「已恢复上次保存的条件」/「未能保存」/「读取失败」）。
+ * 为空串表示没有需要说明的事。
+ */
+const preferenceNote = ref('')
 
 /** 最近一次查询结果；`null` 表示还没查过。 */
 const report = computed(() => monthlyReport.report)
@@ -382,6 +393,59 @@ function clearTags(): void {
 }
 
 /**
+ * 把保存过的账户与标签条件落到草稿上。
+ *
+ * **账户主键一律与当前候选求交**：报表页的候选是「系统默认币种下的资金 / 负债账户」，
+ * 而保存下来的那一份可能产生于默认币种被改之前、或某个账户被停用 / 删除之后。
+ * 求交为空时**回落到全选**——「至少选一个账户」是本页的硬校验，恢复出一个空账户集
+ * 会让页面一进来就查不出东西，而用户并未做错任何事（与日报表、账目明细页同一处置）。
+ *
+ * 标签同理求交：标签没有「至少选一个」的约束，故求交为空就是空，正好落回「不限标签」。
+ *
+ * @param saved 后端保存的筛选条件。
+ */
+function applySavedFilter(saved: ReportFilterPreference): void {
+  const availableAccounts = new Set(moneyAccountOptions.value.map((account) => account.id))
+  const restoredAccounts = saved.accountIds.filter((id) => availableAccounts.has(id))
+
+  selectedAccountIds.value =
+    restoredAccounts.length > 0
+      ? restoredAccounts
+      : moneyAccountOptions.value.map((account) => account.id)
+
+  const availableTags = new Set(tagOptions.value.map((tag) => tag.id))
+  selectedTagIds.value = saved.tagIds.filter((id) => availableTags.has(id))
+}
+
+/**
+ * 当前草稿是否就是默认视图（账户全选 + 不限标签）。
+ *
+ * 判据取「账户数是否等于候选总数」而不是「是否曾回落到全选」：恢复前后都拿这个口径看，
+ * 「恢复到一份与默认等价的配置」就不会被当成「恢复了一份特别的条件」。
+ */
+function isDefaultSelection(): boolean {
+  return selectedAccountIds.value.length === moneyAccountOptions.value.length && selectedTagIds.value.length === 0
+}
+
+/**
+ * 把已应用的账户与标签条件保存到个人账套配置（只存月报表那一组，日报表不受影响）。
+ *
+ * **失败只补一句说明，不推翻刚查出来的结果**：报表已经查出来了，那是既成事实；
+ * 而这条提示的语气必须与「查询失败」区分开——用户下次进来看到的是旧条件，不是「报表查不出来」。
+ */
+async function savePreference(): Promise<void> {
+  try {
+    await preferences.saveMonthlyReportFilter({
+      accountIds: [...selectedAccountIds.value],
+      tagIds: [...selectedTagIds.value],
+    })
+  } catch (error) {
+    const reason = error instanceof ApiError ? error.message : '保存失败'
+    preferenceNote.value = `筛选条件未能保存（${reason}），下次进入仍按上次保存的条件`
+  }
+}
+
+/**
  * 按草稿条件查询。
  *
  * 顺序是「先校验、再清空、后请求」：
@@ -389,7 +453,7 @@ function clearTags(): void {
  * - 请求前清空 store：新区间的结果回来之前，界面上不能留着上一个区间的数字配着新区间的标题，
  *   失败时也不至于把旧数据摆在一个写着「加载失败」的页面里。
  */
-async function apply(): Promise<void> {
+async function apply({ persist = true }: { persist?: boolean } = {}): Promise<void> {
   if (!hasAccountSet.value) {
     return
   }
@@ -406,6 +470,8 @@ async function apply(): Promise<void> {
 
   filterError.value = ''
   errorMessage.value = ''
+  // 用户自己发起的查询会让上一条「已恢复上次保存的条件」当场过期
+  preferenceNote.value = ''
   monthlyReport.clear()
 
   try {
@@ -418,13 +484,20 @@ async function apply(): Promise<void> {
   } catch (error) {
     errorMessage.value = error instanceof ApiError ? error.message : '加载月报表失败'
   }
+
+  // 只有用户动作（【查询】【重置】）才落库：进入页面时那次自动查询传 `persist: false`，
+  // 它只是把刚读出来的条件再查一遍，写回去是同一份数据的原样往返。
+  if (persist) {
+    await savePreference()
+  }
 }
 
 /**
  * 复位为「过去 12 个月（含当月）+ 账户全选 + 不限标签」并立即查询。
  *
- * 这是【重置】按钮的行为，也是每次进入页面与切换账套后的初始视图；
- * **筛选条件不保存**：月报表的区间是一次性的读法，下次进入就是新的近 12 个月。
+ * 这是【重置】按钮的行为：**它总是保存这一份**（`apply` 的默认 `persist: true`）。
+ * 否则下次进入又会恢复成重置前的条件，按钮看起来像没生效——用户点【重置】的意思
+ * 正是「我以后也要这个视图」。月份区间仍不进配置，只存账户与标签。
  */
 function resetToDefault(): void {
   fromMonth.value = monthsAgoLocal(DEFAULT_REPORT_MONTHS - 1)
@@ -437,13 +510,18 @@ function resetToDefault(): void {
 /**
  * 账套切换（含首次挂载）后的取数流程。
  *
- * 三件事都要重来：候选（账户与标签都按账套隔离）、勾选（旧账套的主键在新账套里指向别的对象）、
- * 结果（按账套隔离并进一步按用户分行）。未选择账套时清空结果，避免退出登录后仍残留上一份报表。
+ * 四件事都要重来：候选（账户与标签都按账套隔离）、勾选（旧账套的主键在新账套里指向别的对象）、
+ * 个人配置（按账套隔离，恢复的是「这个账套里的那一份」）、结果（按账套隔离并进一步按用户分行）。
+ * 未选择账套时清空结果，避免退出登录后仍残留上一份报表。
+ *
+ * 与日报表、账目明细页的分工一致：这里恢复「我上次看的样子」，【重置】回到「出厂样子」，
+ * 两者都用 {@link apply} 取数，但只有【查询】与【重置】会把条件写回个人配置。
  */
 async function switchAccountSet(currentId: number | null): Promise<void> {
   monthlyReport.clear()
   errorMessage.value = ''
   filterError.value = ''
+  preferenceNote.value = ''
   selectedAccountIds.value = []
   selectedTagIds.value = []
 
@@ -456,8 +534,25 @@ async function switchAccountSet(currentId: number | null): Promise<void> {
     return
   }
 
-  selectedAccountIds.value = moneyAccountOptions.value.map((account) => account.id)
-  await apply()
+  // 提示要在 `apply` 之后才写：`apply` 开头会清掉上一次的补充说明，
+  // 而这一次的补充说明正是它跑完之后才成立的。
+  let restoredNote = ''
+
+  try {
+    applySavedFilter(await preferences.loadMonthlyReportFilter())
+    if (!isDefaultSelection()) {
+      restoredNote = '已恢复上次保存的筛选条件'
+    }
+  } catch (error) {
+    // 读不到配置时的兜底：账户全选（否则 `apply` 的「至少选一个账户」会把页面挡在门口）
+    selectAllAccounts()
+    restoredNote = `${
+      error instanceof ApiError ? error.message : '读取个人筛选设置失败'
+    }（本次按默认条件查询）`
+  }
+
+  await apply({ persist: false })
+  preferenceNote.value = restoredNote
 }
 
 // 账套切换即重查；`watch` 只在值真的变化时触发，首次取数由 `onMounted` 负责。
@@ -624,11 +719,14 @@ onMounted(() => {
         <button type="button" class="ghost" :disabled="monthlyReport.loading" @click="resetToDefault">
           重置
         </button>
-        <span class="actions-note">条件改动后点【查询】生效；月份区间与勾选不会保存。</span>
+        <span class="actions-note"
+          >条件改动后点【查询】生效；月份区间不保存，账户与标签的勾选会按「你 + 当前账套」保存。</span
+        >
       </div>
 
       <p v-if="filterError !== ''" class="error">{{ filterError }}</p>
       <p v-if="errorMessage !== ''" class="error">{{ errorMessage }}</p>
+      <p v-if="preferenceNote !== ''" class="actions-note">{{ preferenceNote }}</p>
 
       <template v-if="report !== null">
         <p v-if="currencyCode === null" class="hint">

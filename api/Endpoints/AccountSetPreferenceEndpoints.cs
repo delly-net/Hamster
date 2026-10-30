@@ -14,9 +14,12 @@ namespace Hamster.Api.Endpoints;
 /// 既读账套（请求头 <c>X-Account-Set-Id</c>）又取当前用户主键，两者缺一不可：
 /// 少了账套会读到「我在别的账套里的设置」，少了用户则会读到「别人的设置」。
 /// <para>
-/// **目前只有账目明细页的筛选条件**（路径 <c>/entry-filter</c>）。路径里带上「哪一页的设置」，
-/// 而不是把不同页面的设置挤进一个通用键值对里——通用键值对会让字段名变成运行期字符串、
-/// 类型校验与默认值全部消失，一处拼错要到用户反馈时才发现。
+/// **目前有三个页面的筛选条件**：账目明细页（<c>/entry-filter</c>）、日报表（<c>/daily-report-filter</c>）
+/// 与月报表（<c>/monthly-report-filter</c>）。路径里带上「哪一页的设置」，而不是把不同页面的设置
+/// 挤进一个通用键值对里——通用键值对会让字段名变成运行期字符串、类型校验与默认值全部消失，
+/// 一处拼错要到用户反馈时才发现。**日报表与月报表各是一组**：两页虽说是同一套能力的两种粒度，
+/// 但「我在日报表里想看哪几个账户」与「我在月报表里想看哪几个账户」是两个独立的读法，
+/// 共用一组会让一页上的勾选悄悄改写另一页的视图。
 /// </para>
 /// <para>
 /// **不要求管理员身份**：这些设置描述的是「我习惯怎么看账」，与权限无关
@@ -105,6 +108,140 @@ public sealed class AccountSetPreferenceEndpoints : IEndpoint
                 "否则这个接口就成了探测「某账户/标签是否属于他人账套」的探针（同 GET /api/entries）。" +
                 "请求体里省略或传空数组即存为空（「没筛账户」/「不限标签」）。" +
                 "**日期区间不在这里**：本配置只记账户与标签。成功返回 204。" +
+                "未携带账套请求头返回 400，未登录返回 401。");
+
+        group.MapGet("/daily-report-filter", async (
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IAccountSetPreferenceService preferences,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                var saved = await preferences.GetDailyReportFilterAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    cancellationToken);
+
+                return Results.Ok(ReportFilterPreferenceDto.From(saved));
+            })
+            .WithName("GetDailyReportFilterPreference")
+            .WithSummary("读取日报表页筛选条件")
+            .WithDescription(
+                "返回当前用户在当前账套里保存的**日报表页**账户与标签筛选条件。" +
+                "**从未保存过时返回两个空数组**——调用方据此回落到默认视图（账户全选、标签不限）。" +
+                "与月报表各存一份、互不影响；**日期区间不在其中**：本配置只记账户与标签。" +
+                "未携带账套请求头返回 400，未登录返回 401。");
+
+        group.MapPut("/daily-report-filter", async (
+                ReportFilterPreferenceRequest request,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IAccountSetPreferenceService preferences,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                await preferences.SaveDailyReportFilterAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    request.AccountIds,
+                    request.TagIds,
+                    cancellationToken);
+
+                return Results.NoContent();
+            })
+            .WithName("SaveDailyReportFilterPreference")
+            .WithSummary("保存日报表页筛选条件")
+            .WithDescription(
+                "保存当前用户在当前账套里的日报表页账户与标签筛选条件，**不存在则新建、存在则原地改写**，" +
+                "且只改写日报表那一组列（账目明细与月报表的条件原样保留）。" +
+                "**不属于当前账套的主键、以及对本用户不可见的账户会被静默丢弃**，不报错（同 GET /api/entries）。" +
+                "**日期区间不在这里**：本配置只记账户与标签。成功返回 204。" +
+                "未携带账套请求头返回 400，未登录返回 401。");
+
+        group.MapGet("/monthly-report-filter", async (
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IAccountSetPreferenceService preferences,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                var saved = await preferences.GetMonthlyReportFilterAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    cancellationToken);
+
+                return Results.Ok(ReportFilterPreferenceDto.From(saved));
+            })
+            .WithName("GetMonthlyReportFilterPreference")
+            .WithSummary("读取月报表页筛选条件")
+            .WithDescription(
+                "返回当前用户在当前账套里保存的**月报表页**账户与标签筛选条件。" +
+                "**从未保存过时返回两个空数组**——调用方据此回落到默认视图（账户全选、标签不限）。" +
+                "与日报表各存一份、互不影响；**月份区间不在其中**：本配置只记账户与标签。" +
+                "未携带账套请求头返回 400，未登录返回 401。");
+
+        group.MapPut("/monthly-report-filter", async (
+                ReportFilterPreferenceRequest request,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                IAccountSetPreferenceService preferences,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                await preferences.SaveMonthlyReportFilterAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    request.AccountIds,
+                    request.TagIds,
+                    cancellationToken);
+
+                return Results.NoContent();
+            })
+            .WithName("SaveMonthlyReportFilterPreference")
+            .WithSummary("保存月报表页筛选条件")
+            .WithDescription(
+                "保存当前用户在当前账套里的月报表页账户与标签筛选条件，**不存在则新建、存在则原地改写**，" +
+                "且只改写月报表那一组列（账目明细与日报表的条件原样保留）。" +
+                "**不属于当前账套的主键、以及对本用户不可见的账户会被静默丢弃**，不报错（同 GET /api/entries）。" +
+                "**月份区间不在这里**：本配置只记账户与标签。成功返回 204。" +
                 "未携带账套请求头返回 400，未登录返回 401。");
 
         // 刻意**不提供**「清空配置」的 DELETE：见类头注释。
@@ -197,6 +334,38 @@ public sealed record EntryFilterPreferenceDto(int[] AccountIds, int[] TagIds)
     /// <param name="preference">服务层返回的筛选条件。</param>
     /// <returns>筛选条件 DTO。</returns>
     public static EntryFilterPreferenceDto From(EntryFilterPreference preference) => new(
+        [.. preference.AccountIds],
+        [.. preference.TagIds]);
+}
+
+/// <summary>保存报表页（日报表 / 月报表）筛选条件的请求体。</summary>
+/// <param name="AccountIds">
+/// 选中的账户主键；省略或空数组表示「没筛账户」（页面会回落到全选）。
+/// **不属于当前账套的主键、以及对本用户不可见的账户会被静默丢弃**。
+/// </param>
+/// <param name="TagIds">选中的标签主键；省略或空数组表示不限标签。</param>
+/// <remarks>
+/// 日报表与月报表**共用这一个请求体形状**（两份端点各存各的列）：两个页面的筛选维度完全相同，
+/// 只是时间粒度不同；分别定义两个一模一样的 record 只会让两处字段名有机会漂移。
+/// 刻意**不含日期 / 月份区间**：本配置只记账户与标签，时间区间每次进入页面仍回到默认值。
+/// </remarks>
+public sealed record ReportFilterPreferenceRequest(
+    IReadOnlyCollection<int>? AccountIds,
+    IReadOnlyCollection<int>? TagIds);
+
+/// <summary>报表页（日报表 / 月报表）筛选条件（对外暴露）。</summary>
+/// <param name="AccountIds">选中的账户主键，按保存时的顺序；空表示没有保存过。</param>
+/// <param name="TagIds">选中的标签主键，按保存时的顺序；空表示不限标签。</param>
+/// <remarks>
+/// **两个数组恒非 <c>null</c>**（没有保存过时是空数组而不是 null），调用方直接遍历即可，
+/// 与 <see cref="EntryFilterPreferenceDto"/> 同一约定。
+/// </remarks>
+public sealed record ReportFilterPreferenceDto(int[] AccountIds, int[] TagIds)
+{
+    /// <summary>由服务层结果构造 DTO。</summary>
+    /// <param name="preference">服务层返回的筛选条件。</param>
+    /// <returns>筛选条件 DTO。</returns>
+    public static ReportFilterPreferenceDto From(ReportFilterPreference preference) => new(
         [.. preference.AccountIds],
         [.. preference.TagIds]);
 }

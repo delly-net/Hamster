@@ -4,9 +4,9 @@ namespace Hamster.Api.Services;
 /// 个人账套配置服务：读写「某个用户在某本账套里」的个人界面设置。
 /// </summary>
 /// <remarks>
-/// **本接口只有「账目明细页筛选条件」一组方法，且方法名里带 <c>EntryFilter</c>**：
-/// 表是按列扩展的（见 <c>AccountSetPreference</c> 的类头注释），将来别的页面要记自己的设置时，
-/// 在同一个服务上再加一组 <c>XxxFilter</c> 方法即可——本接口刻意不叫
+/// **本接口按页面分组方法，且方法名里带上页面名**（<c>EntryFilter</c> / <c>DailyReportFilter</c> /
+/// <c>MonthlyReportFilter</c>）：表是按列扩展的（见 <c>AccountSetPreference</c> 的类头注释），
+/// 每加一个页面就在同一个服务上再加一组 <c>XxxFilter</c> 方法——本接口刻意不叫
 /// 「GetPreference / SetPreference」这种不表明内容的通用名，
 /// 那会把「这里存了什么」这件事从签名里抹掉，调用方只能靠翻实现才知道。
 /// <para>
@@ -74,7 +74,85 @@ public interface IAccountSetPreferenceService
         IReadOnlyCollection<int>? accountIds,
         IReadOnlyCollection<int>? tagIds,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 读取日报表页筛选条件。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">配置归属人主键。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>该用户在该账套里保存的日报表账户与标签主键；**没有保存过时返回两个空集合**。</returns>
+    /// <remarks>
+    /// 与 <see cref="GetEntryFilterAsync"/> 逐条同构，只是取的是日报表那一组列。
+    /// **月报表是另一组列**：两页各记各的，一页上的勾选不会改写另一页的视图。
+    /// </remarks>
+    Task<ReportFilterPreference> GetDailyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 保存日报表页筛选条件（不存在则新建，存在则原地改写，只动日报表那一组列）。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">配置归属人主键。</param>
+    /// <param name="isAdmin">是否为系统管理员；账户可见性判定要用它。</param>
+    /// <param name="accountIds">选中的账户主键；<c>null</c> 或空集合即存为空。</param>
+    /// <param name="tagIds">选中的标签主键；<c>null</c> 或空集合即存为空。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>
+    /// **收敛口径与账目明细页相同**（可见的钱账户 + 本账套标签，均含已停用），见
+    /// <see cref="SaveEntryFilterAsync"/>。报表页的候选还额外按系统默认币种收窄，那一层
+    /// **在页面恢复时求交**（同账户候选求交的做法）：默认币种会被管理员改，把币种判据
+    /// 再写进写入侧只会多出一份会漂移的规则，而恢复时的求交本来就必须做。
+    /// </remarks>
+    Task SaveDailyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 读取月报表页筛选条件。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">配置归属人主键。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>该用户在该账套里保存的月报表账户与标签主键；**没有保存过时返回两个空集合**。</returns>
+    Task<ReportFilterPreference> GetMonthlyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 保存月报表页筛选条件（不存在则新建，存在则原地改写，只动月报表那一组列）。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">配置归属人主键。</param>
+    /// <param name="isAdmin">是否为系统管理员；账户可见性判定要用它。</param>
+    /// <param name="accountIds">选中的账户主键；<c>null</c> 或空集合即存为空。</param>
+    /// <param name="tagIds">选中的标签主键；<c>null</c> 或空集合即存为空。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>与 <see cref="SaveDailyReportFilterAsync"/> 逐条同理，只是写月报表那一组列。</remarks>
+    Task SaveMonthlyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default);
 }
+
+/// <summary>报表页（日报表 / 月报表）的筛选条件（服务层表示）。</summary>
+/// <param name="AccountIds">选中的账户主键；空表示没有保存过。</param>
+/// <param name="TagIds">选中的标签主键；空表示不限标签。</param>
+/// <remarks>
+/// 与 <see cref="EntryFilterPreference"/> 形状相同却**各自定义**：两张页面记的是两份独立的选择，
+/// 共用一个类型会让调用方以为它们可以互换，而实际上必须落到不同的列上。
+/// </remarks>
+public sealed record ReportFilterPreference(IReadOnlyList<int> AccountIds, IReadOnlyList<int> TagIds);
 
 /// <summary>账目明细页的筛选条件（服务层表示）。</summary>
 /// <param name="AccountIds">选中的账户主键；空表示没有保存过。</param>

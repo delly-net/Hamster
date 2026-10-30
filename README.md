@@ -225,17 +225,28 @@ set"; drop the user and you read "somebody else's settings".
 |---|---|---|
 | `GET /api/account-set-preferences/entry-filter` | Bearer | Read the entry-list filter; **two empty arrays when nothing was ever saved** |
 | `PUT /api/account-set-preferences/entry-filter` | Bearer | Save the entry-list filter (204); body `{ accountIds, tagIds }`, **inserted when absent, updated in place otherwise** |
+| `GET /api/account-set-preferences/daily-report-filter` | Bearer | Read the **daily-report** filter; **two empty arrays when nothing was ever saved** |
+| `PUT /api/account-set-preferences/daily-report-filter` | Bearer | Save the **daily-report** filter (204); body `{ accountIds, tagIds }`, **only the daily-report columns are rewritten** |
+| `GET /api/account-set-preferences/monthly-report-filter` | Bearer | Read the **monthly-report** filter; **two empty arrays when nothing was ever saved** |
+| `PUT /api/account-set-preferences/monthly-report-filter` | Bearer | Save the **monthly-report** filter (204); body `{ accountIds, tagIds }`, **only the monthly-report columns are rewritten** |
 
 | Table | Contents |
 |---|---|
-| `hamster_account_set_preference` | One row per (account set, user): `entry_account_ids` and `entry_tag_ids`, comma-joined primary keys, plus created/updated timestamps. Unique on `(account_set_id, user_id)` |
+| `hamster_account_set_preference` | One row per (account set, user): `entry_account_ids` / `entry_tag_ids` (entry list), `daily_report_account_ids` / `daily_report_tag_ids` (daily report) and `monthly_report_account_ids` / `monthly_report_tag_ids` (monthly report), comma-joined primary keys, plus created/updated timestamps. Unique on `(account_set_id, user_id)` |
+
+**Each page keeps its own pair of columns.** The three pages' selections never overwrite one another:
+querying the daily report does not change the monthly report's or the entry list's view. The daily and
+monthly reports are two granularities of the same capability, but "which accounts I want to see in the
+daily report" and "which accounts I want to see in the monthly report" are separate readings, so the
+memory is not shared either.
 
 **Only accounts and tags are remembered — the date range deliberately is not.** A date range answers
 "which stretch do I want to look at *this time*" (after hunting down an old entry from last month,
 landing in that same range again next visit would look like the current month had no activity),
 whereas accounts and tags answer "how do I usually read my books". The time range therefore falls
-back to the default "1st of this month – today" on every visit, and the request body has no date
-field at all — sending one has no effect.
+back to each page's default on every visit (entry list "1st of this month – today", daily report
+the last 30 days, monthly report the last 12 months), and the request body has no time field at all
+— sending one has no effect.
 
 **Writes converge against the current account set; reads do not.** On save, primary keys that do not
 belong to the current account set — and accounts the current user cannot see — are **silently
@@ -247,6 +258,13 @@ services** (visibility plus the money-account rule from the account service, the
 dictionary from the tag service), so no second list of "what counts" exists here. **Deactivated
 items are kept**: accounts and tags are soft-deleted, historical entries on them are still listed on
 the entry page, and a saved filter holding one is a legitimate state.
+
+**The report pages narrow their candidates one step further, to the default currency, and that step
+happens in the page when restoring.** The default currency can be changed by an administrator;
+copying the currency rule into the write path would only add a second rule that can drift. The page
+has to intersect the saved keys with its current candidates anyway (keys not in the candidate list
+are dropped, and if none survive the page falls back to selecting all), so the currency narrowing
+rides along with that intersection.
 
 The preference table is deliberately **not** a set of columns on `hamster_account_set_member`:
 a membership row says "this person belongs to this account set" and disappears the moment an
@@ -1373,12 +1391,16 @@ an upgraded database both start with no watermark and are treated as having no l
 upgrade; the three subscriptions run one after another and the total cost is proportional to
 (days × subscribers). It is still one-off, and each subscription then advances only over new days.
 
-The personal account-set preference table `hamster_account_set_preference` is a brand-new table too
-— another "add a table, alter no column" change — so it also needs **no migration and no backfill**:
-it starts at 0 rows on an upgraded database and is written the first time a user presses Query or
-Reset. **An empty table means "nothing was ever saved"**, exactly as a `GET` returning two empty
-arrays says, and the page falls back to the default view (this month, all accounts, no tag filter) —
-behaviourally identical to having saved an empty filter.
+The personal account-set preference table `hamster_account_set_preference` was introduced as a new
+table, so it needs **no migration and no backfill**: it starts at 0 rows on an upgraded database and
+is written the first time a user presses Query or Reset. **An empty table means "nothing was ever
+saved"**, exactly as a `GET` returning two empty arrays says, and the page falls back to the default
+view (all accounts, no tag filter) — behaviourally identical to having saved an empty filter.
+The daily-report and monthly-report filters are **four new columns on that existing table**
+(`daily_report_account_ids` / `daily_report_tag_ids` / `monthly_report_account_ids` /
+`monthly_report_tag_ids`): they are nullable (PostgreSQL refuses a non-null column on a non-empty
+table, and existing rows simply hold NULL), the service treats NULL and the empty string alike as
+"nothing was ever saved", so there is **no migration and no backfill** here either.
 
 ### Frontend Setup
 

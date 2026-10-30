@@ -55,32 +55,8 @@ public sealed class AccountSetPreferenceService(
         IReadOnlyCollection<int>? tagIds,
         CancellationToken cancellationToken = default)
     {
-        // 收敛：只留下「本账套内、对当前用户可见的钱账户」。
-        // includeInactive 恒为 true：账户是软删除，停用账户上的历史明细照常在明细页呈现，
-        // 故筛选条件里保留一枚停用账户是合法状态（与 EntryQueryService 取可见账户时的口径一致）。
-        var visible = await accounts.ListByAccountSetAsync(
-            accountSetId,
-            userId,
-            isAdmin,
-            includeInactive: true,
-            cancellationToken);
-
-        var allowedAccounts = visible
-            .Where(item => item.Account.Type.IsMoneyAccount())
-            .Select(item => item.Account.Id)
-            .ToHashSet();
-
-        // 收敛：只留下「本账套内的标签」。**含已停用**——筛选区本就把停用标签列进候选
-        // （它查的正是历史账，见 EntryQueryView），在这里剔掉会让用户上次按它筛的视图静默变样。
-        var allowedTags = (await tags.ListByAccountSetAsync(
-                accountSetId,
-                includeInactive: true,
-                cancellationToken))
-            .Select(tag => tag.Id)
-            .ToHashSet();
-
-        var accountText = FormatIds(Converge(accountIds, allowedAccounts));
-        var tagText = FormatIds(Converge(tagIds, allowedTags));
+        var (accountText, tagText) = await ConvergeAsync(
+            accountSetId, userId, isAdmin, accountIds, tagIds, cancellationToken);
 
         var existing = await FindRowAsync(accountSetId, userId, cancellationToken);
 
@@ -108,6 +84,169 @@ public sealed class AccountSetPreferenceService(
             })
             .Where(target => target.Id == existing.Id)
             .ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<ReportFilterPreference> GetDailyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        CancellationToken cancellationToken = default)
+    {
+        var row = await FindRowAsync(accountSetId, userId, cancellationToken);
+
+        // 新列在升级库上是 NULL，ParseIds 把 null 与空串一并当成「没有保存过」——
+        // 这正是「从未用过日报表」与「保存了一份空条件」的共同行为（账户全选、不限标签）。
+        return row is null
+            ? new ReportFilterPreference([], [])
+            : new ReportFilterPreference(
+                ParseIds(row.DailyReportAccountIds),
+                ParseIds(row.DailyReportTagIds));
+    }
+
+    /// <inheritdoc />
+    public async Task SaveDailyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default)
+    {
+        var (accountText, tagText) = await ConvergeAsync(
+            accountSetId, userId, isAdmin, accountIds, tagIds, cancellationToken);
+
+        var existing = await FindRowAsync(accountSetId, userId, cancellationToken);
+
+        if (existing is null)
+        {
+            await db.Insertable(new AccountSetPreference
+            {
+                AccountSetId = accountSetId,
+                UserId = userId,
+                DailyReportAccountIds = accountText,
+                DailyReportTagIds = tagText,
+            }).ExecuteCommandAsync(cancellationToken);
+
+            return;
+        }
+
+        // 只动日报表那一组列：同一行里的账目明细与月报表条件是别人的页面在用的，改写它们
+        // 会让「在日报表点一次查询」把另外两页的视图一并改掉。
+        await db.Updateable<AccountSetPreference>()
+            .SetColumns(target => new AccountSetPreference
+            {
+                DailyReportAccountIds = accountText,
+                DailyReportTagIds = tagText,
+                UpdatedAt = DateTime.UtcNow,
+            })
+            .Where(target => target.Id == existing.Id)
+            .ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<ReportFilterPreference> GetMonthlyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        CancellationToken cancellationToken = default)
+    {
+        var row = await FindRowAsync(accountSetId, userId, cancellationToken);
+
+        return row is null
+            ? new ReportFilterPreference([], [])
+            : new ReportFilterPreference(
+                ParseIds(row.MonthlyReportAccountIds),
+                ParseIds(row.MonthlyReportTagIds));
+    }
+
+    /// <inheritdoc />
+    public async Task SaveMonthlyReportFilterAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken = default)
+    {
+        var (accountText, tagText) = await ConvergeAsync(
+            accountSetId, userId, isAdmin, accountIds, tagIds, cancellationToken);
+
+        var existing = await FindRowAsync(accountSetId, userId, cancellationToken);
+
+        if (existing is null)
+        {
+            await db.Insertable(new AccountSetPreference
+            {
+                AccountSetId = accountSetId,
+                UserId = userId,
+                MonthlyReportAccountIds = accountText,
+                MonthlyReportTagIds = tagText,
+            }).ExecuteCommandAsync(cancellationToken);
+
+            return;
+        }
+
+        await db.Updateable<AccountSetPreference>()
+            .SetColumns(target => new AccountSetPreference
+            {
+                MonthlyReportAccountIds = accountText,
+                MonthlyReportTagIds = tagText,
+                UpdatedAt = DateTime.UtcNow,
+            })
+            .Where(target => target.Id == existing.Id)
+            .ExecuteCommandAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// 把入参收敛成「本账套内、对当前用户可见的钱账户」与「本账套内标签」两段主键文本。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">配置归属人主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="accountIds">入参账户主键；<c>null</c> 视为空。</param>
+    /// <param name="tagIds">入参标签主键；<c>null</c> 视为空。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>两段可直接写入库的逗号分隔主键文本。</returns>
+    /// <remarks>
+    /// **三页共用这一份收敛**：账目明细与两个报表页的账户候选都是「可见的钱账户」，
+    /// 差别只在报表页还按系统默认币种收窄一层——那一层留给页面恢复时与候选求交，
+    /// 不写进这里（默认币种会被管理员改，把币种判据复制到写入侧只会多出一份会漂移的规则）。
+    /// <para>
+    /// includeInactive 恒为 true：账户与标签都是软删除，停用项上的历史明细照常在页面呈现，
+    /// 故筛选条件里保留它们是合法状态（与 <see cref="EntryQueryService"/> 取可见账户时的口径一致）。
+    /// </para>
+    /// </remarks>
+    private async Task<(string AccountText, string TagText)> ConvergeAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        IReadOnlyCollection<int>? accountIds,
+        IReadOnlyCollection<int>? tagIds,
+        CancellationToken cancellationToken)
+    {
+        var visible = await accounts.ListByAccountSetAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            includeInactive: true,
+            cancellationToken);
+
+        var allowedAccounts = visible
+            .Where(item => item.Account.Type.IsMoneyAccount())
+            .Select(item => item.Account.Id)
+            .ToHashSet();
+
+        // **含已停用**——筛选区本就把停用标签列进候选（它查的正是历史账），
+        // 在这里剔掉会让用户上次按它筛的视图静默变样。
+        var allowedTags = (await tags.ListByAccountSetAsync(
+                accountSetId,
+                includeInactive: true,
+                cancellationToken))
+            .Select(tag => tag.Id)
+            .ToHashSet();
+
+        return (
+            FormatIds(Converge(accountIds, allowedAccounts)),
+            FormatIds(Converge(tagIds, allowedTags)));
     }
 
     /// <summary>

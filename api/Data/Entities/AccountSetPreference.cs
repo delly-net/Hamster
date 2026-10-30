@@ -3,7 +3,7 @@ using SqlSugar;
 namespace Hamster.Api.Data.Entities;
 
 /// <summary>
-/// 个人账套配置：某个用户在某本账套里的**个人界面设置**，目前只记「账目明细」页的筛选条件。
+/// 个人账套配置：某个用户在某本账套里的**个人界面设置**，目前记「账目明细」「日报表」「月报表」三页的筛选条件。
 /// </summary>
 /// <remarks>
 /// **唯一性是「账套 + 用户」两个维度**：同一本账套里的两个成员各有各的筛选习惯，
@@ -20,10 +20,16 @@ namespace Hamster.Api.Data.Entities;
 /// </para>
 /// <para>
 /// <see cref="EntryAccountIds"/> / <see cref="EntryTagIds"/> **按列分而不是按页开表**：
-/// 本表是「个人账套配置」，账目明细页只是它的**第一个**消费者。将来别的页面若要记住自己的筛选条件，
-/// 往同一行加一组 <c>settlement_*</c> 列即可，不必再为「用户 + 账套 + 页面」开一张新表。
+/// 本表是「个人账套配置」，账目明细页只是它的**第一个**消费者。日报表与月报表就是这样加进来的
+/// ——各自一组 <c>daily_report_*</c> / <c>monthly_report_*</c> 列，而不是为「用户 + 账套 + 页面」
+/// 各开一张新表。将来再有页面要记自己的筛选条件，仍在同一行加一组列；
 /// 页面多了之后若列数难以维持，正确的演进方向是拆出按页面键的子表，
 /// 而不是让现在这版提前长成一个通用键值表（那会让列的语义、类型校验、默认值全部消失）。
+/// <para>
+/// **日报表与月报表各存一组列，不共用**：两页虽说是同一套能力的两种粒度，但「我在日报表里
+/// 想看哪几个账户」与「我在月报表里想看哪几个账户」是两个独立的读法。共用一组列会让
+/// 在一个页面上的勾选悄悄改写另一个页面的视图——而那正是用户最不容易察觉的改动。
+/// </para>
 /// </para>
 /// </remarks>
 [SugarTable("hamster_account_set_preference")]
@@ -84,6 +90,36 @@ public sealed class AccountSetPreference
     /// </remarks>
     [SugarColumn(ColumnName = "entry_tag_ids", Length = 2000)]
     public string EntryTagIds { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 日报表页选中的账户主键，**逗号分隔**；<c>null</c> / 空串表示「没有保存过」。
+    /// </summary>
+    /// <remarks>
+    /// **可空（<c>IsNullable = true</c>）是升级路径决定的**：这一列是加在**既有表**上的新列，
+    /// SqlSugar 的增量加列只会把它追加为可空，且 PostgreSQL 拒绝在非空表上新增非空列；
+    /// 升级前已有的行（以及从未用过日报表的用户）在这一列上就是 NULL。
+    /// 「NULL 与空串同义」的归一放在服务层的 <c>ParseIds</c>。**刻意不写回填 SQL**：
+    /// 本列是可空 <c>string?</c>，「没保存过」读回来就是 NULL，不会像
+    /// <c>hamster_transaction.updated_at</c> 那样因无法绑定非空类型而让查询 500；
+    /// 而回填只能把「没保存过」伪造成「保存过一份空条件」，两者行为本就完全相同。
+    /// </remarks>
+    [SugarColumn(ColumnName = "daily_report_account_ids", Length = 2000, IsNullable = true)]
+    public string? DailyReportAccountIds { get; set; }
+
+    /// <summary>日报表页选中的标签主键，**逗号分隔**；<c>null</c> / 空串即「不限标签」。</summary>
+    /// <remarks>与 <see cref="EntryTagIds"/> 逐条同理（含已停用标签），可空理由见 <see cref="DailyReportAccountIds"/>。</remarks>
+    [SugarColumn(ColumnName = "daily_report_tag_ids", Length = 2000, IsNullable = true)]
+    public string? DailyReportTagIds { get; set; }
+
+    /// <summary>月报表页选中的账户主键，**逗号分隔**；<c>null</c> / 空串表示「没有保存过」。</summary>
+    /// <remarks>与 <see cref="DailyReportAccountIds"/> 逐条同理，两页各存一份、互不影响。</remarks>
+    [SugarColumn(ColumnName = "monthly_report_account_ids", Length = 2000, IsNullable = true)]
+    public string? MonthlyReportAccountIds { get; set; }
+
+    /// <summary>月报表页选中的标签主键，**逗号分隔**；<c>null</c> / 空串即「不限标签」。</summary>
+    /// <remarks>与 <see cref="DailyReportTagIds"/> 逐条同理，两页各存一份、互不影响。</remarks>
+    [SugarColumn(ColumnName = "monthly_report_tag_ids", Length = 2000, IsNullable = true)]
+    public string? MonthlyReportTagIds { get; set; }
 
     /// <summary>创建时间（UTC）。</summary>
     /// <remarks>
