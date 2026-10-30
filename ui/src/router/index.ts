@@ -87,6 +87,15 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/reports',
+      name: 'reports',
+      // 月报表（选定月份后实时汇总按日收支与分类构成），面向所有登录用户，故不设 requiresAdmin。
+      // 与 /entries 分开成两页：明细页回答「某一笔是什么」，报表页回答「这个月整体如何」，
+      // 两者的筛选器与行粒度都不同，挤在一页会互相拖累
+      component: () => import('../views/ReportView.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/settings',
       name: 'settings',
       // 用户设置（修改密码 + 软件关于信息），面向所有登录用户，故不设 requiresAdmin

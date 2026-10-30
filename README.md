@@ -762,6 +762,39 @@ unrecognised value in `types` **is** one, though — a field-level 400 on `types
 result: a type that matches nothing is indistinguishable from a typo, and the caller that mistyped
 it would read the empty page as "there is nothing to show".
 
+###### Daily income and expense totals
+
+The monthly report's line chart asks "how much came in and went out on each day of this month",
+which is an aggregation-shaped question rather than another parameter set on `GET /api/entries`
+(its row granularity is the entry and it must page). It therefore has a read-only endpoint of its own:
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /api/entries/daily-flows?month=YYYY-MM` | Bearer | Income and expense totals for one month of the current account set, **grouped by server-local day**. `month` defaults to the **server's current month**; a malformed value is a 400 (`message`, not a field-level error); month boundaries are converted to UTC with the server's local time zone and the window is **[the 1st at 00:00, the next month's 1st at 00:00)**. Returns `{ currencyCode, month, days }`: `days` is ascending by date, each item `{ date, incomeTotal, expenseTotal, netTotal }`, with **both totals always positive** and the net carrying a sign (`incomeTotal - expenseTotal`, negative when that day spent more than it earned). With no usable currency the response is `currencyCode = null` and an empty array, not a 404 |
+
+**Only days that actually had income or expense come back; nothing is zero-filled.** Which days had
+movement is a book fact; whether a whole-month line should draw the blanks as 0 is a presentation
+decision — the report reads live data, where a blank day really is 0, so the front end fills the gaps.
+This is **deliberately the opposite** of the settlement charts' "never fill a missing day": there a
+blank means "not settled yet", and filling it would draw "not counted" as "zero".
+
+**The filters match `GET /api/entries/category-totals` line for line** (same visibility resolution,
+same default currency, same primary-direction rule): only the system default currency, **public
+accounts plus the caller's own personal accounts** (being an admin does not pull other people's
+personal accounts in), and **money accounts** (asset / liability). Only the **primary direction** of
+income and expense counts — income on the debit side, expense on the credit side — so a posting with
+a counterparty account is never counted on both sides; transfers and opening balances do not
+participate. Days are grouped in server-local time, with a ±1 second SQL prefilter followed by an
+exact C# boundary check, exactly like the rest of `LocalDay`.
+
+**This is a different source from the settlement data, and the two are not interchangeable**: the
+per-day records written by the settlement subscriptions contain only **days that have settled**, while
+the report has to show every posting up to today. The filters are identical; the only difference is
+live versus settled.
+
+Failure contract: 400 without the account-set header, 401 when not signed in, 403 when the account set
+is unknown or not yours.
+
 ###### Historical summary candidates
 
 The record form and the edit dialog offer the summaries already used in this account set, so a user

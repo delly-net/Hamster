@@ -352,6 +352,78 @@ public sealed class EntryEndpoints : IEndpoint
                 "月份边界按服务器本地时区换算为 UTC，区间为 **[当月 1 日 0 点, 次月 1 日 0 点)**。" +
                 "没有可用币种时返回 `currencyCode = null` 与两个空数组，而不是 404。" +
                 "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
+
+        group.MapGet("/daily-flows", async (
+                string? month,
+                HttpContext context,
+                ClaimsPrincipal principal,
+                IUserService users,
+                IAccountSetService accountSets,
+                ICurrencyService currencies,
+                IEntryQueryService entries,
+                ILogger<EntryEndpoints> logger,
+                CancellationToken cancellationToken) =>
+            {
+                var (actor, accountSet, failure) = await ResolveContextAsync(
+                    context, principal, users, accountSets, cancellationToken);
+
+                if (failure is not null)
+                {
+                    return failure;
+                }
+
+                if (!TryResolveMonth(month, out var monthStart))
+                {
+                    return Results.BadRequest(new { message = $"月份格式不正确，应为 {MONTH_FORMAT}" });
+                }
+
+                var monthLabel = monthStart.ToString(MONTH_FORMAT, CultureInfo.InvariantCulture);
+
+                // 与分类合计、首页两张走势图同一条取舍：没有可用币种时返回空结果而不是 404，
+                // 前端把「没有币种可看」与「这个月没有发生额」都呈现成空态。
+                var currency = await currencies.GetDefaultAsync(cancellationToken);
+                if (currency is null)
+                {
+                    return Results.Ok(new EntryDailyFlowsResponse(null, monthLabel, []));
+                }
+
+                // 月份是**服务器本地**的自然月：日期的分组口径跟着部署所在地走。
+                // 换算成 UTC 后交给查询服务；上界取次月 1 日 0 点（不含）。
+                var timeZone = LocalDay.ResolveTimeZone(logger);
+                var fromUtc = LocalDay.StartToUtc(monthStart, timeZone);
+                var toUtc = LocalDay.StartToUtc(monthStart.AddMonths(1), timeZone);
+
+                var result = await entries.ListDailyFlowsAsync(
+                    accountSet!.Id,
+                    actor!.Id,
+                    actor.IsAdmin,
+                    currency.Code,
+                    fromUtc,
+                    toUtc,
+                    timeZone,
+                    cancellationToken);
+
+                return Results.Ok(EntryDailyFlowsResponse.From(currency.Code, monthLabel, result));
+            })
+            .WithName("ListEntryDailyFlows")
+            .WithSummary("按日收支合计")
+            .WithDescription(
+                "返回当前账套、**系统默认币种**下某个自然月内**按天的收入、支出与净额**，" +
+                "供「月报表」页的按日折线图使用。" +
+                "**这是实时聚合**：直接统计交易明细，与首页的 `/api/income-expenses/daily` 不同，" +
+                "不依赖结算记录，也包含尚未结算的日期。" +
+                "**只统计收入与支出两类交易**（各取主账户方向那一条明细：收入取借方、支出取贷方）：" +
+                "转账是账户之间的搬运、没有单侧发生额，期初余额也不是本月发生额，" +
+                "两者进入走势都会让「这个月每天赚多少、花多少」失真。" +
+                "**账户范围是公共账户 + 当前用户本人的个人账户**的资金 / 负债账户；" +
+                "即使调用者是管理员也**不包含其他成员的个人账户**——与 `category-totals` 同一口径。" +
+                "金额：收入与支出**都是正数**（方向由字段名表达），`netTotal = incomeTotal − expenseTotal`。" +
+                "`days` **只含至少有一笔收支的日期**（按本地日期升序）：这是后端「缺日不补零」的口径，" +
+                "补零是呈现层的决定（月报表的数据源是实时的，空白日就是真实的 0）。" +
+                "`month` 省略时取**服务器本地的当月**，格式为 `YYYY-MM`，非法取值返回 400；" +
+                "月份边界按服务器本地时区换算为 UTC，区间为 **[当月 1 日 0 点, 次月 1 日 0 点)**。" +
+                "没有可用币种时返回 `currencyCode = null` 与空数组，而不是 404。" +
+                "失败约定与 `GET /api/entries` 一致：未带账套 400、未登录 401、无权访问账套 403。");
     }
 
     /// <summary>
@@ -757,6 +829,62 @@ public sealed record EntryCategoryTotalDto(int? CategoryId, string? CategoryName
     /// <returns>对外 DTO。</returns>
     public static EntryCategoryTotalDto From(EntryCategoryTotal item) =>
         new(item.CategoryId, item.CategoryName, item.Amount);
+}
+
+/// <summary>某账套某月按天的收支合计（对外暴露）。</summary>
+/// <param name="CurrencyCode">
+/// 金额所属的币种代码；**一个启用币种都没有时为 <c>null</c>**（此时 <paramref name="Days"/> 必为空）。
+/// </param>
+/// <param name="Month">实际查询的月份（<c>YYYY-MM</c>）；请求省略 <c>month</c> 时即服务器本地的当月。</param>
+/// <param name="Days">该月的按天收支，按日期升序；**只含至少有一笔收支的日期**。</param>
+/// <remarks>
+/// 回带 <paramref name="CurrencyCode"/> 与 <paramref name="Month"/> 的理由同
+/// <see cref="EntryCategoryTotalsResponse"/>：两者都可能由**服务端**决定，调用方不把它们带回来
+/// 就只能自己再猜一次。
+/// </remarks>
+public sealed record EntryDailyFlowsResponse(
+    string? CurrencyCode,
+    string Month,
+    EntryDailyFlowDto[] Days)
+{
+    /// <summary>由服务层结果构造响应体。</summary>
+    /// <param name="currencyCode">实际统计的币种代码；无可用币种时为 <c>null</c>。</param>
+    /// <param name="month">实际查询的月份（<c>YYYY-MM</c>）。</param>
+    /// <param name="flows">服务层的按日收支。</param>
+    /// <returns>对外响应体。</returns>
+    public static EntryDailyFlowsResponse From(
+        string? currencyCode,
+        string month,
+        EntryDailyFlows flows) => new(
+        currencyCode,
+        month,
+        [.. flows.Days.Select(EntryDailyFlowDto.From)]);
+}
+
+/// <summary>按天收支的一个数据点（对外暴露）。</summary>
+/// <param name="Date">日期（<c>yyyy-MM-dd</c>，**本地日期**）。</param>
+/// <param name="IncomeTotal">当日收入合计，**恒为非负**。</param>
+/// <param name="ExpenseTotal">当日支出合计，**恒为非负**。</param>
+/// <param name="NetTotal">净额 = <paramref name="IncomeTotal"/> − <paramref name="ExpenseTotal"/>（**带符号**）。</param>
+/// <remarks>
+/// **两个发生额都是正数，符号只体现在 <paramref name="NetTotal"/> 上**：图上把支出线画在下方是
+/// **呈现**的决定（前端取负即可），而接口上「支出 500」就是 500（同 <c>IncomeExpenseDailyPoint</c>
+/// 的取舍）。
+/// </remarks>
+public sealed record EntryDailyFlowDto(
+    string Date,
+    decimal IncomeTotal,
+    decimal ExpenseTotal,
+    decimal NetTotal)
+{
+    /// <summary>由服务层的按日收支构造 DTO。</summary>
+    /// <param name="flow">服务层的按日收支。</param>
+    /// <returns>对外 DTO。</returns>
+    public static EntryDailyFlowDto From(EntryDailyFlow flow) => new(
+        flow.Date,
+        flow.IncomeTotal,
+        flow.ExpenseTotal,
+        flow.NetTotal);
 }
 
 /// <summary>一页账目明细。</summary>

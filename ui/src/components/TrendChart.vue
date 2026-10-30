@@ -2,8 +2,8 @@
 /**
  * 折线图（Apache ECharts 6 封装）：把「日期文案 + 各系列取值」画成一张折线图。
  *
- * 首页两块走势图（总资产 / 收支）用的是同一张图——同一套坐标系、同一套配色规则、
- * 同一个悬停读数——差异只在标题、系列与概览数字，故绘图收在这一处，两处引用。
+ * 首页两块走势图（总资产 / 收支）与月报表的按日收支折线用的是同一张图——同一套坐标系、
+ * 同一套配色规则、同一个悬停读数——差异只在标题、系列与概览数字，故绘图收在这一处，三处引用。
  * option 的构建与令牌解析在 `./trendChart.ts`（纯函数，不含 Vue），本文件只负责
  * 组件侧的三件事：**按需注册 ECharts 模块**、**跟随系统配色重绘**、**无障碍标签**。
  *
@@ -33,7 +33,13 @@ import type { ChartTheme, TrendChartOption, TrendSeriesSpec } from './trendChart
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent, AxisPointerComponent])
 
 const props = defineProps<{
-  /** 横轴各数据点的日期文案（按时间升序，缺日不补），与各系列的 `values` 一一对应。 */
+  /**
+   * 横轴各数据点的日期文案（按时间升序），与各系列的 `values` 一一对应。
+   *
+   * **补不补零由调用方按数据源决定**，本组件两样都收：首页的结算数据缺日不补零（没结算的日子
+   * 不该画成 0），月报表的实时数据则把整月每一天补齐（实时数据下空白日就是真的 0，
+   * 见 `views/ReportView.vue`）。组件对两者一视同仁——它只负责按顺序画点。
+   */
   xLabels: readonly string[]
   /** 要画的折线。 */
   series: readonly TrendSeriesSpec[]

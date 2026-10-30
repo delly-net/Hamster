@@ -214,6 +214,53 @@ public interface IEntryQueryService
         DateTime fromUtc,
         DateTime toUtc,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// 按**服务器本地日**聚合某个时间区间内的收入与支出发生额，供「月报表」页的按日折线使用。
+    /// </summary>
+    /// <param name="accountSetId">账套主键；只聚合该账套内的交易。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只统计该币种的账户；月报表传的是系统默认币种。</param>
+    /// <param name="fromUtc">起始时刻（UTC，**含端点**）。</param>
+    /// <param name="toUtc">结束时刻（UTC，**不含端点**）。</param>
+    /// <param name="timeZone">
+    /// 服务器本地时区（由 <see cref="LocalDay.ResolveTimeZone"/> 解析并缓存）。
+    /// 日期的分组口径跟着部署所在地走，故由调用方传入而不是在服务里每次重查。
+    /// </param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>按日期升序的按日收入与支出；**只含至少有一笔收支的日期**（缺日不补零）。</returns>
+    /// <remarks>
+    /// **口径与 <see cref="ListCategoryTotalsAsync"/> 逐条相同**：只统计收入与支出两类交易
+    /// （各取「主账户」那一条明细：收入取借方、支出取贷方）；账户范围是「公共账户 + 当前用户本人的
+    /// 个人账户」的资金 / 负债账户，且只取 <paramref name="currencyCode"/> 这一种币种。
+    /// 管理员**不**把其他成员的个人账户算进来——月报表与首页的分类构成必须同一口径，
+    /// 否则同一页上会出现「折线是我的、汇总表是全家的」这种无从解释的差异。
+    /// <para>
+    /// **为什么按日聚合而不是拿 <see cref="QueryAsync"/> 的结果在前端累加**：后者的行粒度是
+    /// **明细**且必须分页（<c>pageSize</c> 上限 200），整月数据会被截断；按日聚合是查询形状上的
+    /// 差别，不是同一件事的另一个参数集（同 <see cref="ListSummariesAsync"/> 的取舍）。
+    /// </para>
+    /// <para>
+    /// **金额收入、支出均恒为正**（<see cref="TransactionEntry.Amount"/> 的库内口径），
+    /// 方向由字段名表达；<see cref="EntryDailyFlow.NetTotal"/> 才带符号（收入 − 支出）。
+    /// 某一天只有一侧发生时，另一侧按 0 计——这与「缺日不补零」不矛盾：补零只针对
+    /// **整日都没有收支**的日子，那些日子不出现在结果里，由前端按实时口径自行补齐。
+    /// </para>
+    /// <para>
+    /// 时间区间是半开区间 <c>[fromUtc, toUtc)</c>，与结算的日界口径一致；
+    /// SQL 侧沿用 <see cref="LocalDay.PrefilterMargin"/> 的 ±1 秒预筛，再由 C# 精确修正边界。
+    /// </para>
+    /// </remarks>
+    Task<EntryDailyFlows> ListDailyFlowsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>历史摘要的一条候选。</summary>
@@ -249,6 +296,32 @@ public sealed record EntryCategoryTotals(
 /// </param>
 /// <param name="Amount">期间发生额，**恒为正**。</param>
 public sealed record EntryCategoryTotal(int? CategoryId, string? CategoryName, decimal Amount);
+
+/// <summary>某个时间区间内按服务器本地日聚合的收支序列。</summary>
+/// <param name="Days">按日期升序的按日收支；**只含至少有一笔收支的日期**。</param>
+/// <remarks>
+/// 无任何收入与支出时是空列表（不是 <c>null</c>），前端据此呈现空态。
+/// 补零的责任在**呈现层**：本服务只如实给出「哪几天真的发生过收支」，
+/// 至于整月折线要不要把空白日画成 0，取决于数据源是不是实时的（月报表是，结算图表不是）。
+/// </remarks>
+public sealed record EntryDailyFlows(IReadOnlyList<EntryDailyFlow> Days);
+
+/// <summary>某一天的收入、支出与净额。</summary>
+/// <param name="Date">日期（<c>yyyy-MM-dd</c>，**服务器本地日期**）。</param>
+/// <param name="IncomeTotal">当日收入合计，**恒为非负**。</param>
+/// <param name="ExpenseTotal">当日支出合计，**恒为非负**。</param>
+/// <param name="NetTotal">净额 = <paramref name="IncomeTotal"/> − <paramref name="ExpenseTotal"/>（**带符号**）。</param>
+/// <remarks>
+/// **两个发生额都是正数，符号只体现在 <paramref name="NetTotal"/> 上**：图上把支出线画在下方是
+/// **呈现**的决定（前端取负即可），而库里与接口上「支出 500」就是 500。若在接口层就把它变成 −500，
+/// 读接口的人要回答「这个月一共花了多少」时就得先做一次取反，而取反这一步很容易被漏掉
+/// （同 <c>IncomeExpenseDailyPoint</c> 的取舍）。
+/// </remarks>
+public sealed record EntryDailyFlow(
+    string Date,
+    decimal IncomeTotal,
+    decimal ExpenseTotal,
+    decimal NetTotal);
 
 /// <summary>明细行（已解析出账户名与对手方，供端点直接映射为 DTO）。</summary>
 /// <param name="Id">明细主键。</param>

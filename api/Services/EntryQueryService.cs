@@ -1,3 +1,4 @@
+using System.Globalization;
 using Hamster.Api.Data.Entities;
 using SqlSugar;
 
@@ -251,22 +252,12 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         // 可见账户先按账户服务取回，再收窄出「本币种 + 公共 / 本人个人 + 钱账户」这一组。
         // 管理员在这里**不**沿用「可见即统计」：首页的按天记录按用户分行，分类占比必须与它同一口径，
         // 否则管理员看到的饼图里会混进其他成员的个人支出。
-        var visible = await accounts.ListByAccountSetAsync(
+        var targetIds = await ResolveFlowAccountIdsAsync(
             accountSetId,
             userId,
             isAdmin,
-            includeInactive: true,
+            currencyCode,
             cancellationToken);
-
-        var targetIds = visible
-            .Where(item => item.Account.Type.IsMoneyAccount())
-            .Where(item => string.Equals(
-                item.Account.CurrencyCode, currencyCode, StringComparison.OrdinalIgnoreCase))
-            .Where(item => item.Account.Scope == AccountScope.Public
-                || (item.Account.Scope == AccountScope.Personal && item.Account.OwnerUserId == userId))
-            .Select(item => item.Account.Id)
-            .Distinct()
-            .ToArray();
 
         if (targetIds.Length == 0)
         {
@@ -368,6 +359,136 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
         return new EntryCategoryTotals(
             ToCategoryTotals(TransactionType.Income, resolved, categoryNames),
             ToCategoryTotals(TransactionType.Expense, resolved, categoryNames));
+    }
+
+    /// <inheritdoc />
+    public async Task<EntryDailyFlows> ListDailyFlowsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        DateTime fromUtc,
+        DateTime toUtc,
+        TimeZoneInfo timeZone,
+        CancellationToken cancellationToken = default)
+    {
+        var targetIds = await ResolveFlowAccountIdsAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            currencyCode,
+            cancellationToken);
+
+        if (targetIds.Length == 0)
+        {
+            return new EntryDailyFlows([]);
+        }
+
+        var flowTypes = new[] { TransactionType.Income, TransactionType.Expense };
+
+        // SQL 侧向两侧各放宽一秒做预筛，精确边界判定留在下面（理由见 LocalDay.PrefilterMargin）。
+        // 上界是半开区间：次月 1 日 0 点属于下个月。
+        var prefilterFloor = fromUtc - LocalDay.PrefilterMargin;
+        var prefilterCeiling = toUtc + LocalDay.PrefilterMargin;
+
+        // 不在这里按「类型 + 方向」分组求和：按日分组要先把 UTC 时刻折算成**本地日**，
+        // 那一步只有 C# 侧的 LocalDay.DateOf 能保证口径（SQL 的日期函数各有各的时区约定）。
+        // 取回的是**主账户那一条明细**的候选行（每笔交易至多一行符合主方向），量级是「本月交易笔数」，
+        // 不是「本月全库明细」，月报表的规模下可以接受。
+        var rows = await BuildFlowQuery(
+                accountSetId, targetIds, prefilterFloor, prefilterCeiling, flowTypes)
+            .Select((entry, tx) => new DailyFlowRow
+            {
+                Type = tx.Type,
+                Direction = entry.Direction,
+                OccurredAt = tx.OccurredAt,
+                Amount = entry.Amount,
+            })
+            .ToListAsync(cancellationToken);
+
+        var totalsByDay = new Dictionary<DateTime, (decimal Income, decimal Expense)>();
+        foreach (var row in rows)
+        {
+            // 一笔交易恒有借贷两条明细，只有方向等于类型主方向的那一条代表这笔交易；
+            // 另一条落在对手方账户上，计进来会把同一笔钱数两遍。
+            if (row.Type.PrimaryDirection() != row.Direction)
+            {
+                continue;
+            }
+
+            // 预筛多取回的两段窗：下界之前、上界及之后。SQL 的日期比较不依赖文本小数位
+            // （见 LocalDay.PrefilterMargin），这里再用真正的 DateTime 判一次。
+            if (row.OccurredAt < fromUtc || row.OccurredAt >= toUtc)
+            {
+                continue;
+            }
+
+            var day = LocalDay.DateOf(row.OccurredAt, timeZone);
+            var current = totalsByDay.GetValueOrDefault(day);
+            totalsByDay[day] = row.Type == TransactionType.Income
+                ? (current.Income + row.Amount, current.Expense)
+                : (current.Income, current.Expense + row.Amount);
+        }
+
+        return new EntryDailyFlows(
+        [
+            .. totalsByDay
+                .OrderBy(pair => pair.Key)
+                .Select(pair => new EntryDailyFlow(
+                    pair.Key.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                    pair.Value.Income,
+                    pair.Value.Expense,
+                    pair.Value.Income - pair.Value.Expense)),
+        ]);
+    }
+
+    /// <summary>
+    /// 取「本账套、本币种、公共 / 本人个人、资金 / 负债」这一组账户主键。
+    /// </summary>
+    /// <param name="accountSetId">账套主键。</param>
+    /// <param name="userId">当前用户主键。</param>
+    /// <param name="isAdmin">是否为系统管理员。</param>
+    /// <param name="currencyCode">只取该币种的账户。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>目标账户主键（去重）；一个都没有时为空数组。</returns>
+    /// <remarks>
+    /// **管理员在这里不沿用「可见即统计」**：首页的按天记录按用户分行，分类构成与月报表必须与它
+    /// 同一口径，否则管理员看到的数字里会混进其他成员的个人收支。
+    /// <para>
+    /// 抽出来是为了让「分类合计」与「按日合计」共用同一份口径：两处各写一遍，
+    /// 迟早漂移成「饼图里有一类、折线里却没有」——这正是本服务在别处反复避免的第二份真源。
+    /// </para>
+    /// <para>
+    /// 账户类型判定用 <see cref="AccountTypeExtensions.IsMoneyAccount"/> 且发生在**内存里的列表**上：
+    /// SqlSugar 不翻译扩展方法，该谓词不能写进查询表达式树（同 ResolveVisibleAccountsAsync 的取舍）。
+    /// </para>
+    /// </remarks>
+    private async Task<int[]> ResolveFlowAccountIdsAsync(
+        int accountSetId,
+        int userId,
+        bool isAdmin,
+        string currencyCode,
+        CancellationToken cancellationToken)
+    {
+        var visible = await accounts.ListByAccountSetAsync(
+            accountSetId,
+            userId,
+            isAdmin,
+            includeInactive: true,
+            cancellationToken);
+
+        return
+        [
+            .. visible
+                .Where(item => item.Account.Type.IsMoneyAccount())
+                .Where(item => string.Equals(
+                    item.Account.CurrencyCode, currencyCode, StringComparison.OrdinalIgnoreCase))
+                .Where(item => item.Account.Scope == AccountScope.Public
+                    || (item.Account.Scope == AccountScope.Personal
+                        && item.Account.OwnerUserId == userId))
+                .Select(item => item.Account.Id)
+                .Distinct(),
+        ];
     }
 
     /// <summary>
@@ -854,6 +975,33 @@ public sealed class EntryQueryService(ISqlSugarClient db, IAccountService accoun
 
         /// <summary>该分组的发生额合计。</summary>
         public decimal Total { get; set; }
+    }
+
+    /// <summary>
+    /// 按日聚合的候选行投影。
+    /// </summary>
+    /// <remarks>
+    /// **投影到 C# 再按本地日分组**，而不是在 SQL 里 <c>GROUP BY</c>：本地日依赖部署所在地的时区，
+    /// 只有 <see cref="LocalDay.DateOf"/> 能保证与结算的日界口径一致。取回的粒度是
+    /// 「本月每笔交易的主方向明细」（预筛窗口内），不是全库明细，月报表的规模下不构成负担。
+    /// <para>
+    /// 与 <see cref="EntryRow"/> 同为**可写属性的类**而非位置记录：SqlSugar 的 <c>Select</c>
+    /// 靠属性赋值而非构造参数映射。
+    /// </para>
+    /// </remarks>
+    private sealed class DailyFlowRow
+    {
+        /// <summary>交易类型。</summary>
+        public TransactionType Type { get; set; }
+
+        /// <summary>借贷方向；只保留与类型主方向一致的行。</summary>
+        public EntryDirection Direction { get; set; }
+
+        /// <summary>业务发生时间（UTC）；分组前折算成本地日。</summary>
+        public DateTime OccurredAt { get; set; }
+
+        /// <summary>发生额，恒为正；方向由 <see cref="Direction"/> 与 <see cref="Type"/> 表达。</summary>
+        public decimal Amount { get; set; }
     }
 
     /// <summary>边界修正查询的投影结果（预筛多取回的行）。</summary>
