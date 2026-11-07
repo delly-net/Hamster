@@ -10,21 +10,23 @@
  *
  * **为什么是条形图而不是饼图**：标签是数量不定的多值维度，且本页要求**全部显示**。
  * 饼图在标签很多时扇区会细到无法分辨，条形图可以逐个排开。竖向条形图的代价是横轴文字
- * 空间有限：标签名过长会被截断、标签多时旋转 45°/90°——完整名称因此由 tooltip 与图下列表
- * 补齐，图形只承担「谁多谁少」的比较。条形图因此不做「前 5 + 其他」的折叠。
+ * 空间有限：标签名过长会被截断、标签多时旋转 45°/90°——完整名称因此由 tooltip 补齐，
+ * 图形只承担「谁多谁少」的比较。条形图因此不做「前 5 + 其他」的折叠。
  *
  * **单系列**：一张图只表达收入或支出，颜色由 `colorToken` 指定为对应语义色；
  * 不注册 `LegendComponent`——标题已经说明这张图是什么，图例只会重复一遍。
  *
- * **列表兼表格视图**：横轴名称会被截断或旋转，图下方逐项列出完整名称、占比与金额，
- * 同时充当读屏用户的等价文本与色觉障碍用户的读数通道。
+ * **图下不再有可见列表**：报表页里收入与支出各占一整行，横轴空间足够，逐项的完整名称、
+ * 占比与金额都由图与悬停气泡给出；图下若再排一份同样的文字列表只是重复。
+ * 但 canvas 内容读屏拿不到、tooltip 也读不到，故仍保留一份**视觉隐藏**的等价列表
+ * （`.bar-sr`）供读屏逐项读取——它不占版面，也不与图形争视觉焦点。
  *
  * **配色跟随系统**：canvas 拿不到 `var(--color-income)`，色值必须由 `readChartTheme()`
  * 从计算样式里读出来；系统在亮/暗之间切换时监听 `prefers-color-scheme` 并重建 option
  * （与 `CategoryPieChart.vue` / `TrendChart.vue` 同一写法）。
  *
  * **无障碍**：`role="img"` + 一句话 `aria-label` 挂在 canvas 容器上，说明标签数与合计；
- * 每一项的细节由下方可见列表承担。
+ * 每一项的细节由紧随其后的视觉隐藏列表承担。
  */
 
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -48,6 +50,7 @@ use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
  *
  * 竖向条形图里标签沿**横轴**排开，条数只影响每根的宽度、不影响行数，故高度恒定；
  * `grid.containLabel` 会先给旋转后的横轴文字留出空间，其余才是绘图区。
+ * 报表页里两张图各占一整行，宽度足够，故这一高度无需再随容器列宽调整。
  */
 const CHART_HEIGHT = 260
 
@@ -108,7 +111,7 @@ const currencyLabel = computed(() =>
   props.currencyCode === null || props.currencyCode === '' ? '' : ` ${props.currencyCode}`,
 )
 
-/** 读屏描述：标签数与合计；逐项数据在下方列表里。 */
+/** 读屏描述：标签数与合计；逐项数据在紧随其后的视觉隐藏列表里。 */
 const description = computed(() =>
   buildTagBarLabel(
     props.title,
@@ -149,7 +152,7 @@ onUnmounted(() => {
 
     <template v-else>
       <!-- role="img" + aria-label 挂在 canvas 容器上：canvas 里的内容读屏拿不到，
-           这一句给出概览，逐项数值由下方列表承担 -->
+           这一句给出概览，逐项数值由紧随其后的视觉隐藏列表承担 -->
       <div
         class="bar-canvas"
         role="img"
@@ -159,12 +162,11 @@ onUnmounted(() => {
         <VChart class="bar-chart" :option="option" autoresize />
       </div>
 
-      <!-- 图例兼表格视图：名称、占比、金额三列都由文字给出，颜色只表达收入 / 支出 -->
-      <ul class="bar-legend">
-        <li v-for="bar in bars" :key="bar.key" class="legend-row">
-          <span class="legend-name">{{ bar.name }}</span>
-          <span class="legend-percent">{{ formatPercent(bar.percent) }}</span>
-          <span class="legend-amount">{{ formatAmount(bar.amount) }}</span>
+      <!-- 仅供读屏：图形与 tooltip 都拿不到逐项文字，这份视觉隐藏的列表补上
+           名称、占比与金额；不占版面，不重复显示在用户眼前 -->
+      <ul class="bar-sr">
+        <li v-for="bar in bars" :key="bar.key">
+          {{ bar.name }}，{{ formatPercent(bar.percent) }}，{{ formatAmount(bar.amount) }}
         </li>
       </ul>
     </template>
@@ -219,38 +221,19 @@ onUnmounted(() => {
   opacity: 0.8;
 }
 
-.bar-legend {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  margin: 0;
+/*
+ * 标准 visually-hidden：把逐项文字移出视觉流，但仍留在无障碍树里。
+ * 不能用 display: none / visibility: hidden——那会连读屏一起藏掉。
+ */
+.bar-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
   padding: 0;
-  list-style: none;
-}
-
-/* 三列：名称 / 占比 / 金额。名称可截断，数字列不换行，窄列下也保持纵向对齐 */
-.legend-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.legend-name {
   overflow: hidden;
-  text-overflow: ellipsis;
+  clip-path: inset(50%);
   white-space: nowrap;
-  opacity: 0.85;
-}
-
-.legend-percent {
-  opacity: 0.7;
-}
-
-.legend-amount {
-  text-align: right;
-  opacity: 0.85;
+  border: 0;
 }
 </style>

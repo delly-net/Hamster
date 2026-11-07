@@ -12,7 +12,7 @@
  *    竖条沿横轴依次排开，标签再多也不丢弃、不合并为「其他」。
  * 3. **单系列配色**：条形图按「收入 / 支出」各成一张，颜色由调用方指定语义令牌
  *    （`--color-income` / `--color-expense`），不按标签分配分类色板——标签身份由横轴名称
- *    与图下列表承担，颜色只表达这是收入还是支出。
+ *    与悬停气泡承担，颜色只表达这是收入还是支出。
  *
  * **canvas 不继承 CSS**：色值由 `readChartTheme()` 读出后传入（与 `trendChart.ts` 同一方案）。
  */
@@ -34,7 +34,7 @@ export type TagBarOption = ComposeOption<
 export interface TagBar {
   /** 稳定的渲染 key：`tag-<主键>` 或 `untagged`。 */
   key: string
-  /** 横轴与图下列表上的名称；未打标签固定为调用方给的 `nullLabel`。 */
+  /** 横轴与 tooltip 上的名称；未打标签固定为调用方给的 `nullLabel`。 */
   name: string
   /** 该标签下的金额，恒为正。 */
   amount: number
@@ -93,8 +93,13 @@ export function buildTagBarItems(
   }))
 }
 
-/** 横轴标签的限宽（px）：超出部分截断，完整名称见 tooltip 与图下列表。 */
-const LABEL_WIDTH = 72
+/**
+ * 横轴标签的限宽（px）：超出部分截断，完整名称见 tooltip。
+ *
+ * 报表页里收入 / 支出各占一整行，比原先并排两列宽得多，故限宽从 72 放宽到 96，
+ * 让常见长度的标签名能整句显示；再长仍截断，避免一根竖条的字压到相邻竖条。
+ */
+const LABEL_WIDTH = 96
 /** 标签名超过这个数量就倾斜 45°：横轴每个标签拿到的宽度开始不够排一行。 */
 const ROTATE_45_AT = 3
 /** 标签名超过这个数量就竖排 90°：45° 仍会相互压字，竖排每人只占一个字高。 */
@@ -117,7 +122,7 @@ function labelRotate(count: number): number {
  *
  * **竖向条形图**：标签名在横轴（分类轴），金额在纵轴（数值轴），横轴顺序即
  * {@link buildTagBarItems} 排好的金额降序（金额最大在最左）。标签名过长时截断、
- * 标签多时旋转，完整名称由 tooltip 与图下列表给出。**单系列**故不注册图例——
+ * 标签多时旋转，完整名称由 tooltip 给出。**单系列**故不注册图例——
  * 一张图只表达「收入」或「支出」，标题已经说明。
  *
  * @param spec 竖条、主题、系列名与颜色令牌。
@@ -141,7 +146,7 @@ export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
         color: colors['--color-heading'],
         opacity: 0.8,
         fontFamily: theme.fontFamily,
-        // 标签名是用户输入的自由文本：过长时截断，完整名称见 tooltip 与图下列表
+        // 标签名是用户输入的自由文本：过长时截断，完整名称见 tooltip
         width: LABEL_WIDTH,
         overflow: 'truncate',
       },
@@ -203,7 +208,7 @@ export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
 /**
  * 读屏用的一句话描述。
  *
- * 只报「几个标签、合计多少」，不逐项念金额——逐项信息就在图下方的可见列表里。
+ * 只报「几个标签、合计多少」，不逐项念金额——逐项信息就在紧随其后的视觉隐藏列表里。
  *
  * @param title 图名（「收入标签构成」）。
  * @param period 周期文案（「2026年10月」）。
@@ -222,6 +227,6 @@ export function buildTagBarLabel(
   return (
     `${period}${title}条形图，共 ${count} 个标签，` +
     `合计 ${formatAmount(total)}${currencySuffix(currencyCode)}。` +
-    '各标签的名称、占比与金额见下方列表。'
+    '各标签的名称、占比与金额另附文字列表。'
   )
 }
