@@ -3,8 +3,9 @@
  * 分类占比饼图（Apache ECharts 6 封装）：把「分类 → 金额」画成一张饼图，
  * 并在图下列出每个扇区的名称、占比与金额。
  *
- * 首页的收入构成与支出构成用的是同一张图——同一套折叠规则、同一套配色、同一个空状态，
- * 差异只在标题、数据与空态文案，故收在这一处。option 的构建、折叠与百分比计算在
+ * 首页的收入构成与支出构成、日报表 / 月报表的分类构成用的是同一张图——同一套配色、
+ * 同一个空状态，差异只在标题、数据、空态文案与**是否折叠**（首页默认最多 6 个扇区，
+ * 报表页要求分类全部显示，传 `maxSlices = null` 关闭折叠）。option 的构建、折叠与百分比计算在
  * `./categoryPie.ts`（纯函数，不含 Vue），本文件只负责组件侧的三件事：
  * **按需注册 ECharts 模块**、**跟随系统配色重绘**、**无障碍标签**。
  *
@@ -28,6 +29,7 @@ import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import type { EntryCategoryTotal } from '@/stores/categoryTotals'
 import {
+  MAX_CATEGORY_SLICES,
   UNCLASSIFIED_LABEL,
   buildCategoryPieLabel,
   buildCategoryPieOption,
@@ -56,12 +58,20 @@ const props = withDefaults(
     /**
      * 「空值分项」的呈现文案（`categoryId` 为 `null` 的那一项叫法）。
      *
-     * 默认「未分类」。**标签维度传「未打标签」**：数据形状与折叠规则完全相同，
-     * 差别只在 `null` 表示的是「没有分类」还是「没有标签」（见 `categoryPie.ts`）。
+     * 默认「未分类」。报表页的标签维度已改用横向条形图（`TagBarChart.vue`），
+     * 由它自己接收「未打标签」；本组件当前只服务分类构成，保留参数是为了让
+     * 「空值分项叫什么」继续由调用方决定（见 `categoryPie.ts`）。
      */
     nullLabel?: string
+    /**
+     * 最多单独呈现的扇区数（含「其他」）；`null` 表示不折叠、全部分类各占一个扇区。
+     *
+     * 默认 {@link MAX_CATEGORY_SLICES}（首页口径）。日报表 / 月报表要求分类全部显示，
+     * 显式传 `null`；这不改变调用方对数据的任何处理，只影响扇形与图例的折叠。
+     */
+    maxSlices?: number | null
   }>(),
-  { nullLabel: UNCLASSIFIED_LABEL },
+  { nullLabel: UNCLASSIFIED_LABEL, maxSlices: MAX_CATEGORY_SLICES },
 )
 
 /**
@@ -73,7 +83,9 @@ const props = withDefaults(
 const theme = ref<ChartTheme>(readChartTheme())
 
 /** 折叠、排序、算占比与颜色都在这里一次完成。 */
-const slices = computed(() => buildCategorySlices(props.items, props.nullLabel))
+const slices = computed(() =>
+  buildCategorySlices(props.items, props.nullLabel, props.maxSlices),
+)
 
 /** 本侧合计：用于标题旁的数字与宽度为 0 时的兜底判断。 */
 const total = computed(() => slices.value.reduce((sum, slice) => sum + slice.amount, 0))

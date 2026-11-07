@@ -3,11 +3,11 @@
  * /daily-reports 页面：日报表。
  *
  * 在账目明细的实时口径上再给一层**按任意日期区间**的读法：选好区间、账户与标签后，
- * 一次请求回答四件事——收入 / 支出各按分类怎么构成（两张饼图）、按标签怎么构成（两张饼图）、
+ * 一次请求回答四件事——收入 / 支出各按分类怎么构成（两张饼图）、按标签怎么构成（两张横向条形图）、
  * 每天的收入与支出走势（双折线）、每天一行的收支与净额（表格 + 合计）。
  *
  * **四块数据来自同一个请求**（`GET /api/entries/daily-report`）：后端一次取回候选明细，
- * 在内存里同时折出按日、按分类与按标签，故折线、饼图与表格的口径天然一致，
+ * 在内存里同时折出按日、按分类与按标签，故折线、构成图与表格的口径天然一致，
  * 不会出现「折线有、饼图没有」。页面因此只维护一个请求状态，不逐块拼装，
  * 也就没有「一块失败、另一块还在显示上一份数据」的画面。
  *
@@ -22,6 +22,9 @@
  * 分类则是交易头上的**一个**分类，不存在重复计入。没有标签的交易归入「未打标签」，
  * 与「未分类」一样是合法的归集结果，不是数据缺失。
  *
+ * **报表页要求看全**：分类饼图不折叠（所有分类各占一个扇区），标签条形图也不折叠
+ * （全部标签各一根横条）——与首页分类饼图的「前 5 + 其他」口径刻意不同。
+ *
  * **筛选是显式的**：日期区间、账户勾选、标签勾选都先落在草稿上，点【查询】才生效——
  * 与账目明细页同一取舍（本页有三维条件，边改边查会让每一次勾选都触发一次全量聚合）。
  * 页面不做「至少勾一个账户」之外的其他校验；区间需完整、起止不倒置、最多 366 天，
@@ -34,6 +37,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ApiError } from '@/api/http'
 import CategoryPieChart from '@/components/CategoryPieChart.vue'
+import TagBarChart from '@/components/TagBarChart.vue'
 import TrendChart from '@/components/TrendChart.vue'
 import { UNTAGGED_LABEL } from '@/components/categoryPie'
 import { formatAmount, formatSigned, formatUnsigned, signedCellClass } from '@/components/entryFormat'
@@ -333,13 +337,14 @@ const categoryIncome = computed(() => report.value?.categories.income ?? [])
 const categoryExpense = computed(() => report.value?.categories.expense ?? [])
 
 /**
- * 把标签合计折成饼图能吃的形状。
+ * 把标签合计折成图表通用的形状。
  *
- * **不是把标签当分类**：两者在饼图里都只是「一个可空主键 + 名称 + 金额」，
- * `categoryPie.ts` 已经把「空值分项叫什么」参数化成了 `nullLabel`，形状与折叠规则完全复用。
+ * **不是把标签当分类**：两者在图表里都只是「一个可空主键 + 名称 + 金额」，
+ * `categoryPie.ts` / `tagBar.ts` 已经把「空值分项叫什么」参数化成了 `nullLabel`，
  * 这个适配层因此只做字段改名，并把标签维度下的 `null` 解读为「未打标签」（由 `nullLabel` 呈现）。
+ * 饼图与条形图共用这一份形状，调用方无需再各写一遍映射。
  */
-function toPieItems(items: readonly ReportTagTotal[]): EntryCategoryTotal[] {
+function toChartItems(items: readonly ReportTagTotal[]): EntryCategoryTotal[] {
   return items.map((item) => ({
     categoryId: item.tagId,
     categoryName: item.tagName,
@@ -347,8 +352,8 @@ function toPieItems(items: readonly ReportTagTotal[]): EntryCategoryTotal[] {
   }))
 }
 
-const tagIncome = computed(() => toPieItems(report.value?.tags.income ?? []))
-const tagExpense = computed(() => toPieItems(report.value?.tags.expense ?? []))
+const tagIncome = computed(() => toChartItems(report.value?.tags.income ?? []))
+const tagExpense = computed(() => toChartItems(report.value?.tags.expense ?? []))
 
 /**
  * 拉取三份筛选候选：账户、币种（取系统默认）、标签。
@@ -580,8 +585,9 @@ onMounted(() => {
       <div>
         <h1 class="title">日报表</h1>
         <p class="subtitle">
-          按所选日期区间、账户与标签，实时汇总当前账套的收支明细：按分类与按标签各出收入 / 支出
-          构成饼图，按日给出收入与支出走势，并逐日列出收入、支出与净额及区间合计。
+          按所选日期区间、账户与标签，实时汇总当前账套的收支明细：按分类出收入 / 支出构成饼图，
+          按标签出收入 / 支出横向条形图（分类与标签均全部显示），按日给出收入与支出走势，
+          并逐日列出收入、支出与净额及区间合计。
           只统计系统默认币种下公共账户与本人个人账户中的资金 / 负债账户，转账与期初余额不计入。
           一笔交易挂多个标签时，其金额会在每个标签下各计一次，故标签金额之和可能大于收支合计。
         </p>
@@ -741,7 +747,8 @@ onMounted(() => {
               <h2 class="panel-title">{{ periodLabel }}分类构成</h2>
               <p class="panel-note">
                 收入与支出各占一张饼图，百分比以本侧合计为分母。按交易头上的那一个分类归集；
-                「未分类」是合法归集结果，单独成扇区，金额小的其余分类合并为「其他」。
+                「未分类」是合法归集结果，单独成扇区；<strong>所有分类各占一个扇区</strong>，
+                不再合并为「其他」。
               </p>
             </div>
 
@@ -751,6 +758,7 @@ onMounted(() => {
                 :items="categoryIncome"
                 :currency-code="currencyCode"
                 :period="periodLabel"
+                :max-slices="null"
                 empty-text="区间内没有收入。"
               />
               <CategoryPieChart
@@ -758,6 +766,7 @@ onMounted(() => {
                 :items="categoryExpense"
                 :currency-code="currencyCode"
                 :period="periodLabel"
+                :max-slices="null"
                 empty-text="区间内没有支出。"
               />
             </div>
@@ -767,28 +776,31 @@ onMounted(() => {
             <div>
               <h2 class="panel-title">{{ periodLabel }}标签构成</h2>
               <p class="panel-note">
-                与上方分类构成同一口径，只是按标签归集。<strong
+                与上方分类构成同一口径，只是按标签归集，并以横向条形图按金额降序
+                <strong>列出全部标签</strong>。<strong
                   >一笔交易挂多个标签时，其金额在每个标签下各计一次</strong
                 >（金额不摊分），故各标签金额之和可能大于区间收支合计；
                 没有标签的交易归入「{{ UNTAGGED_LABEL }}」，它同样是合法的归集结果。
               </p>
             </div>
 
-            <div class="pie-grid">
-              <CategoryPieChart
+            <div class="bar-grid">
+              <TagBarChart
                 title="收入标签构成"
                 :items="tagIncome"
                 :currency-code="currencyCode"
                 :period="periodLabel"
                 :null-label="UNTAGGED_LABEL"
+                color-token="--color-income"
                 empty-text="区间内没有收入。"
               />
-              <CategoryPieChart
+              <TagBarChart
                 title="支出标签构成"
                 :items="tagExpense"
                 :currency-code="currencyCode"
                 :period="periodLabel"
                 :null-label="UNTAGGED_LABEL"
+                color-token="--color-expense"
                 empty-text="区间内没有支出。"
               />
             </div>
@@ -1189,6 +1201,17 @@ onMounted(() => {
 .pie-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: 1rem 1.25rem;
+  align-items: start;
+}
+
+/*
+ * 两张条形图并排：横向条形图的纵轴标签需要更多横向空间，故每列下限比饼图大一些；
+ * 容器不足时同样自动折成一列。高度由各图自己的条数决定，故顶部对齐、不强行等高。
+ */
+.bar-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
   gap: 1rem 1.25rem;
   align-items: start;
 }

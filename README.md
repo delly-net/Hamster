@@ -843,9 +843,9 @@ is unknown or not yours.
 The `/daily-reports` page asks four questions about the same slice of the ledger at once — how income
 and expense break down by category, how they break down by tag, what each day's income and expense
 were, and a day-by-day table with a range total. Answering them from `daily-flows` + `category-totals`
-would mean three separate scans filtered three ways, with no guarantee that the line, the pies and the
-table describe the same rows. It therefore has one aggregate endpoint that derives all three views
-from a single fetch:
+would mean three separate scans filtered three ways, with no guarantee that the line, the breakdown
+charts and the table describe the same rows. It therefore has one aggregate endpoint that derives all
+three views from a single fetch:
 
 | Endpoint | Auth | Description |
 |---|---|---|
@@ -874,8 +874,9 @@ is unknown or not yours.
 ###### Monthly report (arbitrary month range)
 
 The `/reports` page is the same four questions as the daily report, asked at **month** granularity: a
-month range, account and tag filters, then category pies, tag pies, a month-by-month line and a table
-with a range total. It shares the daily report's aggregation kernel — candidate rows, category totals
+month range, account and tag filters, then category pies (every category, no "Other" fold), tag bar
+charts (every tag, no fold), a month-by-month line and a table with a range total. It shares the daily
+report's aggregation kernel — candidate rows, category totals
 and tag totals each exist once — and differs only in (a) the grouping key (`new DateTime(day.Year,
 day.Month, 1)` over the same `LocalDay.DateOf` conversion) and (b) the range limits:
 

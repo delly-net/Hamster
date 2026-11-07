@@ -6,11 +6,13 @@
  *
  * 1. **把金额折成占比**：两个饼图各自除以本侧合计，故收入饼的百分比合计为 100%、
  *    支出饼的百分比合计也为 100%，两者不混算。
- * 2. **把分类折叠到最多 6 个扇区**：金额最大的若干分类各自成扇区，其余合并为「其他」。
+ * 2. **可选折叠**：默认最多 6 个扇区——金额最大的若干分类各自成扇区，其余合并为「其他」；
  *    **「未分类」始终单独保留**——它是用户明确要看的一项（记账时分类可选），
  *    不因为金额小而沉进「其他」；分类数超过上限时由它顶掉第 5 名，而不是被折叠。
- * 3. **分配扇区颜色**：颜色令牌按 dataviz 校验过的固定顺序取用，**不循环复用**；
- *    「未分类」用中性灰（它没有类别身份），不占用分类色的序号。
+ *    报表页传 `maxSlices = null` 取消折叠，所有分类各占一个扇区（首页仍用默认值）。
+ * 3. **分配扇区颜色**：颜色令牌按 dataviz 校验过的固定顺序取用，**折叠模式下不循环复用**；
+ *    「未分类」用中性灰（它没有类别身份），不占用分类色的序号。全量模式没有折叠兜底，
+ *    分类数超过色板长度时按同一顺序循环复用（见 {@link CATEGORY_COLOR_TOKENS}）。
  *
  * **颜色为什么按金额顺序分配**：这份数据没有「筛选后保留同一批系列」的交互——
  * 每次都是某个月全部可见分类的一个快照，且图例逐项列出名称、占比与金额，
@@ -29,10 +31,11 @@ import { formatAmount } from './entryFormat'
 import type { ChartTheme, ChartToken } from './trendChart'
 
 /**
- * 一张饼图最多呈现的扇区数（含「其他」）。
+ * 一张饼图**默认**最多呈现的扇区数（含「其他」）。
  *
  * 6 是 dataviz 给的上限：再多，扇区角度与颜色都难以在两两之间分辨，
- * 占比小的分类应合并而不是各占一条细丝。
+ * 占比小的分类应合并而不是各占一条细丝。首页沿用这个默认值；
+ * 报表页要求「分类全部显示」，显式传 `null` 关闭折叠。
  */
 export const MAX_CATEGORY_SLICES = 6
 
@@ -40,11 +43,11 @@ export const MAX_CATEGORY_SLICES = 6
 export const UNCLASSIFIED_LABEL = '未分类'
 
 /**
- * 「空值分项」在别处维度的默认称呼之外的用法：标签维度传「未打标签」。
+ * 标签维度的「空值分项」称呼：未打标签。
  *
- * **不把这层差异做成第二个饼图模块**：两个维度的数据形状相同（一个 `null` 键 + 若干具名项），
- * 折叠、排序、百分比与配色的规则也逐条相同，差别只在「`null` 那一项叫什么」。
- * 调用方通过 {@link buildCategorySlices} 的 `nullLabel` 传入即可，默认仍是「未分类」。
+ * 标签条形图（`TagBarChart.vue`）把它作为 `nullLabel` 的默认值；分类饼图默认仍是「未分类」。
+ * 两个维度的数据形状相同（一个 `null` 键 + 若干具名项），排序、百分比与「空值分项」的
+ * 参数化口径共用，只是图形不同（分类饼图、标签横向条形图）。
  */
 export const UNTAGGED_LABEL = '未打标签'
 
@@ -54,8 +57,10 @@ export const OTHER_LABEL = '其他'
 /**
  * 分类色板的令牌顺序。
  *
- * **顺序即分配顺序，不得重排**（见 `base.css` 的色板注释）；超过 {@link MAX_CATEGORY_SLICES}
- * 时由折叠保证不会用到第 7 个之后的颜色，因此这里**不做取模循环**——循环会让两个扇区同色。
+ * **顺序即分配顺序，不得重排**（见 `base.css` 的色板注释）。折叠模式最多 6 个扇区，
+ * 不会用到第 7 个之后的颜色；**全量模式**（报表页传 `maxSlices = null`）分类数可能超过 8，
+ * 此时按本数组顺序循环复用——色板只有这 8 色，不生成新色值；身份由下方图例的
+ * 名称、占比与金额承担（图例同时是表格视图），颜色只是辅助线索。
  */
 const CATEGORY_COLOR_TOKENS: readonly ChartToken[] = [
   '--color-chart-1',
@@ -99,9 +104,10 @@ export type CategoryPieOption = ComposeOption<PieSeriesOption | TooltipComponent
  * 金额降序；金额相同时未分类排最后，其余按分类主键升序。
  *
  * 后端已经按同一口径排过序，这里再排一次是为了让「折叠」与「取前几名」不依赖调用方的顺序
- * ——纯函数不假设上游永远记得排序。
+ * ——纯函数不假设上游永远记得排序。标签条形图复用同一比较器（标签合计与分类合计同形状），
+ * 故导出。
  */
-function compareTotals(left: EntryCategoryTotal, right: EntryCategoryTotal): number {
+export function compareTotals(left: EntryCategoryTotal, right: EntryCategoryTotal): number {
   if (right.amount !== left.amount) {
     return right.amount - left.amount
   }
@@ -118,25 +124,36 @@ function compareTotals(left: EntryCategoryTotal, right: EntryCategoryTotal): num
 /**
  * 从全部分类里挑出要单独成扇区的那些，其余交给「其他」。
  *
- * 分类数不超过上限时全部单独呈现；超过时保留金额最大的 5 个，
- * 并在「未分类」没有进入前 5 时用**未分类顶掉第 5 名**（见模块头注释）。
+ * 分类数不超过上限时全部单独呈现；超过时保留金额最大的若干项，
+ * 并在「未分类」没有进入保留名单时用**未分类顶掉最后一名**（见模块头注释）。
  *
+ * @param sorted 已按 {@link compareTotals} 排序的行。
+ * @param maxSlices 最多单独呈现的扇区数（含「其他」）；`null` 表示不折叠、全部单独呈现。
  * @returns `visible` 按金额降序；`folded` 为剩下的原始行。
  */
-function pickVisible(sorted: readonly EntryCategoryTotal[]): {
+function pickVisible(
+  sorted: readonly EntryCategoryTotal[],
+  maxSlices: number | null,
+): {
   visible: EntryCategoryTotal[]
   folded: EntryCategoryTotal[]
 } {
-  if (sorted.length <= MAX_CATEGORY_SLICES) {
+  // 全量模式：不折叠，所有分类各占一个扇区
+  if (maxSlices === null) {
     return { visible: [...sorted], folded: [] }
   }
 
-  // 6 个扇区里给「其他」留一格，故先取前 5 名
-  const headLimit = MAX_CATEGORY_SLICES - 1
+  // 「其他」也要占一格，至少得留出两个扇区；小于 2 的上限按 2 处理，避免算出负数下标
+  const limit = Math.max(2, maxSlices)
+  if (sorted.length <= limit) {
+    return { visible: [...sorted], folded: [] }
+  }
+
+  const headLimit = limit - 1
   const head = sorted.slice(0, headLimit)
   const unclassified = sorted.find((item) => item.categoryId === null)
 
-  // 未分类在前 5 名之外：保留前 4 名 + 未分类，未分类因此始终是一个独立扇区
+  // 未分类在保留名单之外：让出最后一格给未分类，未分类因此始终是一个独立扇区
   const visible =
     unclassified !== undefined && !head.includes(unclassified)
       ? [...sorted.slice(0, headLimit - 1), unclassified].sort(compareTotals)
@@ -146,6 +163,16 @@ function pickVisible(sorted: readonly EntryCategoryTotal[]): {
   const folded = sorted.filter((item) => !visibleSet.has(item))
 
   return { visible, folded }
+}
+
+/**
+ * 按色板顺序取色。
+ *
+ * 折叠模式下扇区数不超过色板长度，取模不会生效；全量模式分类更多时循环复用同一组色值
+ * （不生成新色，见 {@link CATEGORY_COLOR_TOKENS}）。
+ */
+function paletteToken(index: number): ChartToken {
+  return CATEGORY_COLOR_TOKENS[index % CATEGORY_COLOR_TOKENS.length] ?? '--color-chart-neutral'
 }
 
 /** 扇区的稳定 key。 */
@@ -160,12 +187,14 @@ function sliceKey(item: EntryCategoryTotal): string {
  * 一个异常值把整张图的百分比算成 `NaN`（扇区角度会退化成不可见的 0，看起来像「没有这一类」）。
  *
  * @param items 本侧（收入或支出）的分类合计，顺序不限。
- * @param nullLabel 「空值分项」的呈现文案：分类维度是「未分类」，标签维度传「未打标签」。
- * @returns 最多 6 个扇区，按金额降序；无有效数据时为空数组。
+ * @param nullLabel 「空值分项」的呈现文案；默认「未分类」，由调用方决定具体叫法。
+ * @param maxSlices 最多单独呈现的扇区数（含「其他」）；`null` 表示不折叠、全部分类各占一个扇区。
+ * @returns 按金额降序的扇区；无有效数据时为空数组。
  */
 export function buildCategorySlices(
   items: readonly EntryCategoryTotal[],
   nullLabel: string = UNCLASSIFIED_LABEL,
+  maxSlices: number | null = MAX_CATEGORY_SLICES,
 ): CategoryPieSlice[] {
   const sorted = items
     .filter((item) => Number.isFinite(item.amount) && item.amount > 0)
@@ -181,17 +210,17 @@ export function buildCategorySlices(
     return []
   }
 
-  const { visible, folded } = pickVisible(sorted)
+  const { visible, folded } = pickVisible(sorted, maxSlices)
   const slices: CategoryPieSlice[] = []
   /** 下一个可用的分类色序号；未分类不占用序号（它用中性灰）。 */
   let paletteIndex = 0
 
   for (const item of visible) {
     const isUnclassified = item.categoryId === null
-    // 未分类没有类别身份，用中性灰；其余按金额顺序依次取色。构造上最多 6 个扇区，不会越界
+    // 未分类没有类别身份，用中性灰；其余按金额顺序依次取色（全量模式下超过色板长度时循环）
     const colorToken = isUnclassified
       ? '--color-chart-neutral'
-      : (CATEGORY_COLOR_TOKENS[paletteIndex++] ?? '--color-chart-neutral')
+      : paletteToken(paletteIndex++)
 
     slices.push({
       key: sliceKey(item),
@@ -214,7 +243,7 @@ export function buildCategorySlices(
       name: containsUnclassified ? `${OTHER_LABEL}（含${nullLabel}）` : OTHER_LABEL,
       amount,
       percent: (amount / total) * 100,
-      colorToken: CATEGORY_COLOR_TOKENS[paletteIndex] ?? '--color-chart-neutral',
+      colorToken: paletteToken(paletteIndex),
       isOther: true,
     })
   }
@@ -238,7 +267,11 @@ export function formatPercent(percent: number): string {
   return `${percentFormatter.format(Number.isFinite(percent) ? percent : 0)}%`
 }
 
-/** tooltip 里的 HTML 转义：分类名是用户输入的自由文本。 */
+/**
+ * tooltip 里的 HTML 转义：分类名 / 标签名都是用户输入的自由文本。
+ *
+ * 导出给标签条形图复用（两处 tooltip 的转义口径因此只有一份）。
+ */
 const HTML_ENTITIES: Record<string, string> = {
   '&': '&amp;',
   '<': '&lt;',
@@ -247,12 +280,12 @@ const HTML_ENTITIES: Record<string, string> = {
   "'": '&#39;',
 }
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => HTML_ENTITIES[char] ?? char)
 }
 
-/** 币种后缀：没有币种时不留一个孤零零的空格。 */
-function currencySuffix(currencyCode: string | null): string {
+/** 币种后缀：没有币种时不留一个孤零零的空格。标签条形图的读屏描述复用。 */
+export function currencySuffix(currencyCode: string | null): string {
   return currencyCode === null || currencyCode === '' ? '' : ` ${currencyCode}`
 }
 
