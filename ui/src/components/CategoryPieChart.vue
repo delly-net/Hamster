@@ -58,7 +58,7 @@ const props = withDefaults(
     /**
      * 「空值分项」的呈现文案（`categoryId` 为 `null` 的那一项叫法）。
      *
-     * 默认「未分类」。报表页的标签维度已改用横向条形图（`TagBarChart.vue`），
+     * 默认「未分类」。报表页的标签维度已改用竖向条形图（`TagBarChart.vue`），
      * 由它自己接收「未打标签」；本组件当前只服务分类构成，保留参数是为了让
      * 「空值分项叫什么」继续由调用方决定（见 `categoryPie.ts`）。
      */

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * 标签构成横向条形图（Apache ECharts 6 封装）：把「标签 → 金额」画成一张按金额降序的条形图，
- * 并在图下列出每个标签的名称、占比与金额。
+ * 标签构成竖向条形图（Apache ECharts 6 封装）：把「标签 → 金额」画成一张按金额降序的条形图——
+ * **标签名称在横轴（X），金额在纵轴（Y）**——并在图下列出每个标签的名称、占比与金额。
  *
  * *日报表 / 月报表的「收入标签构成 / 支出标签构成」用的是同一张图*——同一套排序、同一个空状态、
  * 同一个列表结构，差异只在标题、数据、空态文案、`nullLabel` 与条形颜色（收入 / 支出语义色）。
@@ -9,13 +9,14 @@
  * 组件侧的三件事：**按需注册 ECharts 模块**、**跟随系统配色重绘**、**无障碍标签**。
  *
  * **为什么是条形图而不是饼图**：标签是数量不定的多值维度，且本页要求**全部显示**。
- * 饼图在标签很多时扇区会细到无法分辨，而横向条形图的纵轴可以继续往下排；
- * 标签名也比扇区上的角度标签更容易读。条形图因此不做「前 5 + 其他」的折叠。
+ * 饼图在标签很多时扇区会细到无法分辨，条形图可以逐个排开。竖向条形图的代价是横轴文字
+ * 空间有限：标签名过长会被截断、标签多时旋转 45°/90°——完整名称因此由 tooltip 与图下列表
+ * 补齐，图形只承担「谁多谁少」的比较。条形图因此不做「前 5 + 其他」的折叠。
  *
  * **单系列**：一张图只表达收入或支出，颜色由 `colorToken` 指定为对应语义色；
  * 不注册 `LegendComponent`——标题已经说明这张图是什么，图例只会重复一遍。
  *
- * **列表兼表格视图**：纵轴名称会被截断，图下方逐项列出完整名称、占比与金额，
+ * **列表兼表格视图**：横轴名称会被截断或旋转，图下方逐项列出完整名称、占比与金额，
  * 同时充当读屏用户的等价文本与色觉障碍用户的读数通道。
  *
  * **配色跟随系统**：canvas 拿不到 `var(--color-income)`，色值必须由 `readChartTheme()`
@@ -42,12 +43,13 @@ import type { ChartTheme, ChartToken } from './trendChart'
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent])
 
-/** 每条横条的基准高度（px，含行间隙）；标签越多画布越高，全部标签都看得见。 */
-const ROW_HEIGHT = 30
-/** 画布最小高度（px）：只有一两个标签时不至于压成一条扁图。 */
-const MIN_CHART_HEIGHT = 180
-/** 横轴刻度文字占用的高度（px）。 */
-const AXIS_HEIGHT = 24
+/**
+ * 画布高度（px）。
+ *
+ * 竖向条形图里标签沿**横轴**排开，条数只影响每根的宽度、不影响行数，故高度恒定；
+ * `grid.containLabel` 会先给旋转后的横轴文字留出空间，其余才是绘图区。
+ */
+const CHART_HEIGHT = 260
 
 const props = withDefaults(
   defineProps<{
@@ -86,7 +88,7 @@ const props = withDefaults(
  */
 const theme = ref<ChartTheme>(readChartTheme())
 
-/** 排序、过滤、算占比都在这里一次完成；不折叠，全部标签各一根横条。 */
+/** 排序、过滤、算占比都在这里一次完成；不折叠，全部标签各一根竖条。 */
 const bars = computed(() => buildTagBarItems(props.items, props.nullLabel))
 
 /** 本侧合计（标签金额之和，多标签重复计入）：用于标题旁的数字与宽度为 0 时的兜底判断。 */
@@ -115,11 +117,6 @@ const description = computed(() =>
     total.value,
     props.currencyCode,
   ),
-)
-
-/** 画布高度随标签数增长：每条横条一行，全部标签都排得下。 */
-const chartHeight = computed(() =>
-  Math.max(MIN_CHART_HEIGHT, bars.value.length * ROW_HEIGHT + AXIS_HEIGHT),
 )
 
 /** 系统配色查询对象；仅在挂载期间存在，故可能为 `null`。 */
@@ -157,7 +154,7 @@ onUnmounted(() => {
         class="bar-canvas"
         role="img"
         :aria-label="description"
-        :style="{ height: `${chartHeight}px` }"
+        :style="{ height: `${CHART_HEIGHT}px` }"
       >
         <VChart class="bar-chart" :option="option" autoresize />
       </div>
@@ -204,7 +201,7 @@ onUnmounted(() => {
   opacity: 0.7;
 }
 
-/* 画布高度由组件按条数写成内联样式：标签全部显示，不滚动、不截断 */
+/* 画布高度由组件写成内联样式（恒定）：标签沿横轴排开，全部显示、不滚动、不截断数据 */
 .bar-canvas {
   width: 100%;
 }

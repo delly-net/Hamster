@@ -47,7 +47,7 @@ export const UNCLASSIFIED_LABEL = '未分类'
  *
  * 标签条形图（`TagBarChart.vue`）把它作为 `nullLabel` 的默认值；分类饼图默认仍是「未分类」。
  * 两个维度的数据形状相同（一个 `null` 键 + 若干具名项），排序、百分比与「空值分项」的
- * 参数化口径共用，只是图形不同（分类饼图、标签横向条形图）。
+ * 参数化口径共用，只是图形不同（分类饼图、标签竖向条形图）。
  */
 export const UNTAGGED_LABEL = '未打标签'
 

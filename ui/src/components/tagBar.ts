@@ -1,5 +1,5 @@
 /**
- * 报表页「标签构成」横向条形图的纯数据与 option 构建（不含 Vue）。
+ * 报表页「标签构成」竖向条形图的纯数据与 option 构建（不含 Vue）。
  *
  * **输入是后端已经聚合好的「标签 → 金额」**（日报表 / 月报表同一次请求里的 tags 侧），
  * 本模块只做三件呈现层的事：
@@ -9,9 +9,9 @@
  *    而不是区间收支合计——一笔交易挂多个标签时金额在每个标签下各计一次，
  *    两者本来就可能不等（页面已在面板说明里写明）。
  * 2. **全部列出**：与分类饼图的「前 5 + 其他」不同，标签条形图不折叠，有多少画多少；
- *    标签多时画布高度随条数增长，不做静默截断。
+ *    竖条沿横轴依次排开，标签再多也不丢弃、不合并为「其他」。
  * 3. **单系列配色**：条形图按「收入 / 支出」各成一张，颜色由调用方指定语义令牌
- *    （`--color-income` / `--color-expense`），不按标签分配分类色板——标签身份由纵轴名称
+ *    （`--color-income` / `--color-expense`），不按标签分配分类色板——标签身份由横轴名称
  *    与图下列表承担，颜色只表达这是收入还是支出。
  *
  * **canvas 不继承 CSS**：色值由 `readChartTheme()` 读出后传入（与 `trendChart.ts` 同一方案）。
@@ -30,11 +30,11 @@ export type TagBarOption = ComposeOption<
   BarSeriesOption | GridComponentOption | TooltipComponentOption
 >
 
-/** 一根横条（已排序、已算占比）。 */
+/** 一根竖条（已排序、已算占比）。 */
 export interface TagBar {
   /** 稳定的渲染 key：`tag-<主键>` 或 `untagged`。 */
   key: string
-  /** 纵轴与图下列表上的名称；未打标签固定为调用方给的 `nullLabel`。 */
+  /** 横轴与图下列表上的名称；未打标签固定为调用方给的 `nullLabel`。 */
   name: string
   /** 该标签下的金额，恒为正。 */
   amount: number
@@ -52,13 +52,13 @@ export interface TagBarSpec {
   colorToken: ChartToken
 }
 
-/** 一根横条的稳定 key。 */
+/** 一根竖条的稳定 key。 */
 function barKey(item: EntryCategoryTotal): string {
   return item.categoryId === null ? 'untagged' : `tag-${item.categoryId}`
 }
 
 /**
- * 把后端的标签合计折成条形图的横条：过滤异常金额、排序、算占比。
+ * 把后端的标签合计折成条形图的竖条：过滤异常金额、排序、算占比。
  *
  * 金额非有限数或不为正的行会被丢弃——后端已经丢掉零合计，这里再挡一次是为了避免
  * 一个异常值把分母算成 `NaN`。
@@ -93,14 +93,34 @@ export function buildTagBarItems(
   }))
 }
 
+/** 横轴标签的限宽（px）：超出部分截断，完整名称见 tooltip 与图下列表。 */
+const LABEL_WIDTH = 72
+/** 标签名超过这个数量就倾斜 45°：横轴每个标签拿到的宽度开始不够排一行。 */
+const ROTATE_45_AT = 3
+/** 标签名超过这个数量就竖排 90°：45° 仍会相互压字，竖排每人只占一个字高。 */
+const ROTATE_90_AT = 10
+
 /**
- * 由横条构建 ECharts option。
+ * 横轴标签的旋转角度。
  *
- * **横向条形图**：标签名在纵轴，金额在横轴，`inverse: true` 让金额最大的排在最上面；
- * 标签名过长时截断，完整名称由 tooltip 与图下列表给出。**单系列**故不注册图例——
+ * 只影响文字排版，不参与过滤——无论旋转多少度，每个标签都会显示（`interval: 0`）。
+ */
+function labelRotate(count: number): number {
+  if (count > ROTATE_90_AT) {
+    return 90
+  }
+  return count > ROTATE_45_AT ? 45 : 0
+}
+
+/**
+ * 由竖条构建 ECharts option。
+ *
+ * **竖向条形图**：标签名在横轴（分类轴），金额在纵轴（数值轴），横轴顺序即
+ * {@link buildTagBarItems} 排好的金额降序（金额最大在最左）。标签名过长时截断、
+ * 标签多时旋转，完整名称由 tooltip 与图下列表给出。**单系列**故不注册图例——
  * 一张图只表达「收入」或「支出」，标题已经说明。
  *
- * @param spec 横条、主题、系列名与颜色令牌。
+ * @param spec 竖条、主题、系列名与颜色令牌。
  * @returns 可直接交给 `<v-chart :option>` 的 option。
  */
 export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
@@ -109,9 +129,27 @@ export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
   const barColor = colors[colorToken]
 
   return {
-    // containLabel 让纵轴标签宽度被算进容器，避免长标签被裁掉一截
-    grid: { left: 0, right: 12, top: 8, bottom: 0, containLabel: true },
+    // containLabel 让轴标签（含旋转后的横轴文字）算进容器，避免被裁掉一截
+    grid: { left: 0, right: 12, top: 16, bottom: 0, containLabel: true },
     xAxis: {
+      type: 'category',
+      data: bars.map((bar) => bar.name),
+      axisLabel: {
+        // 全部标签逐个显示：不因空间不足而自动跳过（不静默丢标签）
+        interval: 0,
+        rotate: labelRotate(bars.length),
+        color: colors['--color-heading'],
+        opacity: 0.8,
+        fontFamily: theme.fontFamily,
+        // 标签名是用户输入的自由文本：过长时截断，完整名称见 tooltip 与图下列表
+        width: LABEL_WIDTH,
+        overflow: 'truncate',
+      },
+      axisLine: { show: false },
+      axisTick: { show: false },
+      splitLine: { show: false },
+    },
+    yAxis: {
       type: 'value',
       axisLabel: {
         color: colors['--color-heading'],
@@ -122,23 +160,6 @@ export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
       axisLine: { show: false },
       axisTick: { show: false },
       splitLine: { lineStyle: { color: colors['--color-border'] } },
-    },
-    yAxis: {
-      type: 'category',
-      // 金额最大的排在最上面（分类轴默认从下往上）
-      inverse: true,
-      data: bars.map((bar) => bar.name),
-      axisLabel: {
-        color: colors['--color-heading'],
-        opacity: 0.8,
-        fontFamily: theme.fontFamily,
-        // 标签名是用户输入的自由文本：过长时截断，完整名称见 tooltip 与图下列表
-        width: 120,
-        overflow: 'truncate',
-      },
-      axisLine: { show: false },
-      axisTick: { show: false },
-      splitLine: { show: false },
     },
     tooltip: {
       trigger: 'item',
@@ -166,12 +187,12 @@ export function buildTagBarOption(spec: TagBarSpec): TagBarOption {
         name: title,
         type: 'bar',
         data: bars.map((bar) => bar.amount),
-        // 细条：条数多时不至于把画布糊成一片色块
-        barMaxWidth: 16,
+        // 竖条最宽 32px：条数多时自然变窄，条数少时不至于细成一根针
+        barMaxWidth: 32,
         itemStyle: {
           color: barColor,
-          // 横向条形图只圆「数据端」（右端），起点仍贴住 0 基线
-          borderRadius: [0, 4, 4, 0],
+          // 竖向条形图只圆「数据端」（顶端），起点仍贴住 0 基线
+          borderRadius: [4, 4, 0, 0],
         },
         emphasis: { itemStyle: { color: barColor } },
       },

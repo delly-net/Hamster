@@ -875,9 +875,10 @@ is unknown or not yours.
 
 The `/reports` page is the same four questions as the daily report, asked at **month** granularity: a
 month range, account and tag filters, then category pies (every category, no "Other" fold), tag bar
-charts (every tag, no fold), a month-by-month line and a table with a range total. It shares the daily
-report's aggregation kernel — candidate rows, category totals
-and tag totals each exist once — and differs only in (a) the grouping key (`new DateTime(day.Year,
+charts (every tag, no fold; tag names on the x-axis, amounts on the y-axis — rotated and truncated when
+crowded, with full names in the tooltip and the list below), a month-by-month line and a table with a
+range total. It shares the daily report's aggregation kernel — candidate rows, category totals and tag
+totals each exist once — and differs only in (a) the grouping key (`new DateTime(day.Year,
 day.Month, 1)` over the same `LocalDay.DateOf` conversion) and (b) the range limits:
 
 | Endpoint | Auth | Description |
