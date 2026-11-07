@@ -38,6 +38,13 @@ public interface ITagService
     /// <remarks>
     /// 按主键升序而不是另设排序列：理由与 <see cref="ICategoryService.ListByAccountSetAsync"/> 相同——
     /// 标签全部由用户自己建立，建立先后即是最自然的次序。
+    /// <para>
+    /// **返回的实体带使用统计列**（<see cref="Tag.IncomeUsageCount"/> / <see cref="Tag.ExpenseUsageCount"/>），
+    /// 但**本方法不按统计排序**：管理页要的是建立先后。按常用程度倒序只发生在记账表单与筛选区的
+    /// 选择候选上，由前端用这两列客户端排序（见 <c>ui/src/stores/tags.ts</c>）——
+    /// 让服务端按「当前记账类型」排序，就得为每个调用点各开一个参数、还要在管理页显式绕开它，
+    /// 反而把选择器的排序诉求泄漏进字典服务。
+    /// </para>
     /// </remarks>
     Task<IReadOnlyList<Tag>> ListByAccountSetAsync(
         int accountSetId,

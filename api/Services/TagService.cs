@@ -108,6 +108,10 @@ public sealed class TagService(ISqlSugarClient db) : ITagService
             // 自动创建与手工新建共用本方法，两种来路都一律启用：
             // 不存「建出来就是停用的」这种意外状态
             IsActive = true,
+            // 使用统计列在库上可空（既有表加列），此处显式写 0：
+            // 新标签还没有任何交易挂过它。不写的话该行会是 NULL，读回时绑不上非空 int。
+            IncomeUsageCount = 0,
+            ExpenseUsageCount = 0,
         };
 
         tag.Id = await db.Insertable(tag).ExecuteReturnIdentityAsync(cancellationToken);
@@ -121,6 +125,8 @@ public sealed class TagService(ISqlSugarClient db) : ITagService
         CancellationToken cancellationToken = default)
     {
         // 只更新名称：account_set_id 是标签的归属，不在参数中（见 ITagService.UpdateAsync 的说明）
+        // 使用统计列同样不在 SetColumns 里——它们是派生数据，只由 TransactionService 随交易增减，
+        // 字典维护不得触碰（否则改名会把计数清零或覆盖成旧实体上的陈旧值）
         var affected = await db.Updateable<Tag>()
             .SetColumns(target => new Tag { Name = name.Trim() })
             .Where(target => target.Id == tag.Id)
@@ -135,6 +141,8 @@ public sealed class TagService(ISqlSugarClient db) : ITagService
         bool isActive,
         CancellationToken cancellationToken = default)
     {
+        // 只切换启用标志：停用 / 启用**不改动使用统计**——历史流水仍是这些统计的来路，
+        // 停用只是「不再供新记账选择」（改动会与 DatabaseInitializer 的重算结果冲突）
         var affected = await db.Updateable<Tag>()
             .SetColumns(target => new Tag { IsActive = isActive })
             .Where(target => target.Id == tag.Id)

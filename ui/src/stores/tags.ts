@@ -11,11 +11,17 @@
  * 而一笔交易可以有多个标签（落在 `hamster_transaction_tag` 子表里）。
  *
  * 标签**不区分记账类型**：同一份词汇表供收入/支出/转账三类共用。
+ *
+ * **使用统计只用于选择候选排序**：后端为每个标签维护收入、支出两个累计次数
+ * （挂过该标签的收入/支出交易笔数，转账与期初不计）。本文件提供按统计倒序的客户端排序工具，
+ * 由记账表单、改账弹窗与筛选区在选择候选时调用；标签管理页**不显示、也不按它排序**，
+ * 后端的列表顺序仍是从建立先后（主键升序）。
  */
 
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { request } from '@/api/http'
+import type { TransactionType } from '@/stores/entries'
 
 /**
  * 标签（后端不回传内部明细）。
@@ -29,8 +35,82 @@ export interface Tag {
   name: string
   /** 是否启用；`false` 表示已停用（软删除）。 */
   isActive: boolean
+  /**
+   * 收入记账累计使用次数：挂过本标签的收入**交易笔数**。
+   * 后端派生数据，转账与期初余额不计，已停用的标签照常计数。
+   */
+  incomeUsageCount: number
+  /**
+   * 支出记账累计使用次数：挂过本标签的支出**交易笔数**。口径与 {@link incomeUsageCount} 对称。
+   */
+  expenseUsageCount: number
   /** 创建时间（UTC，ISO 8601）。 */
   createdAt: string
+}
+
+/**
+ * 选择候选的排序依据：按哪一列使用统计倒序。
+ *
+ * - `income`：收入记账表单，按收入次数；
+ * - `expense`：支出记账表单，按支出次数；
+ * - `total`：两类次数之和——转账没有收支之分，筛选区也不区分方向，都用它。
+ */
+export type TagUsageBasis = 'income' | 'expense' | 'total'
+
+/**
+ * 按给定依据取一个标签的使用次数。
+ *
+ * @param tag 标签。
+ * @param basis 排序依据。
+ * @returns 用于比较的次数。
+ */
+export function tagUsageCount(tag: Tag, basis: TagUsageBasis): number {
+  if (basis === 'income') {
+    return tag.incomeUsageCount
+  }
+  if (basis === 'expense') {
+    return tag.expenseUsageCount
+  }
+  return tag.incomeUsageCount + tag.expenseUsageCount
+}
+
+/**
+ * 把标签按使用统计**倒序**排出一份新的选择候选。
+ *
+ * 次数相同时按主键升序（即建立先后）——「常用」排序之外仍需一个**确定**次序，
+ * 否则同次数的标签每次渲染都可能换位置，选择框里的位置记不住。
+ *
+ * **不修改入参**：store 里的 `tags` 是标签管理页与筛选区共用的同一份数组，
+ * 就地排序会顺带改掉管理页的显示次序。
+ *
+ * @param tags 标签列表（通常就是 `tagsStore.tags`）。
+ * @param basis 排序依据。
+ * @returns 排好序的新数组。
+ */
+export function sortTagsByUsage(tags: readonly Tag[], basis: TagUsageBasis): Tag[] {
+  return [...tags].sort(
+    (left, right) =>
+      tagUsageCount(right, basis) - tagUsageCount(left, basis) || left.id - right.id,
+  )
+}
+
+/**
+ * 某类记账对应的排序依据。
+ *
+ * 收入看收入次数、支出看支出次数；转账与期初没有收支方向，取两者之和。
+ * 期初余额不从表单产生（系统生成、无标签），此分支只为让类型穷尽、不必在调用点判空。
+ *
+ * @param type 记账类型。
+ * @returns 排序依据。
+ */
+export function tagUsageBasisFor(type: TransactionType): TagUsageBasis {
+  if (type === 'Income') {
+    return 'income'
+  }
+  if (type === 'Expense') {
+    return 'expense'
+  }
+  return 'total'
 }
 
 /**

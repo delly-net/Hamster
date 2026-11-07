@@ -82,7 +82,11 @@ public sealed class TagEndpoints : IEndpoint
                 "未携带时返回 400。" +
                 "**不区分收入/支出/转账**：同一份字典三类记账共用，不给标签加类型维度。" +
                 "标签**没有可见性维度**：账套内所有成员看到的是同一份完整列表，不存在他人私有的标签。" +
-                "**一笔交易的标签不在这里**：本端点只回字典，交易挂了哪些标签见 GET /api/entries 的 tags 字段。");
+                "**一笔交易的标签不在这里**：本端点只回字典，交易挂了哪些标签见 GET /api/entries 的 tags 字段。" +
+                "每个标签附带 incomeUsageCount / expenseUsageCount 两个使用统计：" +
+                "分别是挂过该标签的收入、支出**交易笔数**，转账与期初余额不计，" +
+                "同一笔交易挂同一标签只算一次，已停用的标签照常统计。" +
+                "**服务端不按统计排序**（列表仍是建立先后），这两个字段只供前端在选择候选里倒序排列。");
 
         group.MapPost("", async (
                 TagRequest request,
@@ -349,16 +353,26 @@ public sealed record TagUpdateRequest(string? Name);
 /// <param name="AccountSetId">所属账套主键；标签按账套隔离，此值恒等于当前请求账套。</param>
 /// <param name="Name">标签名称。</param>
 /// <param name="IsActive">是否启用；<c>false</c> 表示已停用（软删除）。</param>
+/// <param name="IncomeUsageCount">
+/// 收入记账累计使用次数：挂过本标签的收入**交易笔数**。
+/// 转账与期初余额不计，已停用的标签照常计数。
+/// </param>
+/// <param name="ExpenseUsageCount">
+/// 支出记账累计使用次数：挂过本标签的支出**交易笔数**。口径与 <paramref name="IncomeUsageCount"/> 对称。
+/// </param>
 /// <param name="CreatedAt">创建时间（UTC，ISO 8601）。</param>
 /// <remarks>
 /// **不区分记账类型**：本 DTO 刻意没有 type 字段，同一份字典供收入/支出/转账三类共用。
+/// 两个使用统计字段是**派生数据**，不构成标签的类型或维度，只用于选择候选排序。
 /// <para>
-/// 也**没有排序字段**：标签按主键（建立先后）呈现，理由见
-/// <see cref="ITagService.ListByAccountSetAsync"/>。
+/// **两个统计字段不是排序字段**：本端点的列表仍按主键（建立先后）返回，理由见
+/// <see cref="ITagService.ListByAccountSetAsync"/>。按统计倒序是**前端选择器的呈现方式**：
+/// 记账表单按当前记账类型取对应的那一列（转账与筛选区用两列之和），
+/// 标签管理页不显示、也不按它排序。
 /// </para>
 /// <para>
-/// 与 <see cref="CategoryDto"/> 逐字同构（只有名称与文案不同）——本 DTO 描述的是**字典里的一条标签**，
-/// 「某笔交易挂了哪些标签」是另一件事，见 <c>EntryDto.Tags</c>。
+/// 与 <see cref="CategoryDto"/> 的差异仅在这两个统计字段（见 <see cref="Tag"/>）——
+/// 本 DTO 描述的是**字典里的一条标签**， 「某笔交易挂了哪些标签」是另一件事，见 <c>EntryDto.Tags</c>。
 /// </para>
 /// </remarks>
 public sealed record TagDto(
@@ -366,6 +380,8 @@ public sealed record TagDto(
     int AccountSetId,
     string Name,
     bool IsActive,
+    int IncomeUsageCount,
+    int ExpenseUsageCount,
     DateTime CreatedAt)
 {
     /// <summary>由实体构造 DTO。</summary>
@@ -376,6 +392,8 @@ public sealed record TagDto(
         tag.AccountSetId,
         tag.Name,
         tag.IsActive,
+        tag.IncomeUsageCount,
+        tag.ExpenseUsageCount,
         // 从 Sqlite 读回的时间为 DateTimeKind.Unspecified，显式标记为 UTC，
         // 保证序列化输出带 Z 后缀、语义不产生歧义（与 CategoryDto.From 一致）
         DateTime.SpecifyKind(tag.CreatedAt, DateTimeKind.Utc));

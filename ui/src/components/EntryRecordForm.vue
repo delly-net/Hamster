@@ -47,7 +47,13 @@ import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { useCurrenciesStore } from '@/stores/currencies'
 import { RECENT_SAME_TYPE_LIMIT, useEntriesStore } from '@/stores/entries'
-import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
+import {
+  sortTagsByUsage,
+  splitTagRefs,
+  tagUsageBasisFor,
+  useTagsStore,
+  type TagRef,
+} from '@/stores/tags'
 import {
   TRANSACTION_MODE_META,
   useTransactionsStore,
@@ -239,11 +245,17 @@ const categoryPlaceholder = computed(() =>
 )
 
 /**
- * 标签候选：当前账套内的**启用**标签（停用的不再供新记账选择）。
+ * 标签候选：当前账套内的**启用**标签（停用的不再供新记账选择），按使用次数倒序。
  *
  * 不做任何本地过滤——标签与分类同理，没有可见性维度，也不随币种变化。
+ *
+ * **排序依据跟随当前记账类型**（见 `tagUsageBasisFor`）：收入表单看收入次数、支出看支出次数、
+ * 转账两类之和。排序是客户端做的，后端列表仍是建立先后（标签管理页要那个次序）；
+ * `sortTagsByUsage` 返回新数组，不改 store 里的那一份。
  */
-const tagOptions = computed(() => tagsStore.tags)
+const tagOptions = computed(() =>
+  sortTagsByUsage(tagsStore.tags, tagUsageBasisFor(props.mode)),
+)
 
 /**
  * 摘要候选：本账套内**本页这一种类型**用过的摘要（去重、按最近使用倒序）。

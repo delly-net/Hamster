@@ -322,16 +322,18 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             // 标签**整体替换**，且必须在**本事务内**：删掉旧的与插上新的之间若能被别的请求看见，
             // 那一刻这笔账看上去就是「标签丢了」。与明细的就地 UPDATE 不同，关联行没有排序依赖，
             // 故先删后插是安全的（见 TransactionTag 的类头注释）。
-            await ReplaceTagsAsync(transaction.Id, tags, cancellationToken);
+            await ReplaceTagsAsync(transaction.Id, transaction.Type, tags, cancellationToken);
         });
 
         return transaction;
     }
 
     /// <summary>
-    /// 把一笔交易的标签关联整体替换为 <paramref name="tags"/>（先删全部旧关联，再按集合插入）。
+    /// 把一笔交易的标签关联整体替换为 <paramref name="tags"/>（先删全部旧关联，再按集合插入），
+    /// 并同步增减两端标签的使用统计。
     /// </summary>
     /// <param name="transactionId">交易主键。</param>
+    /// <param name="type">交易类型；决定统计落在收入列还是支出列，转账与期初不统计。</param>
     /// <param name="tags">新的标签集合；<c>null</c> 或空集合即「清空标签」。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <remarks>
@@ -342,17 +344,38 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     /// 无论新集合是否为空都先删：**清空标签**是一个正常操作（用户把标签全删掉），
     /// 「空集合就直接返回」会让这个操作静默失效——旧关联留着不动。
     /// </para>
+    /// <para>
+    /// **统计按差集调整而非「旧的全减、新的全加」**：改账时标签常常只换掉一个，
+    /// 全减全加会让没动过的标签先 -1 再 +1，落在两次 SQL 之间被并发读到就会短暂变少；
+    /// 差集只触碰真正变化的标签。旧关联主键必须在**删除之前**读出来，删完就无从对比了。
+    /// </para>
     /// </remarks>
     private async Task ReplaceTagsAsync(
         int transactionId,
+        TransactionType type,
         IReadOnlyCollection<Tag>? tags,
         CancellationToken cancellationToken)
     {
+        // 旧关联先读出来：统计需要「旧集合 → 新集合」的差集，而删除之后旧集合就没了
+        var oldTagIds = await db.Queryable<TransactionTag>()
+            .Where(link => link.TransactionId == transactionId)
+            .Select(link => link.TagId)
+            .ToListAsync(cancellationToken);
+
         await db.Deleteable<TransactionTag>()
             .Where(link => link.TransactionId == transactionId)
             .ExecuteCommandAsync(cancellationToken);
 
-        await InsertTagsAsync(transactionId, tags, cancellationToken);
+        var inserted = await InsertTagsAsync(transactionId, tags, cancellationToken);
+
+        var oldSet = oldTagIds.ToHashSet();
+        var newSet = inserted.Select(tag => tag.Id).ToHashSet();
+
+        await AdjustTagUsageAsync(
+            type,
+            [.. newSet.Except(oldSet)],
+            [.. oldSet.Except(newSet)],
+            cancellationToken);
     }
 
     /// <summary>
@@ -361,6 +384,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     /// <param name="transactionId">交易主键（须已落库）。</param>
     /// <param name="tags">标签集合；<c>null</c> 与空集合同义。</param>
     /// <param name="cancellationToken">取消令牌。</param>
+    /// <returns>实际落库的标签（已去重、保持首次出现顺序）；空集合返回空列表。</returns>
     /// <remarks>
     /// 插入前按主键去重：同一笔账挂同一个标签是「同一事实记两遍」，
     /// 关联表上的唯一索引也只会在写入时抛异常（那是一个 500，而不是用户能理解的结果）。
@@ -369,8 +393,12 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
     /// 去重**保留首次出现的顺序**：虽然关联行没有排序依赖，但按去重后的顺序插入能让
     /// 日志与库内主键分配更容易对照，且实现上比用 <c>HashSet</c> 打乱顺序更直白。
     /// </para>
+    /// <para>
+    /// 返回归一化后的列表而不只是写库：调用方要用它算使用统计的差集，
+    /// 若在调用方再归一化一次，两处去重口径就得各自维护。
+    /// </para>
     /// </remarks>
-    private async Task InsertTagsAsync(
+    private async Task<List<Tag>> InsertTagsAsync(
         int transactionId,
         IReadOnlyCollection<Tag>? tags,
         CancellationToken cancellationToken)
@@ -378,7 +406,7 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
         var unique = NormalizeTags(tags);
         if (unique.Count == 0)
         {
-            return;
+            return unique;
         }
 
         await db.Insertable(unique
@@ -388,6 +416,82 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
                 TagId = tag.Id,
             })
             .ToList()).ExecuteCommandAsync(cancellationToken);
+
+        return unique;
+    }
+
+    /// <summary>
+    /// 按本次写入给标签的收入 / 支出使用次数加减，**与交易写入同事务**。
+    /// </summary>
+    /// <param name="type">交易类型；只有收入与支出参与统计。</param>
+    /// <param name="addedTagIds">本次新挂上的标签主键。</param>
+    /// <param name="removedTagIds">本次摘下的标签主键。</param>
+    /// <param name="cancellationToken">取消令牌。</param>
+    /// <remarks>
+    /// 口径集中在这里：**只有 <see cref="TransactionType.Income"/> 与
+    /// <see cref="TransactionType.Expense"/> 计数**，转账与期初余额不计数——
+    /// 它们不是「赚到 / 花掉」，把搬钱也算进来会让转账频繁的标签顶到候选最前。
+    /// <para>
+    /// 用 <c>SET 列 = 列 ± 1</c> 的原子 UPDATE，而不是「读实体、改属性、写回」：
+    /// 后者在并发记账时会丢失更新（两笔同时 +1 只加了一次）。减法的 WHERE 里带
+    /// <c>&gt; 0</c>，即使历史数据被外力改乱也不会把统计减成负数；
+    /// 每次启动 <c>DatabaseInitializer.BackfillTagUsageCounts</c> 还会全量重算兜底。
+    /// </para>
+    /// <para>
+    /// 加与减分两条语句而非一条 CASE：两者的 WHERE 条件不同（减法要 <c>&gt; 0</c>），
+    /// 且实际写入里通常只有其中一边非空。
+    /// </para>
+    /// </remarks>
+    private async Task AdjustTagUsageAsync(
+        TransactionType type,
+        IReadOnlyCollection<int> addedTagIds,
+        IReadOnlyCollection<int> removedTagIds,
+        CancellationToken cancellationToken)
+    {
+        if (type is not (TransactionType.Income or TransactionType.Expense))
+        {
+            return;
+        }
+
+        var added = addedTagIds.Distinct().ToArray();
+        var removed = removedTagIds.Distinct().ToArray();
+
+        if (type == TransactionType.Income)
+        {
+            if (added.Length > 0)
+            {
+                await db.Updateable<Tag>()
+                    .SetColumns(tag => new Tag { IncomeUsageCount = tag.IncomeUsageCount + 1 })
+                    .Where(tag => added.Contains(tag.Id))
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            if (removed.Length > 0)
+            {
+                await db.Updateable<Tag>()
+                    .SetColumns(tag => new Tag { IncomeUsageCount = tag.IncomeUsageCount - 1 })
+                    .Where(tag => removed.Contains(tag.Id) && tag.IncomeUsageCount > 0)
+                    .ExecuteCommandAsync(cancellationToken);
+            }
+
+            return;
+        }
+
+        if (added.Length > 0)
+        {
+            await db.Updateable<Tag>()
+                .SetColumns(tag => new Tag { ExpenseUsageCount = tag.ExpenseUsageCount + 1 })
+                .Where(tag => added.Contains(tag.Id))
+                .ExecuteCommandAsync(cancellationToken);
+        }
+
+        if (removed.Length > 0)
+        {
+            await db.Updateable<Tag>()
+                .SetColumns(tag => new Tag { ExpenseUsageCount = tag.ExpenseUsageCount - 1 })
+                .Where(tag => removed.Contains(tag.Id) && tag.ExpenseUsageCount > 0)
+                .ExecuteCommandAsync(cancellationToken);
+        }
     }
 
     /// <summary>
@@ -543,7 +647,15 @@ public sealed class TransactionService(ISqlSugarClient db) : ITransactionService
             }).ExecuteCommandAsync(cancellationToken);
 
             // 新建路径没有旧关联要删，故直接插（替换走 ReplaceTagsAsync）
-            await InsertTagsAsync(transaction.Id, tags, cancellationToken);
+            var insertedTags = await InsertTagsAsync(transaction.Id, tags, cancellationToken);
+
+            // 标签使用统计与关联行同事务加减：写进关联却漏掉统计，会让候选排序停在旧次序上，
+            // 而重启后的全量重算又会把它纠正——这种「重启前后不一致」正是要避免的
+            await AdjustTagUsageAsync(
+                transaction.Type,
+                [.. insertedTags.Select(tag => tag.Id)],
+                [],
+                cancellationToken);
         });
     }
 

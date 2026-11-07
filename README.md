@@ -427,7 +427,7 @@ account set, exactly like a category, so each account set keeps its own vocabula
 
 | Endpoint | Auth | Description |
 |---|---|---|
-| `GET /api/tags?includeInactive=false` | Bearer | Tags in the current account set, oldest first. `includeInactive=true` also returns deactivated ones |
+| `GET /api/tags?includeInactive=false` | Bearer | Tags in the current account set, oldest first. `includeInactive=true` also returns deactivated ones; each entry carries `incomeUsageCount` / `expenseUsageCount` |
 | `POST /api/tags` | Bearer | Create (201); body `{ name }`, at most 32 characters |
 | `PUT /api/tags/{id}` | Bearer | Rename only (204) — the body is just `{ name }`; the account set is immutable and **not on the request record**, so sending one has no effect |
 | `POST /api/tags/{id}/deactivate` | Bearer | Deactivate — soft delete (204) |
@@ -449,7 +449,7 @@ bound**, so tags live in a sub-table:
 
 | Table | Contents |
 |---|---|
-| `hamster_tag` | Tag dictionary: account set, name, active flag, created at |
+| `hamster_tag` | Tag dictionary: account set, name, active flag, income/expense usage counts, created at |
 | `hamster_transaction_tag` | Link row: transaction, tag. Unique on `(transaction_id, tag_id)` |
 
 **The link hangs off the transaction, not off the entry** (same reasoning as the category): a tag
@@ -466,6 +466,25 @@ name.
 Like categories, tags are **soft-deleted, never physically deleted** (history hangs off them), are
 **not seeded** (an empty dictionary plus create-on-type is the intended start), and are maintained by
 **any member of the account set** — there is no user-side / admin-side split.
+
+**Usage statistics.** `hamster_tag` carries `income_usage_count` / `expense_usage_count`, the number
+of **income / expense transactions** that ever carried the tag; `GET /api/tags` returns them as
+`incomeUsageCount` / `expenseUsageCount`. The rules:
+
+- **Only `Income` / `Expense` count** — transfers and opening balances are not "earned / spent";
+  a tag attached twice to the same transaction counts once; deactivated tags keep counting (their
+  history is still real usage).
+- **Adjusted in the same transaction as the tag links**: a create adds 1 to the tags it attaches,
+  an edit adjusts only the difference between the old and new sets (not "subtract all, add all");
+  decrements are guarded by `> 0` so a count can never go negative.
+- **Fully recomputed on every startup**: the two columns are derived data whose value depends only
+  on the link table and the transaction type, so startup runs one correlated-subquery `UPDATE` over
+  every row — this both backfills the columns added to an existing table and heals any drift.
+- **Sorting only.** `GET /api/tags` still returns tags oldest first and the tag management page
+  neither shows nor sorts by these columns. Descending-by-usage order is applied only to the
+  selection candidates in the entry form, the edit dialog and the filter panes, on the client,
+  choosing the column by the current bookkeeping type (income form → income count, expense form →
+  expense count, transfer and filters → the sum).
 
 ##### Transactions and entries
 
@@ -1360,6 +1379,13 @@ Tags need **no backfill**: a tag is not a column on `hamster_transaction`, so th
 table to alter — `hamster_tag` and `hamster_transaction_tag` are brand-new tables created by the same
 `InitTables` pass, and "no link row" already means exactly "untagged", which is the legitimate value.
 An account set that has never used tags simply has an empty dictionary, which is the intended start.
+
+**The two usage-count columns added later are the exception.** `income_usage_count` /
+`expense_usage_count` are new columns on an existing table, and both SQLite and PostgreSQL only add
+them as **nullable**, leaving existing tag rows NULL — which cannot bind to a non-null `int`.
+Startup therefore **fully recomputes** both columns (counting each tag against the link table and the
+transaction type). No migration script, and no separate "fill NULLs only" branch: the recomputed value
+depends only on the data, so every run converges to the same answer.
 
 The three settlement tables are likewise all-new (`hamster_settlement_task`,
 `hamster_settlement_transaction`, `hamster_settlement_entry`), so there are **no migrations and no

@@ -18,6 +18,12 @@ public static class DatabaseInitializer
     /// <summary>交易表表名（与 <see cref="Transaction"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
     private const string TRANSACTION_TABLE = "hamster_transaction";
 
+    /// <summary>标签表表名（与 <see cref="Tag"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
+    private const string TAG_TABLE = "hamster_tag";
+
+    /// <summary>交易-标签关联表表名（与 <see cref="TransactionTag"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
+    private const string TRANSACTION_TAG_TABLE = "hamster_transaction_tag";
+
     /// <summary>结算任务表表名（与 <see cref="SettlementTask"/> 上的 <c>SugarTable</c> 保持一致）。</summary>
     private const string SETTLEMENT_TASK_TABLE = "hamster_settlement_task";
 
@@ -144,6 +150,7 @@ public static class DatabaseInitializer
         RunStep(logger, failures, $"回填 {ACCOUNT_TABLE} 标志列", () => BackfillAccountFlags(db, options.DbType, logger));
         RunStep(logger, failures, $"回填 {ACCOUNT_TABLE} 币种列", () => BackfillAccountCurrency(db, options.DbType, logger));
         RunStep(logger, failures, $"回填 {TRANSACTION_TABLE} 修改时间列", () => BackfillTransactionUpdatedAt(db, options.DbType, logger));
+        RunStep(logger, failures, $"重算 {TAG_TABLE} 使用统计列", () => BackfillTagUsageCounts(db, logger));
 
         // 分类**刻意不播种、也不回填**：
         // - 不播种：分类是各家的业务语义（「餐饮」在两个账套里覆盖的范围可以完全不同），
@@ -368,6 +375,56 @@ public static class DatabaseInitializer
             logger.LogInformation(
                 "已把 {Count} 笔历史交易的最后修改时间回填为各自的创建时刻（「从未被修改过」的如实表达）",
                 affected);
+        }
+    }
+
+    /// <summary>
+    /// 按 <see cref="TransactionTag"/> 与交易类型**全量重算**标签的收入 / 支出使用次数。
+    /// </summary>
+    /// <param name="db">SqlSugar 客户端。</param>
+    /// <param name="logger">日志记录器。</param>
+    /// <remarks>
+    /// **每次启动都全量重算，而非「只回填 NULL」**——这两列是派生数据，重算的结果只取决于
+    /// 关联表与交易类型，没有用户输入会被覆盖。它同时承担三件事：
+    /// <list type="number">
+    /// <item>**迁移**：两列随本任务新增，既有库上的历史标签行在加列后是 NULL，不重算会绑定失败（同 <c>updated_at</c>）。</item>
+    /// <item>**自愈**：写入方在交易事务里增减计数，若曾因异常、直接改库或旧版本没有计数逻辑而偏离，重启即归位。</item>
+    /// <item>**口径统一**：把「只统计收入 / 支出、转账与期初不计」这条口径集中写在一处，避免两套实现漂移。</item>
+    /// </list>
+    /// <para>
+    /// **用一条相关子查询的 UPDATE 而不是把全部关联读进内存再逐条更新**：计数是
+    /// <c>COUNT(*)</c> 的直接结果，交给数据库一次算完，既不受标签 / 关联规模影响，
+    /// 也天然符合「同一笔交易挂同一标签只算一次」（关联表有 (transaction_id, tag_id) 唯一约束）。
+    /// </para>
+    /// <para>
+    /// 两种库的写法一致：<c>UPDATE 表 SET 列 = (SELECT COUNT(*) … WHERE link.tag_id = 表.id …)</c>
+    /// 在 Sqlite 与 PostgreSQL 上都是合法的相关子查询；<c>CAST(… AS INTEGER)</c> 在两边同样成立
+    /// （Sqlite 的 COUNT 返回 64 位整数，PostgreSQL 返回 bigint，显式转型避免类型漂移）。
+    /// 记账类型以参数传入而不拼进 SQL，避免魔数散落在语句里。
+    /// </para>
+    /// </remarks>
+    private static void BackfillTagUsageCounts(ISqlSugarClient db, ILogger logger)
+    {
+        var sql = $"""
+            UPDATE {TAG_TABLE}
+            SET income_usage_count = CAST(COALESCE((
+                    SELECT COUNT(*) FROM {TRANSACTION_TAG_TABLE} AS link
+                    INNER JOIN {TRANSACTION_TABLE} AS tx ON tx.id = link.transaction_id
+                    WHERE link.tag_id = {TAG_TABLE}.id AND tx.type = @income), 0) AS INTEGER),
+                expense_usage_count = CAST(COALESCE((
+                    SELECT COUNT(*) FROM {TRANSACTION_TAG_TABLE} AS link
+                    INNER JOIN {TRANSACTION_TABLE} AS tx ON tx.id = link.transaction_id
+                    WHERE link.tag_id = {TAG_TABLE}.id AND tx.type = @expense), 0) AS INTEGER)
+            """;
+
+        var affected = db.Ado.ExecuteCommand(
+            sql,
+            new SugarParameter("@income", (int)TransactionType.Income),
+            new SugarParameter("@expense", (int)TransactionType.Expense));
+
+        if (affected > 0)
+        {
+            logger.LogInformation("已重算 {Count} 个标签的收入 / 支出使用次数", affected);
         }
     }
 

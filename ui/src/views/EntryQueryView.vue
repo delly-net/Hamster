@@ -103,7 +103,7 @@ import {
   useEntriesStore,
   type Entry,
 } from '@/stores/entries'
-import { useTagsStore } from '@/stores/tags'
+import { sortTagsByUsage, useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
@@ -189,8 +189,10 @@ const accountOptions = computed(() =>
  * 含已停用项的理由与账户候选逐字相同：停用是「不再供新记账选择」，不是「历史上从未用过」，
  * 而本页查的正是历史——停用的标签仍挂在过去的账上，漏掉它会让那些账筛不出来。
  * 与账户候选的差别是**无需排除任何一类**：标签没有账本/往来那样的系统项，也没有可见性维度。
+ *
+ * **按使用次数倒序**，取收入与支出两类之和：筛选区不过问交易的记账类型，没有「当前类型」可依。
  */
-const tagOptions = computed(() => tagsStore.tags)
+const tagOptions = computed(() => sortTagsByUsage(tagsStore.tags, 'total'))
 
 const items = computed(() => entriesStore.page?.items ?? [])
 const totalCount = computed(() => entriesStore.page?.total ?? 0)

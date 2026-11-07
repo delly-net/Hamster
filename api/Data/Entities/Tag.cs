@@ -24,6 +24,13 @@ namespace Hamster.Api.Data.Entities;
 /// 删除采用**软删除**：以 <see cref="IsActive"/> 的停用/启用取代物理删除。
 /// 历史流水通过 <see cref="TransactionTag"/> 挂靠标签，物理删除会让既有明细的标签凭空消失。
 /// </para>
+/// <para>
+/// **与分类的唯一列差异是两列使用统计**（<see cref="IncomeUsageCount"/> /
+/// <see cref="ExpenseUsageCount"/>）：标签要在选择候选里按常用程度排序，
+/// 而分类没有这个诉求。两列是**派生数据**，不参与字典语义——
+/// 改名、停用、查重都不看它，唯一的写入方是 <c>TransactionService</c>（随交易增删标签同事务加减），
+/// 每次启动再由 <c>DatabaseInitializer</c> 全量重算一次。
+/// </para>
 /// </remarks>
 [SugarTable("hamster_tag")]
 [SugarIndex("idx_hamster_tag_account_set", nameof(AccountSetId), OrderByType.Asc)]
@@ -75,6 +82,35 @@ public sealed class Tag
     /// </remarks>
     [SugarColumn(ColumnName = "is_active")]
     public bool IsActive { get; set; }
+
+    /// <summary>
+    /// 收入记账累计使用次数：**挂过本标签的收入交易笔数**。用于记账表单的标签候选倒序排列。
+    /// </summary>
+    /// <remarks>
+    /// **只统计 <see cref="TransactionType.Income"/>**：转账与期初不计——
+    /// 它们不是「花掉/赚到」的语义，把转账算进来会让「搬钱」频繁的标签挤到候选最前。
+    /// 同一笔交易挂同一个标签只算一次（<see cref="TransactionTag"/> 有 (transaction_id, tag_id) 唯一约束）。
+    /// <para>
+    /// 已停用的标签**照常计数**：停用只是不再供新记账选择，历史流水仍是它的使用记录。
+    /// </para>
+    /// <para>
+    /// 列可空是因为**既有表加列**：PostgreSQL 不允许给非空表加 NOT NULL 列，
+    /// 故 <c>IsNullable = true</c>，C# 侧仍是非空 <see cref="int"/>，
+    /// 由启动回填与写入时的显式赋值保证不为 NULL（与 <see cref="Transaction.UpdatedAt"/> 同一口径）。
+    /// </para>
+    /// </remarks>
+    [SugarColumn(ColumnName = "income_usage_count", IsNullable = true)]
+    public int IncomeUsageCount { get; set; }
+
+    /// <summary>
+    /// 支出记账累计使用次数：**挂过本标签的支出交易笔数**。用于记账表单的标签候选倒序排列。
+    /// </summary>
+    /// <remarks>
+    /// 口径与 <see cref="IncomeUsageCount"/> 对称：只统计 <see cref="TransactionType.Expense"/>，
+    /// 已停用标签照常计数。
+    /// </remarks>
+    [SugarColumn(ColumnName = "expense_usage_count", IsNullable = true)]
+    public int ExpenseUsageCount { get; set; }
 
     /// <summary>
     /// 创建时间（UTC）。

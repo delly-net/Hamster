@@ -51,7 +51,7 @@ import { useCurrenciesStore } from '@/stores/currencies'
 // 标签合计的形状直接取日报表那一份：月报表与日报表的标签维度是同一个契约（见 `stores/monthlyReport.ts`）
 import type { ReportTagTotal } from '@/stores/dailyReport'
 import { useMonthlyReportStore } from '@/stores/monthlyReport'
-import { useTagsStore } from '@/stores/tags'
+import { sortTagsByUsage, useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
@@ -225,8 +225,12 @@ const moneyAccountOptions = computed(() => {
   )
 })
 
-/** 标签候选：当前账套内的标签，含已停用（理由同上）。 */
-const tagOptions = computed(() => tagsStore.tags)
+/**
+ * 标签候选：当前账套内的标签，含已停用（理由同上），按使用次数倒序。
+ *
+ * 排序取收入与支出两类之和：报表不区分记账类型。
+ */
+const tagOptions = computed(() => sortTagsByUsage(tagsStore.tags, 'total'))
 
 /**
  * 月份区间的校验文案。

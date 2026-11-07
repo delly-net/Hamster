@@ -44,7 +44,7 @@ import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import type { EntryCategoryTotal } from '@/stores/categoryTotals'
 import { useCurrenciesStore } from '@/stores/currencies'
 import { useDailyReportStore, type ReportTagTotal } from '@/stores/dailyReport'
-import { useTagsStore } from '@/stores/tags'
+import { sortTagsByUsage, useTagsStore } from '@/stores/tags'
 
 const accountSets = useAccountSetsStore()
 const accountsStore = useAccountsStore()
@@ -211,8 +211,12 @@ const moneyAccountOptions = computed(() => {
   )
 })
 
-/** 标签候选：当前账套内的标签，含已停用（理由同上）。 */
-const tagOptions = computed(() => tagsStore.tags)
+/**
+ * 标签候选：当前账套内的标签，含已停用（理由同上），按使用次数倒序。
+ *
+ * 排序取收入与支出两类之和：报表不区分记账类型。
+ */
+const tagOptions = computed(() => sortTagsByUsage(tagsStore.tags, 'total'))
 
 /**
  * 日期区间的校验文案。

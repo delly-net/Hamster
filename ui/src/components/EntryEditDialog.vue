@@ -34,7 +34,13 @@ import TagMultiSelect from '@/components/TagMultiSelect.vue'
 import { MONEY_ACCOUNT_TYPES, useAccountsStore } from '@/stores/accounts'
 import { useCategoriesStore } from '@/stores/categories'
 import { isEntryEditable, useEntriesStore, type Entry } from '@/stores/entries'
-import { splitTagRefs, useTagsStore, type TagRef } from '@/stores/tags'
+import {
+  sortTagsByUsage,
+  splitTagRefs,
+  tagUsageBasisFor,
+  useTagsStore,
+  type TagRef,
+} from '@/stores/tags'
 import {
   transactionModeMeta,
   useTransactionsStore,
@@ -282,8 +288,13 @@ const showInactiveCategoryHint = computed(() => {
  * 后端按名匹配含已停用项），多这一步纯属自找。此处一并列出。
  *
  * 不做其他过滤：标签没有可见性维度，也不随币种变化。
+ *
+ * **按使用次数倒序**，依据取**被改这一笔的类型**（与摘要候选同一口径）：
+ * 收入看收入次数、支出看支出次数、转账取两类之和。
  */
-const tagOptions = computed(() => tagsStore.tags)
+const tagOptions = computed(() =>
+  sortTagsByUsage(tagsStore.tags, tagUsageBasisFor(props.entry.transactionType)),
+)
 
 /** 主账户字段的提示文案。 */
 const primaryPlaceholder = computed(() =>

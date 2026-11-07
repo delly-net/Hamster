@@ -360,7 +360,7 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 | 接口 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /api/tags?includeInactive=false` | Bearer | 当前账套内的标签，按创建顺序正序；`includeInactive=true` 一并返回已停用的标签 |
+| `GET /api/tags?includeInactive=false` | Bearer | 当前账套内的标签，按创建顺序正序；`includeInactive=true` 一并返回已停用的标签；每项附带 `incomeUsageCount` / `expenseUsageCount` |
 | `POST /api/tags` | Bearer | 新建（201）；请求体 `{ name }`，32 位以内 |
 | `PUT /api/tags/{id}` | Bearer | 仅改名（204）——请求体只有 `{ name }`；账套不可改，且**不在请求记录上**，传了也不会被读取 |
 | `POST /api/tags/{id}/deactivate` | Bearer | 停用（软删除，204） |
@@ -378,7 +378,7 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 | 表 | 内容 |
 |---|---|
-| `hamster_tag` | 标签字典：所属账套、名称、启用标记、创建时间 |
+| `hamster_tag` | 标签字典：所属账套、名称、启用标记、收入/支出使用次数、创建时间 |
 | `hamster_transaction_tag` | 关联行：交易、标签。`(transaction_id, tag_id)` 唯一 |
 
 **关联行挂在交易上而非明细上**（理由同分类）：标签描述的是记账这一行为本身，而一笔转账会落两条明细——
@@ -391,6 +391,20 @@ export HAMSTER_JWT_KEY="<至少 32 字节的随机数据>"
 
 标签同样**只停用、不物理删除**（历史挂在它上面）、**不播种**（空字典 + 记账时按名自动创建就是预期的起点），
 且**账套内任何成员都可维护**——与分类一样不拆用户侧 / 管理侧。
+
+**使用统计**：`hamster_tag` 上有 `income_usage_count` / `expense_usage_count` 两列，
+分别是「挂过该标签的收入 / 支出**交易笔数**」，`GET /api/tags` 把它们作为
+`incomeUsageCount` / `expenseUsageCount` 一并返回。口径与维护方式：
+
+- **只有 `Income` / `Expense` 计数**：转账与期初余额不是「赚到 / 花掉」，不计；
+  同一笔交易挂同一标签只算一次；已停用的标签照常计数（历史流水仍是它的使用记录）。
+- **随交易写入同事务增减**：新建时给本次挂上的标签 +1，改账时只对「新挂了」与「摘掉了」的差集
+  ±1（不是全减全加）；减法带 `> 0` 守卫，不会减成负数。
+- **每次启动全量重算**：两列是派生数据，结果只取决于关联表与交易类型，启动时按一条相关子查询的
+  `UPDATE` 重算全部行——它同时完成「既有库加列后的回填」与「计数漂移后的自愈」。
+- **只用于候选排序**：`GET /api/tags` 的列表次序仍是从建立先后（主键升序），
+  标签管理页不显示、也不按它排序；按常用程度倒序只发生在记账表单、改账弹窗与筛选区的选择候选上，
+  由前端按「当前记账类型」取对应列（收入看收入次数、支出看支出次数、转账与筛选区取两类之和）。
 
 ##### 交易与流水
 
@@ -1092,6 +1106,12 @@ NULL 会让**整个交易列表查询** 500——与上面那些标志列的失�
 `hamster_tag` 与 `hamster_transaction_tag` 是两张全新的表，由同一趟 `InitTables` 建出，
 而「没有关联行」本就精确地表示「未挂标签」这一合法值。从未用过标签的账套只是空字典，
 那正是预期的起点。
+
+**后来加上的两列使用统计是个例外**：`hamster_tag` 的 `income_usage_count` /
+`expense_usage_count` 是既有表上的新增列，SQLite 与 PostgreSQL 都只把它补成**可空**，
+既有标签行因此是 NULL、读回时绑不上非空的 `int`。启动时会**全量重算**这两列
+（按关联表与交易类型逐标签数一遍），既不写迁移脚本、也不需要「只填 NULL」的单独判断——
+重算的结果只取决于数据本身，每次执行都收敛到同一个值。
 
 三张结算表同样全是新表（`hamster_settlement_task`、`hamster_settlement_transaction`、
 `hamster_settlement_entry`），故**没有迁移脚本、也没有回填**——既有表一处未动。
