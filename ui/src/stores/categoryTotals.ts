@@ -11,7 +11,7 @@
  * 全在后端一处定义——在这里再筛一遍，只会造出与后端不一致的假防线。
  *
  * 请求由 `api/http.ts` 自动附带 `X-Account-Set-Id`，故**本 store 不做账套判断**——
- * 切换账套后的重新查询由页面 watch 当前账套负责（与 `stores/incomeExpenses.ts` 同构）。
+ * 切换账套后的重新查询由页面 watch 当前账套负责（与 `stores/dailyFlows.ts` 同构）。
  */
 
 import { ref } from 'vue'

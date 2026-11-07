@@ -429,7 +429,7 @@ public sealed class EntryEndpoints : IEndpoint
 
                 var monthLabel = monthStart.ToString(MONTH_FORMAT, CultureInfo.InvariantCulture);
 
-                // 与分类合计、首页两张走势图同一条取舍：没有可用币种时返回空结果而不是 404，
+                // 与分类合计、首页走势图同一条取舍：没有可用币种时返回空结果而不是 404，
                 // 前端把「没有币种可看」与「这个月没有发生额」都呈现成空态。
                 var currency = await currencies.GetDefaultAsync(cancellationToken);
                 if (currency is null)
@@ -459,8 +459,8 @@ public sealed class EntryEndpoints : IEndpoint
             .WithSummary("按日收支合计")
             .WithDescription(
                 "返回当前账套、**系统默认币种**下某个自然月内**按天的收入、支出与净额**，" +
-                "供「月报表」页的按日折线图使用。" +
-                "**这是实时聚合**：直接统计交易明细，与首页的 `/api/income-expenses/daily` 不同，" +
+                "供首页的「收入与支出」面板使用（月报表页已改为按月聚合，不再调用本端点）。" +
+                "**这是实时聚合**：直接统计交易明细，与结算落库的 `/api/income-expenses/daily` 是两条来源，" +
                 "不依赖结算记录，也包含尚未结算的日期。" +
                 "**只统计收入与支出两类交易**（各取主账户方向那一条明细：收入取借方、支出取贷方）：" +
                 "转账是账户之间的搬运、没有单侧发生额，期初余额也不是本月发生额，" +
@@ -469,7 +469,7 @@ public sealed class EntryEndpoints : IEndpoint
                 "即使调用者是管理员也**不包含其他成员的个人账户**——与 `category-totals` 同一口径。" +
                 "金额：收入与支出**都是正数**（方向由字段名表达），`netTotal = incomeTotal − expenseTotal`。" +
                 "`days` **只含至少有一笔收支的日期**（按本地日期升序）：这是后端「缺日不补零」的口径，" +
-                "补零是呈现层的决定（月报表的数据源是实时的，空白日就是真实的 0）。" +
+                "补零是呈现层的决定（首页收支面板沿用不补零的画法，空白日就是真实的 0）。" +
                 "`month` 省略时取**服务器本地的当月**，格式为 `YYYY-MM`，非法取值返回 400；" +
                 "月份边界按服务器本地时区换算为 UTC，区间为 **[当月 1 日 0 点, 次月 1 日 0 点)**。" +
                 "没有可用币种时返回 `currencyCode = null` 与空数组，而不是 404。" +

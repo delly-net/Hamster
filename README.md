@@ -801,7 +801,8 @@ it would read the empty page as "there is nothing to show".
 
 ###### Daily income and expense totals
 
-The monthly report's line chart asks "how much came in and went out on each day of this month",
+The home page's income-and-expense panel (and formerly the monthly report's line chart) asks
+"how much came in and went out on each day of this month",
 which is an aggregation-shaped question rather than another parameter set on `GET /api/entries`
 (its row granularity is the entry and it must page). It therefore has a read-only endpoint of its own:
 
@@ -815,9 +816,10 @@ decision — this endpoint reads live data, where a blank day really is 0, so th
 This is **deliberately the opposite** of the settlement charts' "never fill a missing day": there a
 blank means "not settled yet", and filling it would draw "not counted" as "zero".
 
-**Neither report page calls this endpoint any more.** `/reports` and `/daily-reports` each have an
-aggregate endpoint that derives all three views in one fetch (see "Monthly report" and "Daily report"
-below); this one is kept unchanged for callers that only need the per-day totals.
+**The home page's income-and-expense panel calls this endpoint.** Neither report page does any more:
+`/reports` and `/daily-reports` each have an aggregate endpoint that derives all three views in one
+fetch (see "Monthly report" and "Daily report" below); this one is kept unchanged for callers that
+only need the per-day totals.
 
 **The filters match `GET /api/entries/category-totals` line for line** (same visibility resolution,
 same default currency, same primary-direction rule): only the system default currency, **public
@@ -830,8 +832,8 @@ exact C# boundary check, exactly like the rest of `LocalDay`.
 
 **This is a different source from the settlement data, and the two are not interchangeable**: the
 per-day records written by the settlement subscriptions contain only **days that have settled**, while
-the report has to show every posting up to today. The filters are identical; the only difference is
-live versus settled.
+the home panel and the reports have to show every posting up to today. The filters are identical; the
+only difference is live versus settled.
 
 Failure contract: 400 without the account-set header, 401 when not signed in, 403 when the account set
 is unknown or not yours.
@@ -1293,7 +1295,9 @@ included), signed-not-stored amounts (these are non-negative by construction), c
 overwrite-by-half-open-interval recomputation inside one transaction whose failure is rethrown by hand
 (`UseTranAsync` swallows it).
 
-**Endpoint `GET /api/income-expenses/daily?month=YYYY-MM`** (read-only; used by the home page) returns
+**Endpoint `GET /api/income-expenses/daily?month=YYYY-MM`** (read-only; reads the settlement records —
+the home page used to consume it and now reads the live `/api/entries/daily-flows` instead, so this
+endpoint is kept as a contract) returns
 both series in **one response**, and merges them on the **union** of the two tables' dates: the two
 subscriptions advance independently, so "income computed through the 5th, expenses through the 3rd" is a
 normal state, and the missing side reads as 0 for those days. An intersection would make the 4th and 5th
@@ -1317,8 +1321,9 @@ paging; "see everything" and "fix a posting" both go through the 【查看全部
 Its row filter is the **same one the entries page has always used** (`IsMoneyAccount`: fund and
 liability accounts), applied on the server, so "asset and liability accounts only" needs no second
 front-end judgement that could disagree with it. It is also **independent of the settlement data**:
-the two charts read what the settlement subscriptions wrote, while this list reads raw entries, so a
-brand-new account set shows rows here before any settlement has run.
+the total-asset chart reads what the settlement subscriptions wrote, while this list and the income /
+expense chart read raw entries live, so a brand-new account set shows rows here before any settlement
+has run.
 
 ##### Recent same-type transactions on the record pages
 

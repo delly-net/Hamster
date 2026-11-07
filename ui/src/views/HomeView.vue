@@ -8,31 +8,32 @@
  * 与空态文案随之改写成「上月」。判定按**浏览器本地日期**、只在 1 号生效（见
  * {@link resolveOverviewMonth}）——这是「这一页想看哪个月」的展示规则，零后端契约改动。
  * 右侧「最近交易」取的是最新若干条明细，与月份无关，不参与这次切月。
- * 上月**最后一天**的记录要等 1 号 01:00 的结算任务执行后才落库，故 1 号凌晨那几小时里
- * 这条数据可能还没出现——按既有的「缺日不补零」口径如实呈现，不做特殊处理。
+ * 上月**最后一天的总资产**记录要等 1 号 01:00 的结算任务执行后才落库，故 1 号凌晨那几小时里
+ * 它可能还没出现——按既有的「缺日不补零」口径如实呈现；收支与分类构成是实时聚合，不受此影响。
  *
  * **PC 上是左右两栏**（`grid-template-columns: minmax(0, 1fr) 380px`）：左栏自上而下是两张走势图
  * 与分类饼图，右栏固定 380px、只放最近交易。最近交易是补充信息，固定在右侧后，左侧的走势与构成
  * 可以连续往下读，不必在「结算数据」与「原始明细」两种时延之间来回横跳。窄于 1023px 时整页回落
  * 为单栏，右栏自然排到最下方（不隐藏任何内容）。
  *
- * 两块走势图的数据来自后端落库的**按天记录**（总资产结算订阅、收入结算订阅、支出结算订阅各自在
- * 结算事件后逐日重算）。「哪些账户算资产、哪些算负债、个人与公共如何相加、收支的符号」全部由后端
- * 一处定义（见 `ITotalAssetSettlementService` / `IIncomeSettlementService` /
- * `IExpenseSettlementService`），前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」这种
- * 谁也说不清的问题。图表部分只做一件事：把两条序列画出来。
+ * **两块走势图的数据来源不同**：总资产走势读结算订阅落库的按天记录（结算事件后逐日重算）；
+ * 收入与支出走势**直接实时聚合账目明细**（`GET /api/entries/daily-flows`），新记一笔账立即出现在
+ * 曲线上，不必等结算。「哪些账户算资产、哪些算负债、个人与公共如何相加、收支的符号」全部由后端
+ * 一处定义（总资产见 `ITotalAssetSettlementService`；收支见 `IEntryQueryService.ListDailyFlowsAsync`），
+ * 前端再算一遍就会出现「首页的曲线与账户页、明细页对不上」这种谁也说不清的问题。
+ * 图表部分只做一件事：把两条序列画出来。
  *
- * **分类构成与最近交易是另一套时延**：前者是整月一次 GROUP BY 的实时聚合
- * （`GET /api/entries/category-totals`），后者直接取原始明细（`GET /api/entries?order=desc`），
- * 都与结算无关。账套刚建好、一次结算都没走完时，上面两块走势图是空的而下面两块是满的——
- * 这不是矛盾，是两种数据来源的时延不同，界面上分别写明。
+ * **分类构成与最近交易同样是实时读法**：前者是整月一次 GROUP BY 的实时聚合
+ * （`GET /api/entries/category-totals`），后者直接取原始明细（`GET /api/entries?order=desc`）。
+ * 因此**只有总资产块带结算时延**——账套刚建好、一次结算都没走完时，总资产图是空的，
+ * 而收支曲线、分类构成与最近交易已经有内容。这不是矛盾，是两种数据来源的时延不同，界面上分别写明。
  *
  * **分类构成不做前端累加**：接口下发「分类 → 金额」，前端只把金额折成占比并折叠到最多 6 个扇区
  * （`components/categoryPie.ts`）。可见性、币种、交易类型与月份边界全在后端一处定义；
  * 拿明细页再算一遍，既会出现两种口径，也只能覆盖最近一页。
  *
  * **本页只有一处相加**：收支面板标题下那三个概览数字是**本月合计**（1 号看上月时为**上月全月合计**）
- * ——把该面板已落库的按天记录
+ * ——把该面板实时取回的按天数据
  * 加起来（口径见执行规范 #67「月度概览只做同口径按天相加并注明来源」，界面上一行小字写明口径）。
  * 总资产面板的三个数字则是**时点余额**（最新一天的总资产 / 净资产 / 负债），逐日相加没有业务含义
  * ——「本月总资产合计」不是一个数——故那里原样取最新一个数据点。除此之外本页不做任何金额汇总
@@ -49,18 +50,18 @@
  * 图例色块与本页样式用 `var(--token)` 上色、`TrendChart` 用同一个名字解析出 canvas 色值，
  * 于是「哪条线是什么颜色」全站只有一个定义处。
  *
- * **只画「确实落过库」的日子**：缺日不补零。补零会把「这天还没结算」画成「这天为 0」
- * ——图上是一根掉到底的线，那是错误信息，而不是「这一天没有数据」这一事实的如实呈现。
- * 因此曲线的横轴是**数据点序号**而不是日期序号：两天之间有间隙时，图上不会出现一段平地，
- * 代价是横轴的疏密与真实日期不完全等比——两端与中间标出实际日期作为补偿。
+ * **只画「确实有数据」的日子**：缺日不补零。总资产那里的空白表示「这天还没结算」，
+ * 收支那里的空白日确实没有发生额；本页沿用以数据点序号为横轴的画法，
+ * 横轴的疏密与真实日期不完全等比，代价由两端与中间标出实际日期来补偿。
  *
  * 金额一律用 `Intl.NumberFormat` 固定两位小数呈现，与后端的 `decimal(...,2)` 对齐；
  * 颜色只用 `base.css` 的语义令牌（总资产取品牌强调色、净资产取转账蓝、收入取绿、支出取红），
  * 不出现硬编码色值。**支出的线画在正半轴**：接口给的就是正数（「支出 500」就是 500），
  * 图上不替它加一个减号——加号的规矩要说给每个看数的人听，而图例上的「支出」二字已经说清了方向。
  *
- * 数据**可能不是今天的**：记录在结算事件之后才落库，故最新一天通常是「上一个结算日」。
- * 这一点写在副标题里，而不是让用户对着一个不动的数字猜。
+ * **总资产数据可能不是今天的**：记录在结算事件之后才落库，故最新一天通常是「上一个结算日」。
+ * 这一点写在副标题里，而不是让用户对着一个不动的数字猜。收支面板是实时的，
+ * 有当天记账时最新一天就是今天。
  *
  * **右栏的「最近交易」**：与走势图**没有任何数据关系**——它不依赖结算订阅，直接把当前账套里
  * 最新的若干条明细列出来（`GET /api/entries?order=desc`），故账套刚建好、一次结算都还没走完时，
@@ -84,13 +85,13 @@ import type { TrendSeriesSpec } from '@/components/trendChart'
 import { useAccountSetsStore } from '@/stores/accountSets'
 import { useCategoryTotalsStore } from '@/stores/categoryTotals'
 import type { EntryCategoryTotal } from '@/stores/categoryTotals'
+import { useDailyFlowsStore } from '@/stores/dailyFlows'
 import { RECENT_ENTRY_LIMIT, useEntriesStore } from '@/stores/entries'
-import { useIncomeExpensesStore } from '@/stores/incomeExpenses'
 import { useTotalAssetsStore } from '@/stores/totalAssets'
 
 const accountSets = useAccountSetsStore()
 const totalAssets = useTotalAssetsStore()
-const incomeExpenses = useIncomeExpensesStore()
+const dailyFlows = useDailyFlowsStore()
 const categoryTotals = useCategoryTotalsStore()
 const entries = useEntriesStore()
 
@@ -151,7 +152,7 @@ const errors = ref<{ assets: string; flows: string; categories: string; recent: 
 const loading = computed(
   () =>
     totalAssets.loading ||
-    incomeExpenses.loading ||
+    dailyFlows.loading ||
     categoryTotals.loading ||
     entries.recentLoading,
 )
@@ -174,7 +175,7 @@ interface ChartView {
   xLabels: string[]
   /**
    * 概览数字。**两个面板的口径不同**：总资产面板取**最新一个数据点**（三个数都是时点余额），
-   * 收支面板取**本月合计**（1 号时是**上月全月合计**；三个数都是按天记录相加，见
+   * 收支面板取**本月合计**（1 号时是**上月全月合计**；三个数都是按天数据相加，见
    * {@link flowsPanel}）。
    */
   stats: StatView[]
@@ -196,7 +197,7 @@ interface Panel {
   key: 'assets' | 'flows'
   title: string
   error: string
-  /** 无数据时提示位上的文案（区分「正在加载」「没有币种」「本月还没结算数据」）。 */
+  /** 无数据时提示位上的文案（区分「正在加载」「没有币种」「本月还没数据」）。 */
   emptyHint: string
   /** 图表；`null` 表示无可画的数据。 */
   chart: ChartView | null
@@ -207,7 +208,7 @@ const period = computed(() => {
   // 几块数据查的是同一台服务器的同一个月，取哪个都行；先有值的那个先算。
   // 分类构成补在最后：它不依赖结算，账套刚建好时可能只有它有月份
   const month =
-    totalAssets.daily?.month ?? incomeExpenses.daily?.month ?? categoryTotals.totals?.month
+    totalAssets.daily?.month ?? dailyFlows.daily?.month ?? categoryTotals.totals?.month
   if (month === undefined) {
     // 数据还没回来（或全部失败）时，至少别把「1 号看上月」说成本月
     return overviewMonthLabel.value
@@ -278,7 +279,7 @@ function assetsPanel(): Panel {
     emptyHint: emptyHint(
       totalAssets.loading,
       totalAssets.daily?.currencyCode,
-      '总资产由结算订阅在每个结算日之后按天落库，账套尚未走完一次结算时这里是空的。',
+      '还没有结算数据：总资产由结算订阅在每个结算日之后按天落库，账套尚未走完一次结算时这里是空的。',
     ),
     chart:
       latest === undefined
@@ -319,22 +320,25 @@ function assetsPanel(): Panel {
 /**
  * 收支面板。
  *
- * **支出线与收入线同在正半轴**：接口给的两个金额都是正数（见后端 `IncomeExpenseDailyPoint`），
+ * **数据来自实时聚合**：`GET /api/entries/daily-flows` 直接统计交易明细（默认币种、公共 + 本人个人、
+ * 资金 / 负债账户、只计收入与支出的主方向），新记一笔账刷新后立即出现；不再读收入 / 支出结算订阅
+ * 落库的按天记录，故没有「尚未结算」这一层时延。
+ *
+ * **支出线与收入线同在正半轴**：接口给的两个金额都是正数（见后端 `EntryDailyFlowDto`），
  * 图上不再叠一层符号——「哪个是花出去的」由图例与颜色说清，而「这个月净赚多少」由净值那个数字回答。
  *
  * **三个概览数字是本月合计（1 号时是上月全月合计），不是最新一天的值**（本页唯一一处相加）：
- * 接口下发的每个数据点都是
- * **当日发生额**（见 `IncomeExpenseDaily` 的类型注释），故逐日相加即本月累计；
+ * 接口下发的每个数据点都是**当日发生额**（见 `DailyFlowPoint` 的类型注释），故逐日相加即本月累计；
  * 口径由执行规范 #67 定在前端——「月度概览只做同口径按天相加并注明来源」。
- * 不为此另开后端汇总接口：同一份按天记录再让后端算一遍，等于给同一个数字立第二个真源；
+ * 不为此另开后端汇总接口：同一份按天数据再让后端算一遍，等于给同一个数字立第二个真源；
  * 界面上那行 `statNote` 就是「注明来源」那半句。
  *
- * **合计不是「整月合计」**：`days` 缺日不补零（后端口径），故相加得到的只是**已落库的那些天**
- * 之和，即「截至最新结算日的本月累计」。未结算的日子不计入是**如实呈现**，不是漏算。
+ * **合计只覆盖有收支的日子**：`days` 缺日不补零（后端口径），但实时数据下没有发生额的日子
+ * 对合计的贡献本来就是 0，故相加结果就是「本月截至今天」的累计。
  */
 function flowsPanel(): Panel {
-  const days = incomeExpenses.daily?.days ?? []
-  const currencyLabel = incomeExpenses.daily?.currencyCode ?? ''
+  const days = dailyFlows.daily?.days ?? []
+  const currencyLabel = dailyFlows.daily?.currencyCode ?? ''
   const latest = days[days.length - 1]
 
   // 逐日金额最多两位小数、一个自然月最多 31 个数据点，浮点累加的误差远小于两位小数的呈现精度
@@ -349,9 +353,9 @@ function flowsPanel(): Panel {
     title: `收入与支出（${overviewMonthLabel.value}，含公共账户）`,
     error: errors.value.flows,
     emptyHint: emptyHint(
-      incomeExpenses.loading,
-      incomeExpenses.daily?.currencyCode,
-      '收入与支出由各自的结算订阅在每个结算日之后按天落库，账套尚未走完一次结算时这里是空的。',
+      dailyFlows.loading,
+      dailyFlows.daily?.currencyCode,
+      '还没有收入与支出明细：收支实时取自账目明细，记一笔收入或支出后这里就会出现。',
     ),
     chart:
       latest === undefined
@@ -376,7 +380,7 @@ function flowsPanel(): Panel {
               { label: '支出', value: formatAmount(monthExpense) },
               { label: '净额', value: formatAmount(monthNet) },
             ],
-            statNote: `三个数字是${statsScope.value}：按天记录逐日相加，尚未结算的日子不计入。`,
+            statNote: `三个数字是${statsScope.value}：按账目明细实时汇总，转账与期初不计入。`,
             meta: buildMeta(formatDay(latest.date), days.length, currencyLabel),
             xLabels: days.map((day) => formatDay(day.date)),
             // 读屏用户拿不到那行口径小字的位置关系，故口径（本月合计 + 截至哪一天）必须写进这一句里，
@@ -399,12 +403,14 @@ const panels = computed<Panel[]>(() => [assetsPanel(), flowsPanel()])
  *
  * @param currencyCode 该面板最近一次结果的币种：`null` 是**后端明确回答「没有可用币种」**，
  *   `undefined` 是**还没查过**。两者必须分开——用 `??` 把 `null` 并到 `undefined` 上，
- *   「一个币种都没有」就会被当成「还没查」，用户看到一句与事实无关的「本月还没有结算数据」。
+ *   「一个币种都没有」就会被当成「还没查」，用户看到一句与事实无关的空态文案。
+ * @param noDataText 无数据时的完整句子（不含月份前缀）：总资产与收支两个面板的时延不同，
+ *   前者说「还没有结算数据」、后者说「还没有收入与支出明细」，故由调用方各自给全句。
  */
 function emptyHint(
   isLoading: boolean,
   currencyCode: string | null | undefined,
-  noDataHint: string,
+  noDataText: string,
 ): string {
   if (isLoading) {
     return '加载中…'
@@ -414,7 +420,7 @@ function emptyHint(
     return '还没有可用的币种，请先在管理端添加币种后记账。'
   }
 
-  return `${overviewMonthLabel.value}还没有结算数据：${noDataHint}`
+  return `${overviewMonthLabel.value}${noDataText}`
 }
 
 /** 把 `yyyy-MM-dd` 显示成 `M月D日`；无法解析时原样回显。 */
@@ -451,7 +457,7 @@ async function load(): Promise<void> {
     totalAssets.loadDaily(overviewMonth.value).catch((error: unknown) => {
       errors.value.assets = error instanceof ApiError ? error.message : '加载总资产失败'
     }),
-    incomeExpenses.loadDaily(overviewMonth.value).catch((error: unknown) => {
+    dailyFlows.loadDaily(overviewMonth.value).catch((error: unknown) => {
       errors.value.flows = error instanceof ApiError ? error.message : '加载收支失败'
     }),
     categoryTotals.loadTotals(overviewMonth.value).catch((error: unknown) => {
@@ -474,7 +480,7 @@ watch(
   () => accountSets.currentId,
   async (currentId) => {
     totalAssets.clear()
-    incomeExpenses.clear()
+    dailyFlows.clear()
     categoryTotals.clear()
     entries.clearRecent()
     errors.value = { assets: '', flows: '', categories: '', recent: '' }
@@ -500,13 +506,13 @@ onMounted(() => {
       <div>
         <h1 class="title">概览</h1>
         <p class="subtitle">
-          {{ period }}的走势与分类概览（含公共账户）。走势数据由结算订阅在每个结算日之后按天落库，
-          故最新一天通常是上一个结算日，而不是今天；分类构成与另附的最近
-          {{ RECENT_ENTRY_LIMIT }} 条明细则实时取自账目明细，与结算无关（PC 上最近交易位于右侧栏）。
+          {{ period }}的走势与分类概览（含公共账户）。总资产走势由结算订阅在每个结算日之后按天落库，
+          故最新一天通常是上一个结算日，而不是今天；收入与支出、分类构成与另附的最近
+          {{ RECENT_ENTRY_LIMIT }} 条明细则实时取自账目明细，新记账后刷新即可看到（PC 上最近交易位于右侧栏）。
         </p>
       </div>
       <div class="head-actions">
-        <!-- 本页只有「刷新」一个动作：数据由后端订阅落库，前端没有可触发的手段 -->
+        <!-- 本页只有「刷新」一个动作：收支是实时聚合，总资产由结算订阅落库、前端没有可触发的手段 -->
         <button type="button" class="ghost" :disabled="loading || !hasAccountSet" @click="load">
           {{ loading ? '刷新中…' : '刷新' }}
         </button>
@@ -561,7 +567,7 @@ onMounted(() => {
 
           <!--
             分类构成：与上面的走势图**不是同一套数据来源**——这里取整月一次 GROUP BY 的实时聚合，
-            不依赖结算，故账套刚建好时它可能已经有数，而走势图还是空的。
+            不依赖结算，故账套刚建好时它可能已经有数，而总资产图还是空的。
             折叠、占比与配色都交给 `CategoryPieChart`；本页只负责取数与三态。
           -->
           <section class="panel category-panel">
